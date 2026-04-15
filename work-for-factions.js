@@ -423,7 +423,12 @@ async function mainLoop(ns) {
             foundWork = await workForSingleFaction(ns, mostFavorFaction, false, false, targetRep);
         }
     }
-    if (!foundWork) { // If our hands are tied, wait and re-check later rather than farming arbitrary karma.
+    if (!foundWork) { // If our hands are tied, prefer one money infiltration over idling.
+        const currentMoney = (await getPlayerInfo(ns)).money;
+        if (await workForInfiltrationMoney(ns, currentMoney + 1))
+            foundWork = true;
+    }
+    if (!foundWork) { // If even infiltration is unavailable, wait and re-check later rather than farming arbitrary karma.
         ns.print(`INFO: Nothing to do. Sleeping for 30 seconds to see if magically we join a faction`);
         await ns.sleep(30000);
     }
@@ -1166,8 +1171,7 @@ async function pickBestMoneyInfiltrationLocation(ns, currentMoney = Number.POSIT
     const infiltrationByLocation = await getNsDataThroughFile(ns, dictCommand('ns.infiltration.getInfiltration(o)'), '/Temp/infiltration-info.txt', locationNames);
     const player = await getPlayerInfo(ns);
     return Object.values(infiltrationByLocation)
-        .filter(infiltration => infiltration?.difficulty < getCurrentInfiltrationDifficultyCap(infiltration, player.city, currentMoney) &&
-            infiltration?.reward?.sellCash > 0 &&
+        .filter(infiltration => infiltration?.reward?.sellCash > 0 &&
             canReachInfiltrationLocation(infiltration, player.city, currentMoney) &&
             !isLocationCoolingDown(infiltration.location?.name))
         .sort((a, b) => b.reward.sellCash - a.reward.sellCash || a.difficulty - b.difficulty)[0] ?? null;
@@ -1220,7 +1224,7 @@ async function workForInfiltrationMoney(ns, moneyTarget) {
         await ns.sleep(loopSleepInterval);
         return false;
     }
-    const status = `Using one high-value infiltration at "${bestLocation.location.name}" for money ` +
+    const status = `Using infiltration at "${bestLocation.location.name}" for money ` +
         `(current ${formatMoney(currentMoney)}, casino target ${formatMoney(moneyTarget)}, payout ~${formatMoney(bestLocation.reward.sellCash)}).`;
     if (lastFactionWorkStatus != status) {
         lastFactionWorkStatus = status;

@@ -9,7 +9,7 @@
 
 import { devConsole } from './helpers.js';
 
-const AUTOINFIL_VERSION = "autoinfil-2026-04-15-01";
+const AUTOINFIL_VERSION = "autoinfil-2026-04-15-02";
 
 const state = {
 	// Name of the company that's infiltrated.
@@ -53,7 +53,9 @@ function markProgressSend(progressKey, progressValue) {
 // Speed of game actions, in milliseconds.
 // Keep this conservative enough that the live client has time to commit state changes
 // between inputs, especially on long ECorp infiltrations.
-const speed = 50;
+const baseSpeed = 50;
+const extraInputDelay = 50;
+const speed = baseSpeed + extraInputDelay;
 
 // Small hack to save RAM.
 // This will work smoothly, because the script does not use
