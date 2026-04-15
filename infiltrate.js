@@ -1260,6 +1260,7 @@ function getRuntimeInfiltrationStage() {
 function endInfiltration() {
 	unwrapEventListeners();
 	state.company = "";
+	state.game = {};
 	state.started = false;
 }
 
@@ -1377,6 +1378,7 @@ function waitForStart() {
 	}
 
 	state.company = title.substr(13);
+	state.game = {};
 	state.started = true;
 	wrapEventListeners();
 
@@ -1393,33 +1395,30 @@ function playGame() {
 	const runtimeStageName = runtimeStage?.constructor?.name ?? null;
 
 	if (!screens.length) {
-		endInfiltration();
+		if (!runtimeStage) {
+			endInfiltration();
+		}
 		return;
 	}
-	if (screens[0].children.length < 3) {
+	const container = screens[0];
+	if (container.children.length < 3 && runtimeStageName !== "CountdownModel" && runtimeStageName !== "VictoryModel" && runtimeStageName !== "IntroModel") {
 		return;
 	}
 
-	const screen = screens[0].children[2];
+	const screen = container.children.length >= 3 ? container.children[2] : container.lastElementChild ?? container;
 	const h4 = getEl(screen, "h4");
+	const title = h4.length ? h4[0].textContent.trim().toLowerCase().split(/[!.(]/)[0].trim() : "";
 
-	if (!h4.length) {
+	if (runtimeStageName === "VictoryModel" || "infiltration successful" === title) {
 		endInfiltration();
 		return;
 	}
 
-	const title = h4[0].textContent.trim().toLowerCase().split(/[!.(]/)[0].trim();
-
-	if ("infiltration successful" === title) {
-		endInfiltration();
+	if (runtimeStageName === "CountdownModel" || "get ready" === title) {
 		return;
 	}
 
-	if ("get ready" === title) {
-		return;
-	}
-
-	let currentGameName = title;
+	let currentGameName = title || state.game.current || "";
 	if (runtimeStageName === "MinesweeperModel") {
 		currentGameName = runtimeStage.memoryPhase ? "remember all the mines" : "mark all the mines";
 	} else if (runtimeStageName === "SlashModel") {
@@ -1428,6 +1427,10 @@ function playGame() {
 		currentGameName = title === "type it" ? "type it" : "type it backward";
 	} else if (runtimeStageToGameName[runtimeStageName]) {
 		currentGameName = runtimeStageToGameName[runtimeStageName];
+	}
+
+	if (!currentGameName) {
+		return;
 	}
 
 	const game = infiltrationGames.find((game) => game.name === currentGameName);

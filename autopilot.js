@@ -617,7 +617,8 @@ export async function main(ns) {
                 let useXpOnlyMode = prioritizeHackForDaedalus || prioritizeHackForWd ||
                     // In BNs that give no money for hacking, always start daemon.js in this mode (except BN8, because TODO: --xp-only doesn't handle stock manipulation)
                     (bitNodeMults.ScriptHackMoney * bitNodeMults.ScriptHackMoneyGain == 0 && resetInfo.currentNode != 8);
-                if (!useXpOnlyMode) { // Otherwise, respect the configured interval / duration
+                const allowTimedXpMode = player.skills.hacking < 2500;
+                if (!useXpOnlyMode && allowTimedXpMode) { // Otherwise, respect the configured interval / duration while hack XP still has meaningful near-term value
                     const xpInterval = Number(options['xp-mode-interval-minutes']);
                     const xpDuration = Number(options['xp-mode-duration-minutes']);
                     const minutesInAug = getTimeInAug() / 60.0 / 1000.0;
@@ -626,6 +627,8 @@ export async function main(ns) {
                     // If daemon.js was previously running in hack exp mode, prepare a message indicating that we 're switching back
                     else if (existingDaemon?.args.includes("--xp-only"))
                         daemonRelaunchMessage = `Time is up for "xp-mode", Relaunching daemon.js normally to focus on earning money for ${xpInterval} minutes (--xp-mode-interval-minutes)`;
+                } else if (!useXpOnlyMode && existingDaemon?.args.includes("--xp-only")) {
+                    daemonRelaunchMessage = `Hack level (${player.skills.hacking}) is already high enough that timed "xp-mode" is no longer useful. Relaunching daemon.js normally to focus on earning money.`;
                 }
                 if (useXpOnlyMode) {
                     daemonArgs.push("--xp-only", "--silent-misfires", "--no-share");
@@ -685,7 +688,7 @@ export async function main(ns) {
         // Default work for faction args we think are ideal for speed-running BNs
         const workForFactionsArgs = [
             "--fast-crimes-only", // Essentially means we do mug until we can do homicide, then stick to homicide
-            "--get-invited-to-every-faction", // Join factions even we have all their augs. Good for having NeuroFlux providers
+            "--first", "Sector-12", // CashRoot Starter Kit is a strong cheap early aug and worth prioritizing
             "--no-company-work"
         ];
         if (!options['disable-casino'] && !ranCasino) workForFactionsArgs.push("--infiltrate-for-money-under", 300000);
@@ -837,9 +840,9 @@ export async function main(ns) {
 
         // If we previously attempted to reserve money for an augmentation purchase order, do a fresh facman run to ensure it's still available
         if (reservedPurchase && installCountdown <= Date.now()) {
-            log(ns, "INFO: Manually running faction-manager.js to ensure previously reserved purchase is still obtainable.");
+            log(ns, "INFO: Manually running faction-manager.js --purchase to lock in the reserved augmentation purchase.");
             ns.write(factionManagerOutputFile, "", "w"); // Reset the output file to ensure it isn't stale
-            const pid = launchScriptHelper(ns, 'faction-manager.js');
+            const pid = launchScriptHelper(ns, 'faction-manager.js', ['--purchase']);
             await waitForProcessToComplete(ns, pid, true); // Wait for the script to shut down (and output to be generated)
         }
 
@@ -917,6 +920,15 @@ export async function main(ns) {
             resetStatus = `We haven't been in this reset for long. We can do a quick reset immediately for a quick stat boost.\n${resetStatus}`;
             if (options['install-countdown'] > 30 * 1000 && !playerInGang)
                 options['install-countdown'] = 30 * 1000; // Install relatively quickly in this scenario (30s)
+        }
+
+        // If not ready to reset, but we can already afford some augmentations, buy them now and keep waiting for install timing later.
+        if (!shouldReset && (facman.affordable_count_ex_nf + facman.affordable_count_nf) > 0) {
+            log(ns, `INFO: Purchasing currently affordable augmentations now rather than waiting for the install threshold.`);
+            ns.write(factionManagerOutputFile, "", "w");
+            const pid = launchScriptHelper(ns, 'faction-manager.js', ['--purchase']);
+            await waitForProcessToComplete(ns, pid, true);
+            return reservedPurchase = 0;
         }
 
         // If not ready to reset, set a status with our progress and return

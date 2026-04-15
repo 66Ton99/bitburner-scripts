@@ -26,7 +26,7 @@ const argsSchema = [
     ['karma-threshold-for-gang-invites', -40000], // Prioritize working for gang invites once we have this much negative Karma
     ['disable-treating-gang-as-sole-provider-of-its-augs', false], // Set to true if you still want to grind for rep with factions that only have augs your gang provides
     ['infiltrate-for-money-under', 0], // If set, use company infiltration for money until this cash threshold is reached
-    ['max-infiltration-difficulty', 3.5], // Upper bound for adaptive company infiltration target selection.
+    ['max-infiltration-difficulty', 3.2], // Keep a safety margin under the game's 3.5 hard lock and favor stability over greed.
     ['no-bladeburner-check', false], // By default, will avoid working if bladeburner is active and "The Blade's Simulacrum" isn't installed
 ];
 
@@ -68,6 +68,7 @@ const factions = ["Illuminati", "Daedalus", "The Covenant", "ECorp", "MegaCorp",
 const cannotWorkForFactions = ["Church of the Machine God", "Bladeburners", "Shadows of Anarchy"]
 // These factions should ideally be completed in this order
 const preferredEarlyFactionOrder = [
+    "Sector-12", // CashRoot Starter Kit is a cheap unique early aug and worth forcing before other city factions
     "Netburners", // Improve hash income, which is useful or critical for almost all BNs
     "Tian Di Hui", "Aevum", // These give all the company_rep and faction_rep bonuses early game
     "Daedalus", // Once we have all faction_rep boosting augs, there's no reason not to work towards Daedalus as soon as it's available/feasible so we can buy Red Pill
@@ -145,7 +146,6 @@ export async function main(ns) {
     lastTravel = crimeCount = currentBitnode = 0;
     notifiedAboutDaedalus = playerInBladeburner = wasGrafting = false;
     recentHospitalizedLocations = {};
-
     // Process configuration options
     firstFactions = (options['first'] || []).map(f => f.replaceAll('_', ' ')); // Factions that end up in this list will be prioritized and joined regardless of their augmentations available.
     options.skip = (options.skip || []).map(f => f.replaceAll('_', ' '));
@@ -424,8 +424,7 @@ async function mainLoop(ns) {
         }
     }
     if (!foundWork) { // If our hands are tied, prefer one money infiltration over idling.
-        const currentMoney = (await getPlayerInfo(ns)).money;
-        if (await workForInfiltrationMoney(ns, currentMoney + 1))
+        if (await workForInfiltrationMoney(ns))
             foundWork = true;
     }
     if (!foundWork) { // If even infiltration is unavailable, wait and re-check later rather than farming arbitrary karma.
@@ -1148,11 +1147,11 @@ async function pickBestInfiltrationLocation(ns, remainingRep = Number.POSITIVE_I
 function compareRepInfiltrationTargets(a, b, remainingRep, currentCity) {
     const aStats = getRepInfiltrationTargetStats(a, remainingRep, currentCity);
     const bStats = getRepInfiltrationTargetStats(b, remainingRep, currentCity);
-    return aStats.runCount - bStats.runCount ||
-        aStats.travelPenalty - bStats.travelPenalty ||
+    return bStats.tradeRep - aStats.tradeRep ||
         aStats.difficulty - bStats.difficulty ||
-        aStats.overshoot - bStats.overshoot ||
-        bStats.tradeRep - aStats.tradeRep;
+        aStats.travelPenalty - bStats.travelPenalty ||
+        aStats.runCount - bStats.runCount ||
+        aStats.overshoot - bStats.overshoot;
 }
 
 function getRepInfiltrationTargetStats(infiltration, remainingRep, currentCity) {
@@ -1172,6 +1171,7 @@ async function pickBestMoneyInfiltrationLocation(ns, currentMoney = Number.POSIT
     const player = await getPlayerInfo(ns);
     return Object.values(infiltrationByLocation)
         .filter(infiltration => infiltration?.reward?.sellCash > 0 &&
+            infiltration?.difficulty < getCurrentInfiltrationDifficultyCap(infiltration, player.city, currentMoney) &&
             canReachInfiltrationLocation(infiltration, player.city, currentMoney) &&
             !isLocationCoolingDown(infiltration.location?.name))
         .sort((a, b) => b.reward.sellCash - a.reward.sellCash || a.difficulty - b.difficulty)[0] ?? null;
@@ -1224,8 +1224,11 @@ async function workForInfiltrationMoney(ns, moneyTarget) {
         await ns.sleep(loopSleepInterval);
         return false;
     }
+    const targetSummary = moneyTarget > currentMoney ?
+        `target ${formatMoney(moneyTarget)}, ` :
+        '';
     const status = `Using infiltration at "${bestLocation.location.name}" for money ` +
-        `(current ${formatMoney(currentMoney)}, casino target ${formatMoney(moneyTarget)}, payout ~${formatMoney(bestLocation.reward.sellCash)}).`;
+        `(current ${formatMoney(currentMoney)}, ${targetSummary}payout ~${formatMoney(bestLocation.reward.sellCash)}).`;
     if (lastFactionWorkStatus != status) {
         lastFactionWorkStatus = status;
         ns.print(status);
@@ -1257,7 +1260,7 @@ function devConsoleLog(message) {
 }
 
 function buildFactionManagerPurchaseArgs() {
-    const args = ["--purchase", "--ignore-stocks"];
+    const args = ["--purchase"];
     for (const stat of options['desired-stats'] || [])
         args.push("--stat-desired", stat);
     for (const aug of options['desired-augs'] || [])

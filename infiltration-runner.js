@@ -50,6 +50,10 @@ export async function main(ns) {
             await ns.sleep(100);
             continue;
         }
+        if (state == "start") {
+            await ns.sleep(100);
+            continue;
+        }
         if (state == "success") {
             const clicked = await clickInfiltrationRewardButton(ns, options.faction, options.cash);
             clearInfiltrationActiveLock(ns);
@@ -153,11 +157,26 @@ async function waitForInfiltrateCompanyButton(ns, timeout = 5000) {
 async function waitForInfiltrationToStart(ns, timeout = 1000) {
     const start = Date.now();
     while (Date.now() - start < timeout) {
-        if (await getInfiltrationUiState(ns) == "running")
+        const state = await getInfiltrationUiState(ns);
+        if (state == "running" || state == "start")
             return true;
         await ns.sleep(50);
     }
     return false;
+}
+
+async function clickInfiltrationStartButton(ns) {
+    return !!await getNsDataThroughFile(ns, `(() => {
+        const doc = eval("document");
+        const button = Array.from(doc.querySelectorAll("button"))
+            .find(btn => btn.textContent?.trim() === "Start");
+        if (!button || button.disabled) return false;
+        if (typeof button.click === "function") button.click();
+        button.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, cancelable: true, view: window }));
+        button.dispatchEvent(new MouseEvent("mouseup", { bubbles: true, cancelable: true, view: window }));
+        button.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true, view: window }));
+        return true;
+    })()`, '/Temp/click-infiltration-start.txt');
 }
 
 async function clickInfiltrationRewardButton(ns, factionName, takeCash = false) {
@@ -204,6 +223,8 @@ async function getInfiltrationUiState(ns) {
         const h4Text = Array.from(doc.querySelectorAll("h4")).map(el => el.textContent?.trim() || "");
         if (bodyText.includes("Infiltration was cancelled because you were hospitalized")) return "hospitalized";
         if (h4Text.some(text => text.toLowerCase() === "infiltration successful!")) return "success";
+        if (h4Text.some(text => text.startsWith("Infiltrating ")) &&
+            Array.from(doc.querySelectorAll("button")).some(btn => btn.textContent?.trim() === "Start")) return "start";
         if (bodyText.includes("Type it backward")) return "running";
         if (bodyText.includes("Enter the Code!")) return "running";
         if (bodyText.includes("Close the brackets.")) return "running";
