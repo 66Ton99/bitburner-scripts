@@ -524,6 +524,9 @@ export async function main(ns) {
                 "--reserve", 0, // Override to ignore the global reserve.txt. Any money we reserve can more or less safely live as stocks
             ]);
 
+        if (!findScript('infiltrate.js'))
+            launchScriptHelper(ns, 'infiltrate.js', ['--quiet']);
+
         // Launch sleeves and allow them to also ignore the reserve so they can train up to boost gang unlock speed
         if ((10 in unlockedSFs) && (2 in unlockedSFs) && !findScript('sleeve.js')) {
             let sleeveArgs = [];
