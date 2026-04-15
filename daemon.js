@@ -44,6 +44,7 @@ const argsSchema = [
     ['share-cooldown', 5000], // Wait before attempting to schedule more share threads (e.g. to free RAM to be freed for hack batch scheduling first)
     ['share-max-utilization', 0.8], // Set to 1 if you don't care to leave any RAM free after sharing. Will use up to this much of the available RAM
 
+    ['enable-hacknet-upgrade-manager', false], // By default, do not auto-launch hacknet-upgrade-manager.js from daemon/autopilot.
     ['disable-script', []], // The names of scripts that you do not want run by our scheduler
     ['run-script', []], // The names of additional scripts that you want daemon to run on home
 
@@ -351,6 +352,7 @@ export async function main(ns) {
         const reqRam = (ram) => homeServer.totalRam(/*ignoreReservedRam:*/true) >= ram;
         // Helper to decide whether we should launch one of the hacknet upgrade manager scripts.
         const shouldUpgradeHacknet = () =>
+            options['enable-hacknet-upgrade-manager'] &&
             bitNodeMults.HacknetNodeMoney > 0 && // Ensure hacknet is not disabled in this BN
             reqRam(Math.min(64, homeReservedRam + 6.1)) && // These scripts consume 6.1 GB and keep running a long time, so we want to ensure we have more than the home reservered RAM amount available if home reserved RAM is a small number
             getPlayerMoney(ns) > reservedMoney(ns); // Player money exceeds the reserve (otherwise it will sit there buying nothing)
