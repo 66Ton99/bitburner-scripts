@@ -1,4 +1,4 @@
-import { getConfiguration, getNsDataThroughFile, getFilePath, log } from './helpers.js'
+import { getConfiguration, getNsDataThroughFile, log } from './helpers.js'
 
 const argsSchema = [
     ['company', ''],
@@ -22,8 +22,11 @@ export async function main(ns) {
     ns.disableLog('singularity.goToLocation');
     ns.write(options['result-file'], JSON.stringify({ success: false, reason: 'started' }), 'w');
 
-    const infiltrationRunning = await getNsDataThroughFile(ns, `ns.scriptRunning(ns.args[0], ns.args[1])`, null, [getFilePath('infiltrate.js'), 'home']);
-    if (!infiltrationRunning)
+    const infiltrationAutomationActive = await getNsDataThroughFile(ns, `(() => {
+        const wnd = eval("window");
+        return !!wnd.tmrAutoInf;
+    })()`, '/Temp/infiltration-automation-active.txt');
+    if (!infiltrationAutomationActive)
         return finish(ns, options['result-file'], { success: false, reason: 'infiltrate.js-not-running' });
 
     if (!options.city || !options.company || (!options.cash && !options.faction))
@@ -39,8 +42,7 @@ export async function main(ns) {
     const startTs = Date.now();
     ns.write(infiltrationStartLockFile, `${startTs}`, 'w');
     ns.write(infiltrationActiveLockFile, `${startTs}`, 'w');
-    if (!await startInfiltrationFromCompanyPage(ns))
-        return finish(ns, options['result-file'], { success: false, reason: 'start-not-confirmed' });
+    await startInfiltrationFromCompanyPage(ns);
 
     while (true) {
         const state = await getInfiltrationUiState(ns);
@@ -70,6 +72,28 @@ export async function main(ns) {
 function finish(ns, resultFile, result) {
     ns.write(resultFile, JSON.stringify(result), 'w');
     return result.success;
+}
+
+function getDocument() {
+    return eval("document");
+}
+
+function getWindow() {
+    return eval("window");
+}
+
+function getText(element) {
+    return element?.textContent?.trim()?.replace(/\s+/g, " ") || "";
+}
+
+function clickElement(element) {
+    if (!element) return false;
+    const wnd = getWindow();
+    if (typeof element.click === "function") element.click();
+    element.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, cancelable: true, view: wnd }));
+    element.dispatchEvent(new MouseEvent("mouseup", { bubbles: true, cancelable: true, view: wnd }));
+    element.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true, view: wnd }));
+    return true;
 }
 
 async function goToCity(ns, cityName, allowTravel = false) {
@@ -137,44 +161,30 @@ async function waitForInfiltrationToStart(ns, timeout = 1000) {
 }
 
 async function clickInfiltrationRewardButton(ns, factionName, takeCash = false) {
-    const clickWorked = await getNsDataThroughFile(ns, `(async () => {
-        const doc = eval("document");
-        const desiredFaction = ns.args[0];
-        const takeCash = ns.args[1];
-        const clickElement = (element) => {
-            if (!element) return false;
-            if (typeof element.click === "function") element.click();
-            element.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, cancelable: true, view: window }));
-            element.dispatchEvent(new MouseEvent("mouseup", { bubbles: true, cancelable: true, view: window }));
-            element.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true, view: window }));
-            return true;
-        };
-        const getText = (element) => element?.textContent?.trim()?.replace(/\\s+/g, " ") || "";
-        const rewardButton = () => Array.from(doc.querySelectorAll("button")).find(btn => {
-            const text = getText(btn);
-            return takeCash ? text.includes("Sell for") : text.includes("Trade for");
-        });
-        const selectedFaction = () => getText(doc.querySelector('[role="combobox"]'));
-        if (!takeCash && selectedFaction() !== desiredFaction) {
-            const combo = doc.querySelector('[role="combobox"]');
-            if (combo) {
-                combo.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, cancelable: true, view: window }));
-                combo.dispatchEvent(new MouseEvent("mouseup", { bubbles: true, cancelable: true, view: window }));
-                combo.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true, view: window }));
-                await new Promise(resolve => setTimeout(resolve, 25));
-                const option = Array.from(doc.querySelectorAll('[role="option"]')).find(el => getText(el) === desiredFaction);
-                if (option) {
-                    clickElement(option);
-                    await new Promise(resolve => setTimeout(resolve, 25));
-                }
+    const doc = getDocument();
+    const rewardButton = () => Array.from(doc.querySelectorAll("button")).find(btn => {
+        const text = getText(btn);
+        return takeCash ? text.includes("Sell for") : text.includes("Trade for");
+    });
+    const selectedFaction = () => getText(doc.querySelector('[role="combobox"]'));
+
+    if (!takeCash && selectedFaction() !== factionName) {
+        const combo = doc.querySelector('[role="combobox"]');
+        if (combo) {
+            clickElement(combo);
+            await ns.sleep(25);
+            const option = Array.from(doc.querySelectorAll('[role="option"]')).find(el => getText(el) === factionName);
+            if (option) {
+                clickElement(option);
+                await ns.sleep(25);
             }
         }
-        const button = rewardButton();
-        if (button && !button.disabled && (takeCash || selectedFaction() === desiredFaction))
-            return clickElement(button);
-        return false;
-    })()`, '/Temp/click-infiltration-reward-target-faction.txt', [factionName, takeCash]);
-    return !!clickWorked;
+    }
+
+    const button = rewardButton();
+    if (button && !button.disabled && (takeCash || selectedFaction() === factionName))
+        return clickElement(button);
+    return false;
 }
 
 async function dismissHospitalizedDialog(ns) {

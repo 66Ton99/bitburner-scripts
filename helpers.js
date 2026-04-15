@@ -9,6 +9,27 @@ export function formatMoney(num, maxSignificantFigures = 6, maxDecimalPlaces = 3
     return num >= 0 ? "$" + numberShort : numberShort.replace("-", "-$");
 }
 
+export function isDevToolsOpen() {
+    try {
+        const wnd = eval("window");
+        if (!wnd) return false;
+        const widthGap = Math.abs((wnd.outerWidth || 0) - (wnd.innerWidth || 0));
+        const heightGap = Math.abs((wnd.outerHeight || 0) - (wnd.innerHeight || 0));
+        return widthGap > 160 || heightGap > 160;
+    } catch {
+        return false;
+    }
+}
+
+export function devConsole(method, ...args) {
+    if (!isDevToolsOpen()) return;
+    try {
+        const consoleRef = eval("console");
+        const fn = consoleRef?.[method];
+        if (typeof fn === "function") fn(...args);
+    } catch { }
+}
+
 const symbols = ["", "k", "m", "b", "t", "q", "Q", "s", "S", "o", "n", "e33", "e36", "e39"];
 
 /**
@@ -19,7 +40,7 @@ const symbols = ["", "k", "m", "b", "t", "q", "Q", "s", "S", "o", "n", "e33", "e
  **/
 export function formatNumberShort(num, maxSignificantFigures = 6, maxDecimalPlaces = 3) {
     if (typeof num !== "number") {
-        console.warn(`formatNumberShort called with "num" set to a non-numeric "${typeof num}" value ${JSON.stringify(num)}`);
+        devConsole('warn', `formatNumberShort called with "num" set to a non-numeric "${typeof num}" value ${JSON.stringify(num)}`);
         num = Number(num);
     }
     if (Math.abs(num) > 10 ** (3 * symbols.length)) // If we've exceeded our max symbol, switch to exponential notation

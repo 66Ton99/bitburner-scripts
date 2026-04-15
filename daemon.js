@@ -43,6 +43,7 @@ const argsSchema = [
     ['no-share', false],  // Disable sharing free ram to increase faction rep gain
     ['share-cooldown', 5000], // Wait before attempting to schedule more share threads (e.g. to free RAM to be freed for hack batch scheduling first)
     ['share-max-utilization', 0.8], // Set to 1 if you don't care to leave any RAM free after sharing. Will use up to this much of the available RAM
+    ['tail-go', false], // Open a tail window for go.js when it is launched
 
     ['enable-hacknet-upgrade-manager', false], // By default, do not auto-launch hacknet-upgrade-manager.js from daemon/autopilot.
     ['disable-script', []], // The names of scripts that you do not want run by our scheduler
@@ -361,7 +362,7 @@ export async function main(ns) {
         // Set up "asynchronous helpers" - standalone scripts to manage certain aspacts of the game. daemon.js launches each of these once when ready (but not again if they are shut down)
         asynchronousHelpers = [
             { name: "stats.js", shouldRun: () => reqRam(64), shouldTail: false }, // Adds stats not usually in the HUD (nice to have)
-            { name: "go.js", shouldRun: () => reqRam(64), minRamReq: 20.2 }, // Play go.js (various multipliers, but large dynamic ram requirements)
+            { name: "go.js", shouldRun: () => reqRam(64), minRamReq: 20.2, shouldTail: options['tail-go'] }, // Play go.js (various multipliers, but large dynamic ram requirements)
             { name: "stockmaster.js", shouldRun: () => reqRam(64), args: openTailWindows ? ["--show-market-summary"] : [] }, // Start our stockmaster
             { name: "hacknet-upgrade-manager.js", shouldRun: () => shouldUpgradeHacknet(), args: ["-c", "--max-payoff-time", "1h", "--interval", "0"], shouldTail: false }, // One-time kickstart of hash income by buying everything with up to 1h payoff time immediately
             { name: "spend-hacknet-hashes.js", shouldRun: () => reqRam(64) && 9 in dictSourceFiles, args: [], shouldTail: false }, // Always have this running to make sure hashes aren't wasted
