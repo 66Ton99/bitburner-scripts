@@ -213,8 +213,8 @@ export async function main(ns) {
             `prevent you from doing so for the rest of this BN. (Run with '--ignore-stanek' to bypass this warning.)`, true);
     else if (options.purchase && purchaseableAugs) {
         await purchaseDesiredAugs(ns);
-        ns.write(output_file, "", "w"); // Clear the file so it isn't misinterpreted on next reset.
-    } else if (!ignorePlayerData) { // Don't do this next part if we were "mocking" the player for this run
+    }
+    if (!ignorePlayerData) { // Don't do this next part if we were "mocking" the player for this run
         // Write a file that summarizes what augs we could afford if we could ascend right now. (used by autopilot.js)
         const augsAwaitingInstall = ownedAugmentations.slice(installedAugmentations.length); // Assumes augs are returned in purchased order
         // Infer the number of nf we have installed based on the current nf purchase level, minus the pending nf installs

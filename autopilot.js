@@ -685,8 +685,10 @@ export async function main(ns) {
         // Default work for faction args we think are ideal for speed-running BNs
         const workForFactionsArgs = [
             "--fast-crimes-only", // Essentially means we do mug until we can do homicide, then stick to homicide
-            "--get-invited-to-every-faction" // Join factions even we have all their augs. Good for having NeuroFlux providers
+            "--get-invited-to-every-faction", // Join factions even we have all their augs. Good for having NeuroFlux providers
+            "--no-company-work"
         ];
+        if (!options['disable-casino'] && !ranCasino) workForFactionsArgs.push("--infiltrate-for-money-under", 300000);
         // Relay the options to suppress tail windows and ignore bladeburner
         if (options['no-tail-windows']) workForFactionsArgs.push('--no-tail-windows');
         if (options['disable-bladeburner']) workForFactionsArgs.push("--no-bladeburner-check")
@@ -702,7 +704,8 @@ export async function main(ns) {
             rushGang = !options['disable-rush-gangs'] && !playerInGang;
             // Detect if a 'work-for-factions.js' instance is running with args that don't match our goal. We aren't too picky,
             // (so the player can run with custom args), but should have --crime-focus if (and only if) we're still working towards a gang.
-            const wrongWork = findScript('work-for-factions.js', !rushGang ? s => s.args.includes("--crime-focus") :
+            const wrongWork = findScript('work-for-factions.js', !rushGang ?
+                s => s.args.includes("--crime-focus") || !workForFactionsArgs.every(a => s.args.includes(a)) :
                 s => !rushGangsArgs.every(a => s.args.includes(a))); // Require all rushGangsArgs if we're not in a gang yet.
             // If running with the wrong args, kill it so we can start it with the desired args
             if (wrongWork) await killScript(ns, 'work-for-factions.js', null, wrongWork);
@@ -866,18 +869,24 @@ export async function main(ns) {
         const pendingAugCount = facman.affordable_count_ex_nf + facman.awaiting_install_count_ex_nf; // Excludes neuroflux levels
         const pendingNfCount = facman.affordable_count_nf + facman.awaiting_install_count_nf; // Only neuroflux levels
         const pendingAugInclNfCount = pendingAugCount + pendingNfCount; // Includes neuroflux levels
-        // Create a list of augmentations pending install or pending puchase to display. Group all nf augs into one.
+        // Create lists of augmentations already bought vs still affordable to buy. Group all NF levels into one entry per category.
         const strNF = "NeuroFlux Governor"
-        let augsToInstall = facman.awaiting_install_augs.filter(aug => aug != strNF)
-            .concat(...facman.affordable_augs.filter(aug => aug != strNF));
-        if (pendingNfCount > 0)
-            augsToInstall.push(`${strNF} (x${pendingNfCount})`)
+        let awaitingAugs = facman.awaiting_install_augs.filter(aug => aug != strNF);
+        let affordableAugs = facman.affordable_augs.filter(aug => aug != strNF);
+        if (facman.awaiting_install_count_nf > 0)
+            awaitingAugs.push(`${strNF} (x${facman.awaiting_install_count_nf})`)
+        if (facman.affordable_count_nf > 0)
+            affordableAugs.push(`${strNF} (x${facman.affordable_count_nf})`)
 
         // Determine whether we can afford enough augmentations to merit a reset
         let totalCost = facman.total_rep_cost + facman.total_aug_cost;
         const augSummary = `${pendingAugCount} of ${facman.unpurchased_count - 1} remaining augmentations` + // Unowned - 1 because we can always buy more Neuroflux
-            (pendingNfCount > 0 ? ` + ${pendingNfCount} levels of NeuroFlux.` : '.') +
-            (pendingAugCount > 0 ? `\n    Augs: [\"${augsToInstall.join("\", \"")}\"]` : '');
+            (pendingNfCount > 0 ? ` + ${pendingNfCount} levels of NeuroFlux.` : '.');
+        const augDetailLines = [];
+        if (awaitingAugs.length > 0)
+            augDetailLines.push(`\n  Awaiting install: [\"${awaitingAugs.join("\", \"")}\"]`);
+        if (affordableAugs.length > 0)
+            augDetailLines.push(`\n  Affordable now: [\"${affordableAugs.join("\", \"")}\"]`);
         let resetStatus = `Reserving ${formatMoney(totalCost)} to install ${augSummary}`
         let shouldReset = options['install-for-augs'].some(a => facman.affordable_augs.includes(a)) ||
             pendingAugCount >= augsNeeded || pendingAugInclNfCount >= augsNeededInclNf;
@@ -914,7 +923,8 @@ export async function main(ns) {
         if (!shouldReset) {
             setStatus(ns, `Currently at ${formatDuration(getTimeInAug())} since last aug. ` +
                 `Waiting for ${augsNeeded} new augs (or ${augsNeededInclNf} including NeuroFlux levels) before installing.` +
-                `\nCan currently get: ${augSummary}` + (pendingAugCount == 0 ? '' : `\n  Total Cost: ${formatMoney(totalCost)}`) +
+                `\nReady now: ${augSummary}` + augDetailLines.join("") +
+                ((facman.affordable_count_ex_nf + facman.affordable_count_nf) == 0 ? '' : `\n  Total Cost to buy remaining affordable augs: ${formatMoney(totalCost)}`) +
                 ` (\`run faction-manager.js\` for details)`, augSummary);
             return reservedPurchase = 0; // If we were previously reserving money for a purchase, reset that flag now
         }
@@ -989,8 +999,15 @@ export async function main(ns) {
         // Don't install if we're currently grafting an augmentation
         if (await checkIfGrafting(ns))
             return true;
+        const remainingNonNfAugs = Math.max(0, (facmanOutput.unpurchased_count || 0) - 1);
+        const affordableNowCount = (facmanOutput.affordable_count_ex_nf || 0) + (facmanOutput.affordable_count_nf || 0);
+        if (facmanOutput.awaiting_install_count > 0 && affordableNowCount == 0 && remainingNonNfAugs > 0) {
+            setStatus(ns, `Not installing yet because ${facmanOutput.awaiting_install_count} augmentations are already waiting to install, ` +
+                `but we cannot afford any additional purchases right now and still have ${remainingNonNfAugs} non-NeuroFlux augmentations left to buy.`);
+            return true;
+        }
         // Are we close to being able to afford 4S TIX data?
-        if (!have4STixApi) have4STixApi = await getNsDataThroughFile(ns, `ns.stock.has4SDataTixApi()`);
+        if (!have4STixApi) have4STixApi = await getNsDataThroughFile(ns, `ns.stock.has4SDataTIXAPI()`);
         if (!options['disable-wait-for-4s'] && !have4STixApi) {
             if (!have4SData) have4SData = await getNsDataThroughFile(ns, `ns.stock.has4SData()`);
             const totalWorth = player.money + await getStocksValue(ns);
