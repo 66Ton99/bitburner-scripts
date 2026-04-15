@@ -445,11 +445,12 @@ async function earnFactionInvite(ns, factionName) {
     let workedForInvite = false;
     // If committing crimes can help us join a faction - we know how to do that
     let doCrime = false;
-    if ((requirement = requiredKarmaByFaction[factionName]) && -ns.heart.break() < requirement) {
-        ns.print(`${reasonPrefix} you have insufficient Karma. Need: ${-requirement}, Have: ${ns.heart.break()}`);
+    let currentNegativeKarma = -ns.heart.break();
+    if ((requirement = requiredKarmaByFaction[factionName]) && currentNegativeKarma <= requirement) {
+        ns.print(`${reasonPrefix} you have insufficient Karma. Need: -${requirement}, Have: -${currentNegativeKarma}`);
         doCrime = true;
     }
-    if ((requirement = requiredKillsByFaction[factionName]) && player.numPeopleKilled < requirement) {
+    if ((requirement = requiredKillsByFaction[factionName]) && player.numPeopleKilled <= requirement) {
         ns.print(`${reasonPrefix} you have insufficient kills. Need: ${requirement}, Have: ${player.numPeopleKilled}`);
         doCrime = true;
     }
