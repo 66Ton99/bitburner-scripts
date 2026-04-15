@@ -451,9 +451,6 @@ export async function main(ns) {
 		["stop", false],
 		["status", false],
 		["quiet", false],
-		["faction", ""],
-		["rep", 0],
-		["location", ""],
 	]);
 
 	function print(msg) {
@@ -481,12 +478,6 @@ export async function main(ns) {
 		return;
 	}
 
-	wnd.autoInfSettings = {
-		targetFaction: args.faction || "",
-		targetRep: Number(args.rep) || 0,
-		targetLocation: args.location || "",
-	};
-
 	print(
 		"Automated infiltration is enabled...\nWhen you visit the infiltration screen of any company, all tasks are completed automatically."
 	);
@@ -499,11 +490,6 @@ export async function main(ns) {
 
 	// Modify the addEventListener logic.
 	wrapEventListeners();
-
-	// Keep the script process alive so other scripts can detect/manage it.
-	while (wnd.tmrAutoInf) {
-		await ns.sleep(60000);
-	}
 }
 
 /**
@@ -631,10 +617,6 @@ function waitForStart() {
 		return;
 	}
 
-	if (tryOpenInfiltrationScreen()) {
-		return;
-	}
-
 	const h4 = getEl("h4");
 
 	if (!h4.length) {
@@ -680,10 +662,10 @@ function playGame() {
 		return;
 	}
 
-	const title = h4[0].textContent.trim().toLowerCase().split(/[!.(]/)[0];
+	const title = h4[0].textContent.trim().toLowerCase().split(/[!.(]/)[0].trim();
 
 	if ("infiltration successful" === title) {
-		handleRewards(screen);
+		endInfiltration();
 		return;
 	}
 
@@ -703,71 +685,6 @@ function playGame() {
 	} else {
 		console.error("Unknown game:", title);
 	}
-}
-
-function getSettings() {
-	return wnd.autoInfSettings || {};
-}
-
-function tryOpenInfiltrationScreen() {
-	const { targetLocation } = getSettings();
-	const buttons = Array.from(getEl("button"));
-	const infiltrateButton = buttons.find((button) =>
-		button.textContent.toLowerCase().includes("infiltrate company"),
-	);
-	if (!infiltrateButton) {
-		return false;
-	}
-	if (targetLocation && !doc.body.textContent.includes(targetLocation)) {
-		return false;
-	}
-	infiltrateButton.click();
-	return true;
-}
-
-function handleRewards(screen) {
-	const { targetFaction } = getSettings();
-	const buttons = Array.from(getEl(screen, "button"));
-	if (targetFaction) {
-		const tradeButton = buttons.find((button) =>
-			button.textContent.toLowerCase().includes("trade for"),
-		);
-		if (tradeButton) {
-			if (selectFactionReward(screen, targetFaction)) {
-				tradeButton.click();
-				endInfiltration();
-				return;
-			}
-			return;
-		}
-	}
-	const sellButton = buttons.find((button) =>
-		button.textContent.toLowerCase().includes("sell for"),
-	);
-	if (sellButton) {
-		sellButton.click();
-	}
-	endInfiltration();
-}
-
-function selectFactionReward(screen, targetFaction) {
-	const normalizedTarget = targetFaction.trim().toLowerCase();
-	const openOption = Array.from(
-		doc.querySelectorAll('[role="option"], li[role="option"]'),
-	).find((option) => option.textContent.trim().toLowerCase() === normalizedTarget);
-	if (openOption) {
-		openOption.click();
-		return false;
-	}
-	const select = screen.querySelector('[role="combobox"], [aria-haspopup="listbox"]');
-	if (!select) {
-		return false;
-	}
-	if (select.textContent.trim().toLowerCase() === normalizedTarget) {
-		return true;
-	}
-	select.click();
-	return false;
 }
 
 /**

@@ -101,12 +101,19 @@ const loopSleepInterval = 5000; // 5 seconds
 const statusUpdateInterval = 60 * 1000; // 1 minute (outside of this, minor updates in e.g. stats aren't logged)
 const checkForNewPrioritiesInterval = 10 * 60 * 1000; // 10 minutes. Interrupt whatever we're doing and check whether we could be doing something more useful.
 const waitForFactionInviteTime = 30 * 1000; // The game will only issue one new invite every 25 seconds, so if you earned two by travelling to one city, might have to wait a while
+const maxInfiltrationDifficulty = 3.5; // 3.5 is the "Impossible" cutoff in game UI/rules
+const infiltrationRestartCooldown = 30000; // Prevent double-starting infiltration while the UI is still transitioning
+const infiltrationPendingTimeout = 120000; // After clicking start, give the UI/minigame plenty of time before ever trying to start again
+const infiltrationStartLockFile = "/Temp/work-for-factions-infiltration-lock.txt";
+const infiltrationActiveLockFile = "/Temp/work-for-factions-infiltration-active.txt";
 
 let shouldFocus; // Whether we should focus on work or let it be backgrounded (based on whether "Neuroreceptor Management Implant" is owned, or "--no-focus" is specified)
 // And a bunch of globals because managing state and encapsulation is hard.
 let hasFocusPenalty, hasSimulacrum, favorToDonate, fulcrumHackReq, notifiedAboutDaedalus, playerInBladeburner, wasGrafting, currentBitnode;
 let dictSourceFiles, dictFactionFavors, playerGang, mainLoopStart, scope, numJoinedFactions, lastTravel, crimeCount;
 let firstFactions, skipFactions, completedFactions, softCompletedFactions, mostExpensiveAugByFaction, mostExpensiveDesiredAugByFaction;
+let lastInfiltrationStart = 0;
+let scriptPid = "?";
 let bitNodeMults = (/**@returns{BitNodeMultipliers}*/() => undefined)(); // Trick to get strong typing in mono
 
 export function autocomplete(data, args) {
@@ -125,6 +132,7 @@ export async function main(ns) {
     const runOptions = getConfiguration(ns, argsSchema);
     if (!runOptions || await instanceCount(ns) > 1) return; // Prevent multiple instances of this script from being started, even with different args.
     options = runOptions; // We don't set the global "options" until we're sure this is the only running instance
+    scriptPid = ns.pid;
     disableLogs(ns, ['sleep']);
 
     // Reset globals whose value can persist between script restarts in weird situations
@@ -481,7 +489,13 @@ async function earnFactionInvite(ns, factionName) {
                     `${formatNumberShort(player.mults[s])}*${formatNumberShort(player.mults[`${s}_exp`])}*` +
                     `${formatNumberShort(bitNodeMults[`${title(s)}LevelMultiplier`])}*` +
                     `${formatNumberShort(bitNodeMults.CrimeExpGain)})=${formatNumberShort(crimeHeuristics[s])}`).join(", "));
-        doCrime = true; // TODO: There could be more efficient ways to gain combat stats than homicide, although at least this serves future crime factions
+        const needsKills = (requiredKillsByFaction[factionName] || 0) > player.numPeopleKilled;
+        const needsKarma = (requiredKarmaByFaction[factionName] || 0) > currentNegativeKarma;
+        if (!needsKills && !needsKarma) {
+            workedForInvite = await trainCombatStatsUpTo(ns, requirement, factionName);
+        } else {
+            doCrime = true;
+        }
     }
     if (doCrime && options['no-crime'])
         return ns.print(`${reasonPrefix} Doing crime to meet faction requirements is disabled. (--no-crime or --no-focus)`);
@@ -621,14 +635,29 @@ export async function crimeForKillsKarmaStats(ns, reqKills, reqKarma, reqStats, 
     const chanceThresholds = [0.75, 0.9, 0.5, 0]; // Will change crimes once we reach this probability of success for better all-round gains
     doFastCrimesOnly = doFastCrimesOnly || (options ? options['fast-crimes-only'] : false);
     let player = await getPlayerInfo(ns);
-    let strRequirements = [];
     let forever = reqKills >= Number.MAX_SAFE_INTEGER || reqKarma >= Number.MAX_SAFE_INTEGER || reqStats >= Number.MAX_SAFE_INTEGER;
-    if (reqKills) strRequirements.push(() => `${reqKills} kills (Have ${player.numPeopleKilled})`);
-    if (reqKarma) strRequirements.push(() => `-${reqKarma} Karma (Have ${Math.round(ns.heart.break()).toLocaleString('en')})`);
-    if (reqStats) strRequirements.push(() => `${reqStats} of each combat stat (Have ` +
-        `Str: ${player.skills.strength}, Def: ${player.skills.defense}, Dex: ${player.skills.dexterity}, Agi: ${player.skills.agility})`);
     let anyStatsDeficient = (p) => p.skills.strength < reqStats || p.skills.defense < reqStats ||
         /*                      */ p.skills.dexterity < reqStats || p.skills.agility < reqStats;
+    const getRemainingRequirements = (p) => {
+        const requirements = [];
+        const currentNegativeKarma = -ns.heart.break();
+        if (reqKills && p.numPeopleKilled < reqKills) requirements.push(`${reqKills} kills (Have ${p.numPeopleKilled})`);
+        if (reqKarma && currentNegativeKarma < reqKarma)
+            requirements.push(`-${reqKarma} Karma (Have ${Math.round(ns.heart.break()).toLocaleString('en')})`);
+        if (reqStats && anyStatsDeficient(p)) requirements.push(`${reqStats} of each combat stat (Have ` +
+            `Str: ${p.skills.strength}, Def: ${p.skills.defense}, Dex: ${p.skills.dexterity}, Agi: ${p.skills.agility})`);
+        return requirements;
+    };
+    const getCompletedRequirements = (p) => {
+        const requirements = [];
+        const currentNegativeKarma = -ns.heart.break();
+        if (reqKills && p.numPeopleKilled >= reqKills) requirements.push(`${reqKills} kills (Have ${p.numPeopleKilled})`);
+        if (reqKarma && currentNegativeKarma >= reqKarma)
+            requirements.push(`-${reqKarma} Karma (Have ${Math.round(ns.heart.break()).toLocaleString('en')})`);
+        if (reqStats && !anyStatsDeficient(p)) requirements.push(`${reqStats} of each combat stat (Have ` +
+            `Str: ${p.skills.strength}, Def: ${p.skills.defense}, Dex: ${p.skills.dexterity}, Agi: ${p.skills.agility})`);
+        return requirements;
+    };
     let crime, lastCrime, crimeTime, lastStatusUpdateTime, needStats;
     while (forever || (needStats = anyStatsDeficient(player)) || player.numPeopleKilled < reqKills || -ns.heart.break() < reqKarma) {
         if (!forever && breakToMainLoop()) return ns.print('INFO: Interrupting crime to check on high-level priorities.');
@@ -654,8 +683,9 @@ export async function crimeForKillsKarmaStats(ns, reqKills, reqKarma, reqStats, 
         if (lastCrime != crime || (Date.now() - lastStatusUpdateTime) > statusUpdateInterval) {
             lastCrime = crime;
             lastStatusUpdateTime = Date.now();
+            const remainingRequirements = getRemainingRequirements(player);
             ns.print(`Committing "${crime}" (${(100 * crimeChances[crime]).toPrecision(3)}% success) ` +
-                (forever ? 'forever...' : `until we reach ${strRequirements.map(r => r()).join(', ')}`));
+                (forever ? 'forever...' : `until we reach ${remainingRequirements.join(', ')}`));
         }
         // Sleep for some multiple of the crime time to avoid interrupting a crime in progress on the next status update
         let sleepTime = 1 + Math.ceil(loopSleepInterval / crimeTime) * crimeTime;
@@ -664,7 +694,7 @@ export async function crimeForKillsKarmaStats(ns, reqKills, reqKarma, reqStats, 
         crimeCount++;
         player = await getPlayerInfo(ns);
     }
-    ns.print(`Done committing crimes. Reached ${strRequirements.map(r => r()).join(', ')}`);
+    ns.print(`Done committing crimes. Reached ${getCompletedRequirements(player).join(', ')}`);
     return true;
 }
 
@@ -675,6 +705,7 @@ async function studyForCharisma(ns, focus) {
 }
 
 const uniByCity = Object.fromEntries([["Aevum", "Summit University"], ["Sector-12", "Rothman University"], ["Volhaven", "ZB Institute of Technology"]]);
+const bestGymByCity = Object.fromEntries([["Sector-12", "Powerhouse Gym"], ["Aevum", "Snap Fitness Gym"], ["Volhaven", "Millenium Fitness Gym"]]);
 
 /** @param {NS} ns */
 async function study(ns, focus, course, university = null) {
@@ -696,6 +727,51 @@ async function study(ns, focus, course, university = null) {
     }
     log(ns, `ERROR: For some reason, failed to study '${course}' at university '${university}' (Not in correct city? Player is in '${playerCity}')`, false, 'error');
     return false;
+}
+
+/** @param {NS} ns */
+async function workOutAtGym(ns, focus, stat, gymName = "Powerhouse Gym") {
+    const gymCity = Object.entries(bestGymByCity).find(([, gym]) => gym == gymName)?.[0];
+    if (!gymCity) {
+        log(ns, `ERROR: No city mapping found for gym "${gymName}"`, false, 'error');
+        return false;
+    }
+    if (!await goToCity(ns, gymCity)) return false;
+    if (await getNsDataThroughFile(ns, `ns.singularity.gymWorkout(ns.args[0], ns.args[1], ns.args[2])`, null, [gymName, stat, focus])) {
+        log(ns, `Started training "${stat}" at "${gymName}"`, false, 'success');
+        return true;
+    }
+    log(ns, `ERROR: Failed to train "${stat}" at gym "${gymName}"`, false, 'error');
+    return false;
+}
+
+/** @param {NS} ns */
+async function trainCombatStatsUpTo(ns, requirement, factionName = "unknown faction") {
+    const statOrder = ["strength", "defense", "dexterity", "agility"];
+    const gymName = "Powerhouse Gym";
+    let lastStatusUpdateTime = 0;
+    while (!breakToMainLoop()) {
+        let player = await getPlayerInfo(ns);
+        const deficientStats = statOrder.filter(stat => player.skills[stat] < requirement);
+        if (deficientStats.length == 0) {
+            log(ns, `SUCCESS: Achieved ${requirement} in all combat stats for "${factionName}" while training at the gym.`, false, 'info');
+            return true;
+        }
+        const statToTrain = deficientStats.sort((a, b) => player.skills[a] - player.skills[b])[0];
+        const currentWork = await getCurrentWorkInfo(ns);
+        const expectedClassType = title(statToTrain);
+        if (currentWork.classType !== expectedClassType || currentWork.location !== gymName) {
+            if (await isValidInterruption(ns, currentWork)) return;
+            if (!await workOutAtGym(ns, shouldFocus, expectedClassType, gymName)) return false;
+        }
+        if ((Date.now() - lastStatusUpdateTime) > statusUpdateInterval) {
+            lastStatusUpdateTime = Date.now();
+            log(ns, `Training combat stats at ${gymName} for "${factionName}" until all reach ${requirement}. ` +
+                `Currently Str: ${player.skills.strength}, Def: ${player.skills.defense}, Dex: ${player.skills.dexterity}, Agi: ${player.skills.agility}. ` +
+                `Training ${statToTrain}.`, false, 'info');
+        }
+        await ns.sleep(loopSleepInterval);
+    }
 }
 
 /** @param {NS} ns
@@ -941,57 +1017,102 @@ export async function workForSingleFaction(ns, factionName, forceUnlockDonations
         return ns.print(`--invites-only Skipping working for faction...`);
     if (options['prioritize-invites'] && !forceUnlockDonations && !forceBestAug && !forceRep)
         return ns.print(`--prioritize-invites Skipping working for faction for now...`);
-
+    let bestLocation = null;
     let lastStatusUpdateTime = 0;
-    let workAssigned = false; // Use to track whether work previously assigned by this script is being disrupted
-    let bestFactionJob = null;
+    let lastInfiltrationUiState = "";
     while ((currentReputation = (await getFactionReputation(ns, factionName))) < factionRepRequired) {
-        if (breakToMainLoop()) return ns.print('INFO: Interrupting faction work to check on high-level priorities.');
-        const currentWork = await getCurrentWorkInfo(ns);
-        let factionJob = currentWork.factionWorkType;
-        // Detect if faction work was interrupted and log a warning
-        if (workAssigned && currentWork.factionName != factionName) {
-            if (await isValidInterruption(ns, currentWork)) return false;
-            log(ns, `Work for faction ${factionName} was interrupted (Now: ${JSON.stringify(currentWork)}). Restarting...`, false, 'warning');
-            workAssigned = false;
-            if (!options['no-tail-windows']) tail(ns); // Force a tail window open to help the user kill this script if they accidentally closed the tail window and don't want to keep working
+        if (breakToMainLoop()) {
+            return ns.print('INFO: Interrupting infiltration to check on high-level priorities.');
         }
-        // Periodically check again what the best faction work is (may change with stats over time)
-        if ((Date.now() - lastStatusUpdateTime) > statusUpdateInterval)
-            workAssigned = false; // This will force us to redetermine the best faction work.
-        // Heads up! Current implementation of "detectBestFactionWork" changes the work currently being done, so we must always re-assign work afterwards
-        if (!workAssigned)
-            bestFactionJob = await detectBestFactionWork(ns, factionName);
-        // For purposes of being informative, log a message if the detected "bestFactionJob" is different from what we were previously doing
-        if (currentWork.factionName == factionName && factionJob != bestFactionJob) {
-            log(ns, `INFO: Detected that "${bestFactionJob}" gives more rep than previous work "${factionJob}". Switching...`);
-            workAssigned = false;
+        const infiltrationUiState = await getInfiltrationUiState(ns);
+        const infiltrationAttemptInProgress = hasInfiltrationActiveLock(ns);
+        const infiltrationActiveSince = Number(ns.read(infiltrationActiveLockFile) || 0);
+        if (infiltrationUiState != lastInfiltrationUiState) {
+            lastInfiltrationUiState = infiltrationUiState;
+            devConsoleLog(`Infiltration UI state changed to "${infiltrationUiState}" for "${factionName}". In progress: ${infiltrationAttemptInProgress}.`);
         }
-        // Ensure we are doing the best faction work (must always be done after "detect" routine is run)
-        if (!workAssigned) {
-            if (await startWorkForFaction(ns, factionName, bestFactionJob, shouldFocus)) {
-                workAssigned = true;
-                if (shouldFocus && !options['no-tail-windows']) tail(ns); // Keep a tail window open if we're stealing focus
-            } else {
-                log(ns, `ERROR: Something went wrong, failed to start "${bestFactionJob}" work for faction "${factionName}" (Is gang faction, or not joined?)`, false, 'error');
-                break;
+        if (infiltrationUiState == "running") {
+            if (!infiltrationAttemptInProgress) {
+                const lockTimestamp = Date.now();
+                ns.write(infiltrationActiveLockFile, `${lockTimestamp}`, 'w');
+                devConsoleLog(`Recreated infiltration active lock for "${factionName}" after detecting a running infiltration screen.`);
             }
+            await ns.sleep(loopSleepInterval);
+            continue;
+        }
+        if (infiltrationUiState == "success") {
+            if (await clickInfiltrationRewardButton(ns, factionName)) {
+                devConsoleLog(`Clicked infiltration reward button for "${factionName}".`);
+                clearInfiltrationActiveLock(ns);
+            }
+            await ns.sleep(loopSleepInterval);
+            continue;
+        }
+        if (infiltrationUiState == "hospitalized") {
+            clearInfiltrationActiveLock(ns);
+            log(ns, `WARN: Infiltration ended with hospitalization. Will retry if more reputation is still needed for "${factionName}".`, false, 'warning');
+            await ns.sleep(loopSleepInterval);
+            continue;
+        }
+        if (infiltrationAttemptInProgress) {
+            if (infiltrationActiveSince > 0 && Date.now() - infiltrationActiveSince > infiltrationPendingTimeout) {
+                clearInfiltrationActiveLock(ns);
+                log(ns, `WARN: Infiltration did not reach a terminal or detectable running state within ${formatDuration(infiltrationPendingTimeout)}. Retrying...`, false, 'warning');
+            }
+            await ns.sleep(loopSleepInterval);
+            continue;
+        }
+        const lastInfiltrationStartAnyInstance = Number(ns.read(infiltrationStartLockFile) || 0);
+        if (Date.now() - Math.max(lastInfiltrationStart, lastInfiltrationStartAnyInstance) < infiltrationRestartCooldown) {
+            await ns.sleep(loopSleepInterval);
+            continue;
+        }
+        bestLocation = await pickBestInfiltrationLocation(ns);
+        if (!bestLocation) {
+            ns.print(`No feasible infiltration target right now. Waiting instead of starting faction work for "${factionName}".`);
+            await ns.sleep(loopSleepInterval);
+            continue;
+        }
+        if (!await goToCity(ns, bestLocation.location.city)) {
+            await ns.sleep(loopSleepInterval);
+            continue;
+        }
+        if (!await getNsDataThroughFile(ns, `ns.singularity.goToLocation(ns.args[0])`, null, [bestLocation.location.name])) {
+            await ns.sleep(loopSleepInterval);
+            continue;
+        }
+        if (!await waitForInfiltrateCompanyButton(ns)) {
+            log(ns, `WARN: "Infiltrate Company" did not appear at "${bestLocation.location.name}" in time. Retrying...`, false, 'warning');
+            await ns.sleep(loopSleepInterval);
+            continue;
+        }
+        lastInfiltrationStart = Date.now();
+        ns.write(infiltrationStartLockFile, `${lastInfiltrationStart}`, 'w');
+        ns.write(infiltrationActiveLockFile, `${lastInfiltrationStart}`, 'w');
+        if (!await startInfiltrationFromCompanyPage(ns)) {
+            log(ns, `WARN: Could not confirm infiltration start at "${bestLocation.location.name}" yet. Holding active lock and waiting before any retry...`, false, 'warning');
+            await ns.sleep(loopSleepInterval);
+            continue;
+        }
+        devConsoleLog(`Clicked "Infiltrate Company" at "${bestLocation.location.name}" for "${factionName}".`);
+        const infiltrationRunning = await getNsDataThroughFile(ns, `ns.scriptRunning(ns.args[0], ns.args[1])`, null, [getFilePath('infiltrate.js'), 'home']);
+        if (!infiltrationRunning) {
+            log(ns, `WARN: infiltrate.js is not running on home. It must be started once and left running. Retrying...`, false, 'warning');
+            clearInfiltrationActiveLock(ns);
+            await ns.sleep(loopSleepInterval);
+            continue;
         }
 
-        let status = `Doing '${bestFactionJob}' work for "${factionName}" until ${Math.round(factionRepRequired).toLocaleString('en')} rep.`;
+        const status = `Using infiltration at "${bestLocation.location.name}" for "${factionName}" until ${Math.round(factionRepRequired).toLocaleString('en')} rep.`;
         if (lastFactionWorkStatus != status || (Date.now() - lastStatusUpdateTime) > statusUpdateInterval) {
             lastFactionWorkStatus = status;
             lastStatusUpdateTime = Date.now();
-            // Measure approximately how quickly we're gaining reputation to give a rough ETA
-            const repGainRate = await measureFactionRepGainRate(ns, factionName);
-            const eta_milliseconds = 1000 * (factionRepRequired - currentReputation) / repGainRate;
             ns.print(`${status} Currently at ${Math.round(currentReputation).toLocaleString('en')}, ` +
-                `earning ${formatNumberShort(repGainRate)} rep/sec. ` +
-                (hasFocusPenalty && !shouldFocus ? '(after 20% non-focus Penalty) ' : '') + `(ETA: ${formatDuration(eta_milliseconds)})`);
+                `estimated ${Math.round(bestLocation.reward.tradeRep).toLocaleString('en')} rep per run.`);
         }
         await tryBuyReputation(ns);
         await ns.sleep(loopSleepInterval);
-        if (!forceBestAug && !forceRep) { // Detect our rep requirement decreasing (e.g. if we exported for our daily +1 faction rep)
+        if (!forceBestAug && !forceRep) {
             let currentFavor = await getCurrentFactionFavour(ns, factionName);
             if (currentFavor === undefined)
                 log(ns, `ERROR: WTF... getCurrentFactionFavour returned 'undefined' for factionName: ${factionName}`, true, 'error');
@@ -1007,6 +1128,140 @@ export async function workForSingleFaction(ns, factionName, forceUnlockDonations
             `(needed ${factionRepRequired.toLocaleString('en')}).`);
     if (factionName == "Daedalus") await daedalusSpecialCheck(ns, favorRepRequired, currentReputation);
     return currentReputation >= factionRepRequired;
+}
+
+/** Pick the best currently-feasible infiltration target by trade rep. */
+async function pickBestInfiltrationLocation(ns) {
+    const locations = await getNsDataThroughFile(ns, `ns.infiltration.getPossibleLocations()`, '/Temp/infiltration-locations.txt');
+    if (!locations?.length) return null;
+    const locationNames = locations.map(location => location.name);
+    const infiltrationByLocation = await getNsDataThroughFile(ns, dictCommand('ns.infiltration.getInfiltration(o)'), '/Temp/infiltration-info.txt', locationNames);
+    return Object.values(infiltrationByLocation)
+        .filter(infiltration => infiltration?.difficulty < maxInfiltrationDifficulty)
+        .sort((a, b) => b.reward.tradeRep - a.reward.tradeRep || a.difficulty - b.difficulty)[0] ?? null;
+}
+
+async function clickInfiltrateCompanyButton(ns) {
+    const clickWorked = await getNsDataThroughFile(ns, `(() => {
+        const doc = eval("document");
+        const buttons = Array.from(doc.querySelectorAll("button"));
+        const button = buttons.find(btn => btn.textContent?.trim()?.includes("Infiltrate Company"));
+        if (!button) return false;
+        const reactHandlerKey = Object.keys(button).find(key => key.startsWith("__reactProps"));
+        if (reactHandlerKey && typeof button[reactHandlerKey]?.onClick === "function") {
+            button[reactHandlerKey].onClick({
+                isTrusted: true,
+                currentTarget: button,
+                target: button,
+                preventDefault: () => { },
+                stopPropagation: () => { },
+            });
+            return true;
+        }
+        button.click();
+        return true;
+    })()`, '/Temp/click-infiltrate-company.txt');
+    return !!clickWorked;
+}
+
+async function startInfiltrationFromCompanyPage(ns) {
+    const attemptedStart = await clickInfiltrateCompanyButton(ns);
+    return attemptedStart && await waitForInfiltrationToStart(ns, 3000);
+}
+
+async function waitForInfiltrateCompanyButton(ns, timeout = 5000) {
+    const start = Date.now();
+    while (Date.now() - start < timeout) {
+        const buttonExists = await getNsDataThroughFile(ns, `(() => {
+            const doc = eval("document");
+            return Array.from(doc.querySelectorAll("button"))
+                .some(btn => btn.textContent?.trim()?.includes("Infiltrate Company"));
+        })()`, '/Temp/has-infiltrate-company-button.txt');
+        if (buttonExists) return true;
+        await ns.sleep(50);
+    }
+    return false;
+}
+
+async function waitForInfiltrationToStart(ns, timeout = 1000) {
+    const start = Date.now();
+    while (Date.now() - start < timeout) {
+        if (await getInfiltrationUiState(ns) == "running")
+            return true;
+        await ns.sleep(50);
+    }
+    return false;
+}
+
+async function clickInfiltrationRewardButton(ns, factionName) {
+    const clickWorked = await getNsDataThroughFile(ns, `(async () => {
+        const doc = eval("document");
+        const desiredFaction = ns.args[0];
+        const clickElement = (element) => {
+            if (!element) return false;
+            if (typeof element.click === "function") element.click();
+            element.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, cancelable: true, view: window }));
+            element.dispatchEvent(new MouseEvent("mouseup", { bubbles: true, cancelable: true, view: window }));
+            element.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true, view: window }));
+            return true;
+        };
+        const getText = (element) => element?.textContent?.trim()?.replace(/\\s+/g, " ") || "";
+        const tradeButton = () => Array.from(doc.querySelectorAll("button")).find(btn => getText(btn).includes("Trade for"));
+        const selectedFaction = () => {
+            const combo = doc.querySelector('[role="combobox"]');
+            return getText(combo);
+        };
+        if (selectedFaction() !== desiredFaction) {
+            const combo = doc.querySelector('[role="combobox"]');
+            if (combo) {
+                combo.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, cancelable: true, view: window }));
+                combo.dispatchEvent(new MouseEvent("mouseup", { bubbles: true, cancelable: true, view: window }));
+                combo.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true, view: window }));
+                await new Promise(resolve => setTimeout(resolve, 25));
+                const option = Array.from(doc.querySelectorAll('[role="option"]')).find(el => getText(el) === desiredFaction);
+                if (option) {
+                    clickElement(option);
+                    await new Promise(resolve => setTimeout(resolve, 25));
+                }
+            }
+        }
+        const button = tradeButton();
+        if (button && !button.disabled && selectedFaction() === desiredFaction) {
+            return clickElement(button);
+        }
+        return false;
+    })()`, '/Temp/click-infiltration-reward-target-faction.txt', [factionName]);
+    return !!clickWorked;
+}
+
+async function getInfiltrationUiState(ns) {
+    return await getNsDataThroughFile(ns, `(() => {
+        const doc = eval("document");
+        const bodyText = doc.body?.innerText || "";
+        if (bodyText.includes("Infiltration was cancelled because you were hospitalized")) return "hospitalized";
+        const h4Text = Array.from(doc.querySelectorAll("h4")).map(el => el.textContent?.trim() || "");
+        const buttonText = Array.from(doc.querySelectorAll("button")).map(el => el.textContent?.trim() || "");
+        if (h4Text.some(text => text.toLowerCase() === "infiltration successful!")) return "success";
+        if (buttonText.some(text => text === "Cancel Infiltration")) return "running";
+        if (h4Text.some(text => text.startsWith("Infiltrating ")) && buttonText.some(text => text === "Start")) return "running";
+        if (/\\bLevel\\s+\\d+\\s*\\/\\s*\\d+\\b/.test(bodyText)) return "running";
+        if (bodyText.includes("Maximum clearance level:")) return "running";
+        return "other";
+    })()`, '/Temp/infiltration-ui-state.txt');
+}
+
+function hasInfiltrationActiveLock(ns) {
+    return !!ns.read(infiltrationActiveLockFile);
+}
+
+function clearInfiltrationActiveLock(ns) {
+    ns.rm(infiltrationActiveLockFile);
+}
+
+function devConsoleLog(message) {
+    try {
+        eval("console").log(`[work-for-factions pid=${scriptPid}] ${message}`);
+    } catch { }
 }
 
 /** Stop whatever focus work we're currently doing

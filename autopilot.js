@@ -44,6 +44,7 @@ export function autocomplete(data, args) {
 export async function main(ns) {
     const persistentLog = "log.autopilot.txt";
     const factionManagerOutputFile = "/Temp/affordable-augs.txt"; // Temp file produced by faction manager with status information
+    const infiltrateLaunchMarkerFile = "/Temp/autopilot-infiltrate-launched.txt";
     const defaultBnOrder = [ // The order in which we intend to play bitnodes
         // 1st Priority: Key new features and/or major stat boosts
         4.3,  // Normal. Need singularity to automate everything, and need the API costs reduced from 16x -> 4x -> 1x reliably do so from the start of each BN
@@ -101,6 +102,7 @@ export async function main(ns) {
     let playerInstalledAugCount = (/**@returns{null|number}*/() => null)(); // Number of augs installed, or null if we don't have SF4 and can't tell.
     let installedAugmentations = [];
     let acceptedStanek = false, stanekLaunched = false;
+    let infiltrateLaunched = false;
     let daemonStartTime = 0; // The time we personally launched daemon.
     let installCountdown = 0; // Start of a countdown before we install augmentations.
     let installCountdownResets = 0; // Number of times we've reset the countdown because our affordable augs has increased
@@ -147,6 +149,7 @@ export async function main(ns) {
     /** @param {NS} ns **/
     async function startUp(ns) {
         await persistConfigChanges(ns);
+        ns.rm(infiltrateLaunchMarkerFile);
 
         // Collect and cache some one-time data
         resetInfo = await getNsDataThroughFile(ns, 'ns.getResetInfo()');
@@ -524,8 +527,11 @@ export async function main(ns) {
                 "--reserve", 0, // Override to ignore the global reserve.txt. Any money we reserve can more or less safely live as stocks
             ]);
 
-        if (!findScript('infiltrate.js'))
-            launchScriptHelper(ns, 'infiltrate.js', ['--quiet']);
+        if (!infiltrateLaunched && !ns.read(infiltrateLaunchMarkerFile)) {
+            infiltrateLaunched = true;
+            if (launchScriptHelper(ns, 'infiltrate.js', ['--quiet']))
+                ns.write(infiltrateLaunchMarkerFile, `${Date.now()}`, 'w');
+        }
 
         // Launch sleeves and allow them to also ignore the reserve so they can train up to boost gang unlock speed
         if ((10 in unlockedSFs) && (2 in unlockedSFs) && !findScript('sleeve.js')) {
@@ -709,7 +715,7 @@ export async function main(ns) {
 
         // Launch work-for-factions if it isn't already running (rules for maybe killing unproductive instances are above)
         // Note: We delay launching our own 'work-for-factions.js' until daemon has warmed up, so we don't steal it's "kickstartHackXp" study focus
-        if ((4 in unlockedSFs) && !findScript('work-for-factions.js') && Date.now() - daemonStartTime > 30000) {
+        if ((4 in unlockedSFs) && !findScript('work-for-factions.js') && Date.now() - daemonStartTime > 5000) {
             // If we're trying to rush gangs, run in such a way that we will spend most of our time doing crime, reducing Karma (also okay early income)
             // NOTE: Default work-for-factions behaviour is to spend hashes on coding contracts, which suits us fine
             launchScriptHelper(ns, 'work-for-factions.js', rushGang ? rushGangsArgs : workForFactionsArgs);
