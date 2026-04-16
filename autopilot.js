@@ -282,13 +282,19 @@ export async function main(ns) {
      * @param {Player} player **/
     async function checkOnDaedalusStatus(ns, player, stocksValue) {
         // Early exit conditions, if we Daedalus is not (or is no longer) a concern for this reset
-        if (alreadyJoinedDaedalus || autoJoinDaedalusUnavailable) return;
+        if (alreadyJoinedDaedalus || autoJoinDaedalusUnavailable) {
+            prioritizeHackForDaedalus = false;
+            return;
+        }
         // If we've already installed the red pill we no longer need to try to join this faction.
         // Even without SF4, we can "deduce" whether we've installed TRP by checking whether w0r1d_d43m0n has a non-zero hack level
-        if (installedAugmentations.includes(augTRP) || (wdHack != null && Number.isFinite(wdHack) && wdHack > 0))
+        if (installedAugmentations.includes(augTRP) || (wdHack != null && Number.isFinite(wdHack) && wdHack > 0)) {
+            prioritizeHackForDaedalus = false;
             return alreadyJoinedDaedalus = true; // Set up an early exit condition for future checks
+        }
         // See if we even have enough augmentations to attempt to join Daedalus (once we have a count of our augmentations)
         if (playerInstalledAugCount !== null && playerInstalledAugCount < bitNodeMults.DaedalusAugsRequirement) {
+            prioritizeHackForDaedalus = false;
             if (!(10 in unlockedSFs))
                 autoJoinDaedalusUnavailable = true; // Won't be able to unlock daedalus this ascend if we can't graft augs and have to install for them
             return; // Either way, for now we can't get into Daedalus without more augmentations
@@ -319,13 +325,16 @@ export async function main(ns) {
         }
         const moneyReq = 100E9;
         // If we've previously set a flag to wait for the daedalus invite and reserve money, try to speed-along joining them
-        if (reservingMoneyForDaedalus && player.money >= moneyReq) // If our cash has dipped below the threshold again, we may need to take action below
+        if (reservingMoneyForDaedalus && player.money >= moneyReq) { // If our cash has dipped below the threshold again, we may need to take action below
+            prioritizeHackForDaedalus = false;
             return await getNsDataThroughFile(ns, 'ns.singularity.joinFaction(ns.args[0])', null, ["Daedalus"]); // Note, we should have already checked that we have SF4 access before reserving money
+        }
 
         // Remaining logic below is for rushing a Daedalus invite in the current reset
         const totalWorth = player.money + stocksValue;
         // Check for sufficient hacking level before attempting to reserve money
         if (player.skills.hacking < 2500) {
+            prioritizeHackForDaedalus = false;
             // If we happen to already have enough money for daedalus and are only waiting on hack-level,
             // set a flag to switch daemon.js into --xp-only mode, to prioritize earning hack exp over money
             // HEURISTIC (i.e. Hack): Only do this if we naturally get within 75% of the hack stat requirement,
@@ -335,6 +344,7 @@ export async function main(ns) {
             //log(ns, `total worth: ${formatMoney(totalWorth)} moneyReq: ${formatMoney(moneyReq)} prioritizeHackForDaedalus: ${prioritizeHackForDaedalus}`)
             return reservingMoneyForDaedalus = false; // Don't reserve money until hack level suffices
         }
+        prioritizeHackForDaedalus = false;
         // If we have sufficient augs and hacking, the only requirement left is the money (100b)
         // If our net worth is sufficient, reserve our money and liquidate stocks if necessary until we get the invite
         if (player.money < moneyReq && totalWorth > moneyReq * 1.001 /* slight buffer to account for timing issues */) {
@@ -617,7 +627,8 @@ export async function main(ns) {
                 let useXpOnlyMode = prioritizeHackForDaedalus || prioritizeHackForWd ||
                     // In BNs that give no money for hacking, always start daemon.js in this mode (except BN8, because TODO: --xp-only doesn't handle stock manipulation)
                     (bitNodeMults.ScriptHackMoney * bitNodeMults.ScriptHackMoneyGain == 0 && resetInfo.currentNode != 8);
-                const allowTimedXpMode = player.skills.hacking < 2500;
+                const timedXpModeHackCap = 2500;
+                const allowTimedXpMode = player.skills.hacking < timedXpModeHackCap;
                 if (!useXpOnlyMode && allowTimedXpMode) { // Otherwise, respect the configured interval / duration while hack XP still has meaningful near-term value
                     const xpInterval = Number(options['xp-mode-interval-minutes']);
                     const xpDuration = Number(options['xp-mode-duration-minutes']);
@@ -1019,7 +1030,7 @@ export async function main(ns) {
             return true;
         }
         // Are we close to being able to afford 4S TIX data?
-        if (!have4STixApi) have4STixApi = await getNsDataThroughFile(ns, `ns.stock.has4SDataTIXAPI()`);
+        if (!have4STixApi) have4STixApi = await getNsDataThroughFile(ns, `ns.stock.has4SDataTixApi()`);
         if (!options['disable-wait-for-4s'] && !have4STixApi) {
             if (!have4SData) have4SData = await getNsDataThroughFile(ns, `ns.stock.has4SData()`);
             const totalWorth = player.money + await getStocksValue(ns);

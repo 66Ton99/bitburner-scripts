@@ -777,6 +777,7 @@ async function workOutAtGym(ns, focus, stat, gymName = "Powerhouse Gym") {
 /** @param {NS} ns */
 async function trainCombatStatsUpTo(ns, requirement, factionName = "unknown faction") {
     const statOrder = ["strength", "defense", "dexterity", "agility"];
+    const gymStatBySkill = { strength: "str", defense: "def", dexterity: "dex", agility: "agi" };
     const gymName = "Powerhouse Gym";
     let lastStatusUpdateTime = 0;
     let lastSelectedInfiltrationTarget = "";
@@ -789,10 +790,11 @@ async function trainCombatStatsUpTo(ns, requirement, factionName = "unknown fact
         }
         const statToTrain = deficientStats.sort((a, b) => player.skills[a] - player.skills[b])[0];
         const currentWork = await getCurrentWorkInfo(ns);
-        const expectedClassType = title(statToTrain);
-        if (currentWork.classType !== expectedClassType || currentWork.location !== gymName) {
+        const expectedGymStat = gymStatBySkill[statToTrain];
+        const currentClassType = String(currentWork.classType || "").toLowerCase();
+        if (currentClassType !== expectedGymStat || currentWork.location !== gymName) {
             if (await isValidInterruption(ns, currentWork)) return;
-            if (!await workOutAtGym(ns, shouldFocus, expectedClassType, gymName)) return false;
+            if (!await workOutAtGym(ns, shouldFocus, expectedGymStat, gymName)) return false;
         }
         if ((Date.now() - lastStatusUpdateTime) > statusUpdateInterval) {
             lastStatusUpdateTime = Date.now();

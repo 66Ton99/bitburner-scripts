@@ -975,7 +975,7 @@ function isV3(ns) {
 
 export function formatTime(ns, milliseconds, milliPrecision) {
     if (isV3(ns)) {
-        return ns.ui.time(milliseconds, milliPrecision);
+        return ns.format.time(milliseconds, milliPrecision);
     }
     return ns.tFormat(milliseconds, milliPrecision);
 }

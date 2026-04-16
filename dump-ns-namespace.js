@@ -1,5 +1,3 @@
-import { runCommand } from './helpers.js'
-
 export function autocomplete(data, args) {
     return [
         "bladeburner", "codingcontract", "corporation", "enums", "formulas", "gang", "grafting", "hacknet",
@@ -18,13 +16,15 @@ export async function main(ns) {
     // TODO: Need a denylist of functions that should not be called because they will screw with the current game
     //       (e.g. softReset, ui.resetTheme, stopAction, etc...)
     for (const k of Object.keys(obj)) {
-        const strMember = `${strObj}.${k}`
-        await runCommand(ns, `try {
-			const member = ${strMember};
-			if(typeof member === 'function')
-				ns.tprint('${strMember}(): ' + '(function)'); // JSON.stringify(member())); // Turns out running arbitrary functions has consequences
-			else
-				ns.tprint('${strMember}: ' + JSON.stringify(member));
-		} catch { /* Ignore failures when calling functions that require parameters */ }`);
+        const strMember = `${strObj}.${k}`;
+        try {
+            const member = obj[k];
+            if (typeof member === 'function')
+                ns.tprint(`${strMember}(): (function)`);
+            else
+                ns.tprint(`${strMember}: ${JSON.stringify(member)}`);
+        } catch {
+            // Ignore members that throw on access.
+        }
     }
 }

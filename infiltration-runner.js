@@ -179,30 +179,81 @@ async function clickInfiltrationStartButton(ns) {
     })()`, '/Temp/click-infiltration-start.txt');
 }
 
-async function clickInfiltrationRewardButton(ns, factionName, takeCash = false) {
-    const doc = getDocument();
-    const rewardButton = () => Array.from(doc.querySelectorAll("button")).find(btn => {
-        const text = getText(btn);
-        return takeCash ? text.includes("Sell for") : text.includes("Trade for");
-    });
-    const selectedFaction = () => getText(doc.querySelector('[role="combobox"]'));
+async function clickInfiltrationRewardButton(ns, factionName, takeCash = false, timeout = 5000) {
+    const start = Date.now();
+    while (Date.now() - start < timeout) {
+        if (takeCash) {
+            const clicked = await getNsDataThroughFile(ns, `(() => {
+                const doc = eval("document");
+                const wnd = eval("window");
+                const button = Array.from(doc.querySelectorAll("button"))
+                    .find(btn => btn.textContent?.trim()?.includes("Sell for"));
+                if (!button || button.disabled) {
+                    return JSON.stringify({
+                        clicked: false,
+                        found: !!button,
+                        disabled: !!button?.disabled,
+                        text: button?.textContent?.trim() || null,
+                    });
+                }
+                const reactHandlerKey = Object.keys(button).find(key => key.startsWith("__reactProps"));
+                if (reactHandlerKey && typeof button[reactHandlerKey]?.onClick === "function") {
+                    button[reactHandlerKey].onClick({
+                        isTrusted: true,
+                        currentTarget: button,
+                        target: button,
+                        preventDefault: () => { },
+                        stopPropagation: () => { },
+                    });
+                }
+                if (typeof button.click === "function") button.click();
+                button.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, cancelable: true, view: wnd }));
+                button.dispatchEvent(new MouseEvent("mouseup", { bubbles: true, cancelable: true, view: wnd }));
+                button.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true, view: wnd }));
+                return JSON.stringify({
+                    clicked: true,
+                    found: true,
+                    disabled: false,
+                    text: button.textContent?.trim() || null,
+                });
+            })()`, '/Temp/click-infiltration-cash-reward.txt');
+            const result = typeof clicked === "string" ? JSON.parse(clicked) : clicked;
+            if (result?.clicked) return true;
+            ns.write('/Temp/infiltration-cash-reward-debug.txt', JSON.stringify(result), 'w');
+            await ns.sleep(50);
+            continue;
+        }
 
-    if (!takeCash && selectedFaction() !== factionName) {
-        const combo = doc.querySelector('[role="combobox"]');
-        if (combo) {
-            clickElement(combo);
-            await ns.sleep(25);
-            const option = Array.from(doc.querySelectorAll('[role="option"]')).find(el => getText(el) === factionName);
-            if (option) {
-                clickElement(option);
-                await ns.sleep(25);
+        const doc = getDocument();
+        const rewardButton = () => Array.from(doc.querySelectorAll("button")).find(btn => {
+            const text = getText(btn);
+            return text.includes("Trade for");
+        });
+        const combo = () => doc.querySelector('[role="combobox"]') || doc.querySelector('[aria-haspopup="listbox"]');
+        const selectedFaction = () => getText(combo());
+        const isTargetFactionSelected = () => {
+            const selected = selectedFaction();
+            return !!selected && (selected === factionName || selected.includes(factionName) || factionName.includes(selected));
+        };
+
+        if (!takeCash && !isTargetFactionSelected()) {
+            const comboElement = combo();
+            if (comboElement) {
+                clickElement(comboElement);
+                await ns.sleep(50);
+                const option = Array.from(doc.querySelectorAll('[role="option"]')).find(el => getText(el) === factionName);
+                if (option) {
+                    clickElement(option);
+                    await ns.sleep(50);
+                }
             }
         }
-    }
 
-    const button = rewardButton();
-    if (button && !button.disabled && (takeCash || selectedFaction() === factionName))
-        return clickElement(button);
+        const button = rewardButton();
+        if (button && !button.disabled && isTargetFactionSelected())
+            return clickElement(button);
+        await ns.sleep(50);
+    }
     return false;
 }
 

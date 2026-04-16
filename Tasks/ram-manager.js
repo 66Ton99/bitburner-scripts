@@ -22,7 +22,13 @@ export async function main(ns) {
         return log(ns, `ERROR: One of the arguments could not be parsed as a number: ${JSON.stringify(options)}`, true, 'error');
     // Quickly buy as many upgrades as we can within the budget
     do {
-        let cost = await getNsDataThroughFile(ns, `ns.singularity.getUpgradeHomeRamCost()`);
+        let cost;
+        try {
+            cost = await getNsDataThroughFile(ns, `ns.singularity.getUpgradeHomeRamCost()`);
+        } catch (error) {
+            return log(ns, `INFO: Cannot evaluate home RAM upgrade cost right now (${String(error)}). ` +
+                `This usually means there is not enough free RAM to run the temporary singularity helper script.`, true, 'info');
+        }
         let currentRam = await getNsDataThroughFile(ns, `ns.getServerMaxRam(ns.args[0])`, null, ["home"]);
         if (cost >= Number.MAX_VALUE || currentRam == max_ram)
             return log(ns, `INFO: We're at max home RAM (${formatRam(currentRam)})`);
