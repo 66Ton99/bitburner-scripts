@@ -44,7 +44,6 @@ export function autocomplete(data, args) {
 export async function main(ns) {
     const persistentLog = "log.autopilot.txt";
     const factionManagerOutputFile = "/Temp/affordable-augs.txt"; // Temp file produced by faction manager with status information
-    const infiltrateLaunchMarkerFile = "/Temp/autopilot-infiltrate-launched.txt";
     const defaultBnOrder = [ // The order in which we intend to play bitnodes
         // 1st Priority: Key new features and/or major stat boosts
         4.3,  // Normal. Need singularity to automate everything, and need the API costs reduced from 16x -> 4x -> 1x reliably do so from the start of each BN
@@ -102,7 +101,6 @@ export async function main(ns) {
     let playerInstalledAugCount = (/**@returns{null|number}*/() => null)(); // Number of augs installed, or null if we don't have SF4 and can't tell.
     let installedAugmentations = [];
     let acceptedStanek = false, stanekLaunched = false;
-    let infiltrateLaunched = false;
     let daemonStartTime = 0; // The time we personally launched daemon.
     let installCountdown = 0; // Start of a countdown before we install augmentations.
     let installCountdownResets = 0; // Number of times we've reset the countdown because our affordable augs has increased
@@ -149,7 +147,6 @@ export async function main(ns) {
     /** @param {NS} ns **/
     async function startUp(ns) {
         await persistConfigChanges(ns);
-        ns.rm(infiltrateLaunchMarkerFile);
 
         // Collect and cache some one-time data
         resetInfo = await getNsDataThroughFile(ns, 'ns.getResetInfo()');
@@ -536,12 +533,6 @@ export async function main(ns) {
                 "--fracH", resetInfo.currentNode == 8 ? 0.001 : 0.1, // Fraction of wealth to keep as cash (10% - unless in BN8)
                 "--reserve", 0, // Override to ignore the global reserve.txt. Any money we reserve can more or less safely live as stocks
             ]);
-
-        if (!infiltrateLaunched && !ns.read(infiltrateLaunchMarkerFile)) {
-            infiltrateLaunched = true;
-            if (launchScriptHelper(ns, 'infiltrate.js', ['--quiet']))
-                ns.write(infiltrateLaunchMarkerFile, `${Date.now()}`, 'w');
-        }
 
         // Launch sleeves and allow them to also ignore the reserve so they can train up to boost gang unlock speed
         if ((10 in unlockedSFs) && (2 in unlockedSFs) && !findScript('sleeve.js')) {

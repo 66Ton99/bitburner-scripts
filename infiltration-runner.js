@@ -1,4 +1,4 @@
-import { getConfiguration, getNsDataThroughFile, log } from './helpers.js'
+import { getConfiguration, getFilePath, getNsDataThroughFile, log } from './helpers.js'
 
 const argsSchema = [
     ['company', ''],
@@ -23,13 +23,6 @@ export async function main(ns) {
     ns.disableLog('singularity.goToLocation');
     ns.write(options['result-file'], JSON.stringify({ success: false, reason: 'started' }), 'w');
 
-    const infiltrationAutomationActive = await getNsDataThroughFile(ns, `(() => {
-        const wnd = eval("window");
-        return !!wnd.tmrAutoInf;
-    })()`, '/Temp/infiltration-automation-active.txt');
-    if (!infiltrationAutomationActive)
-        return finish(ns, options['result-file'], { success: false, reason: 'infiltrate.js-not-running' });
-
     if (!options.city || !options.company || (!options.cash && !options.faction))
         return finish(ns, options['result-file'], { success: false, reason: 'missing-args' });
 
@@ -46,38 +39,53 @@ export async function main(ns) {
     const startTs = Date.now();
     ns.write(infiltrationStartLockFile, `${startTs}`, 'w');
     ns.write(infiltrationActiveLockFile, `${startTs}`, 'w');
-    await startInfiltrationFromCompanyPage(ns);
+    let automationStarted = false;
+    try {
+        automationStarted = await ensureInfiltrationAutomationStarted(ns);
+        if (!automationStarted) {
+            clearInfiltrationActiveLock(ns);
+            return finish(ns, options['result-file'], { success: false, reason: 'infiltrate.js-start-failed' });
+        }
 
-    while (true) {
-        const state = await getInfiltrationUiState(ns);
-        if (state == "running") {
+        if (!await startInfiltrationFromCompanyPage(ns)) {
+            clearInfiltrationActiveLock(ns);
+            return finish(ns, options['result-file'], { success: false, reason: 'start-failed' });
+        }
+
+        while (true) {
+            const state = await getInfiltrationUiState(ns);
+            if (state == "running") {
+                await ns.sleep(100);
+                continue;
+            }
+            if (state == "start") {
+                await ns.sleep(100);
+                continue;
+            }
+            if (state == "success") {
+                const clicked = await clickInfiltrationRewardButton(ns, options.faction, options.cash);
+                clearInfiltrationActiveLock(ns);
+                if (!await waitForInfiltrationIdle(ns, infiltrationTeardownTimeout))
+                    log(ns, `WARNING: Infiltration UI did not fully clear after success at ${options.company}.`, false, 'warning');
+                return finish(ns, options['result-file'], { success: clicked, reason: clicked ? 'success' : 'reward-click-failed' });
+            }
+            if (state == "hospitalized") {
+                clearInfiltrationActiveLock(ns);
+                await dismissHospitalizedDialog(ns);
+                if (!await waitForInfiltrationIdle(ns, infiltrationTeardownTimeout))
+                    log(ns, `WARNING: Infiltration UI did not fully clear after hospitalization at ${options.company}.`, false, 'warning');
+                return finish(ns, options['result-file'], { success: false, reason: 'hospitalized' });
+            }
+            const activeSince = Number(ns.read(infiltrationActiveLockFile) || 0);
+            if (activeSince > 0 && Date.now() - activeSince > infiltrationPendingTimeout) {
+                clearInfiltrationActiveLock(ns);
+                return finish(ns, options['result-file'], { success: false, reason: 'timeout' });
+            }
             await ns.sleep(100);
-            continue;
         }
-        if (state == "start") {
-            await ns.sleep(100);
-            continue;
-        }
-        if (state == "success") {
-            const clicked = await clickInfiltrationRewardButton(ns, options.faction, options.cash);
-            clearInfiltrationActiveLock(ns);
-            if (!await waitForInfiltrationIdle(ns, infiltrationTeardownTimeout))
-                log(ns, `WARNING: Infiltration UI did not fully clear after success at ${options.company}.`, false, 'warning');
-            return finish(ns, options['result-file'], { success: clicked, reason: clicked ? 'success' : 'reward-click-failed' });
-        }
-        if (state == "hospitalized") {
-            clearInfiltrationActiveLock(ns);
-            await dismissHospitalizedDialog(ns);
-            if (!await waitForInfiltrationIdle(ns, infiltrationTeardownTimeout))
-                log(ns, `WARNING: Infiltration UI did not fully clear after hospitalization at ${options.company}.`, false, 'warning');
-            return finish(ns, options['result-file'], { success: false, reason: 'hospitalized' });
-        }
-        const activeSince = Number(ns.read(infiltrationActiveLockFile) || 0);
-        if (activeSince > 0 && Date.now() - activeSince > infiltrationPendingTimeout) {
-            clearInfiltrationActiveLock(ns);
-            return finish(ns, options['result-file'], { success: false, reason: 'timeout' });
-        }
-        await ns.sleep(100);
+    } finally {
+        if (automationStarted)
+            await ensureInfiltrationAutomationStopped(ns);
     }
 }
 
@@ -117,6 +125,38 @@ async function goToCity(ns, cityName, allowTravel = false) {
     }
     if (await getNsDataThroughFile(ns, `ns.singularity.travelToCity(ns.args[0])`, null, [cityName])) return true;
     log(ns, `WARN: Failed to travel from ${player.city} to ${cityName} for infiltration-runner.`, false, 'warning');
+    return false;
+}
+
+async function isInfiltrationAutomationActive(ns) {
+    return !!await getNsDataThroughFile(ns, `(() => {
+        const wnd = eval("window");
+        return !!wnd.tmrAutoInf;
+    })()`, '/Temp/infiltration-automation-active.txt');
+}
+
+async function ensureInfiltrationAutomationStarted(ns) {
+    if (await isInfiltrationAutomationActive(ns))
+        await ensureInfiltrationAutomationStopped(ns);
+    const pid = await getNsDataThroughFile(ns, 'ns.run(ns.args[0], 1, "--quiet")', null, [getFilePath('infiltrate.js')]);
+    if (!pid) return false;
+    const start = Date.now();
+    while (Date.now() - start < 5000) {
+        if (await isInfiltrationAutomationActive(ns))
+            return true;
+        await ns.sleep(50);
+    }
+    return false;
+}
+
+async function ensureInfiltrationAutomationStopped(ns) {
+    await getNsDataThroughFile(ns, 'ns.run(ns.args[0], 1, "--stop", "--quiet")', null, [getFilePath('infiltrate.js')]);
+    const start = Date.now();
+    while (Date.now() - start < 5000) {
+        if (!await isInfiltrationAutomationActive(ns))
+            return true;
+        await ns.sleep(50);
+    }
     return false;
 }
 
