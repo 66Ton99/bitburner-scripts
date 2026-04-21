@@ -12,6 +12,7 @@ const argsSchema = [
 const infiltrationStartLockFile = "/Temp/work-for-factions-infiltration-lock.txt";
 const infiltrationActiveLockFile = "/Temp/work-for-factions-infiltration-active.txt";
 const infiltrationPendingTimeout = 120000;
+const infiltrationTeardownTimeout = 5000;
 
 /** @param {NS} ns **/
 export async function main(ns) {
@@ -31,6 +32,9 @@ export async function main(ns) {
 
     if (!options.city || !options.company || (!options.cash && !options.faction))
         return finish(ns, options['result-file'], { success: false, reason: 'missing-args' });
+
+    if (!await waitForInfiltrationIdle(ns, infiltrationTeardownTimeout))
+        log(ns, `WARNING: Previous infiltration UI did not fully clear before starting ${options.company}.`, false, 'warning');
 
     if (!await goToCity(ns, options.city, options['allow-travel']))
         return finish(ns, options['result-file'], { success: false, reason: 'travel-failed' });
@@ -57,11 +61,15 @@ export async function main(ns) {
         if (state == "success") {
             const clicked = await clickInfiltrationRewardButton(ns, options.faction, options.cash);
             clearInfiltrationActiveLock(ns);
+            if (!await waitForInfiltrationIdle(ns, infiltrationTeardownTimeout))
+                log(ns, `WARNING: Infiltration UI did not fully clear after success at ${options.company}.`, false, 'warning');
             return finish(ns, options['result-file'], { success: clicked, reason: clicked ? 'success' : 'reward-click-failed' });
         }
         if (state == "hospitalized") {
             clearInfiltrationActiveLock(ns);
             await dismissHospitalizedDialog(ns);
+            if (!await waitForInfiltrationIdle(ns, infiltrationTeardownTimeout))
+                log(ns, `WARNING: Infiltration UI did not fully clear after hospitalization at ${options.company}.`, false, 'warning');
             return finish(ns, options['result-file'], { success: false, reason: 'hospitalized' });
         }
         const activeSince = Number(ns.read(infiltrationActiveLockFile) || 0);
@@ -289,6 +297,63 @@ async function getInfiltrationUiState(ns) {
         if (bodyText.includes("Maximum clearance level:")) return "running";
         return "other";
     })()`, '/Temp/infiltration-ui-state.txt');
+}
+
+async function getInfiltrationRuntimeState(ns) {
+    const raw = await getNsDataThroughFile(ns, `(() => {
+        const doc = eval("document");
+        const wnd = eval("window");
+        const bodyText = doc.body?.innerText || "";
+        const h4Text = Array.from(doc.querySelectorAll("h4")).map(el => el.textContent?.trim() || "");
+        let uiState = "other";
+        if (bodyText.includes("Infiltration was cancelled because you were hospitalized")) uiState = "hospitalized";
+        else if (h4Text.some(text => text.toLowerCase() === "infiltration successful!")) uiState = "success";
+        else if (h4Text.some(text => text.startsWith("Infiltrating ")) &&
+            Array.from(doc.querySelectorAll("button")).some(btn => btn.textContent?.trim() === "Start")) uiState = "start";
+        else if (bodyText.includes("Type it backward")) uiState = "running";
+        else if (bodyText.includes("Enter the Code!")) uiState = "running";
+        else if (bodyText.includes("Close the brackets.")) uiState = "running";
+        else if (bodyText.includes("Slash when his guard is down!")) uiState = "running";
+        else if (bodyText.includes("Remember all the mines!")) uiState = "running";
+        else if (bodyText.includes("Mark all the mines!")) uiState = "running";
+        else if (bodyText.includes("Say something nice about the guard.")) uiState = "running";
+        else if (bodyText.includes("Match the symbols!")) uiState = "running";
+        else if (bodyText.includes("Cut the wires with the following properties!")) uiState = "running";
+        else if (bodyText.includes("Enter the Code")) uiState = "running";
+        else if (bodyText.includes("Maximum clearance level:")) uiState = "running";
+
+        let playerHasInfiltration = null;
+        try {
+            let req = wnd.__bbWebpackRequire;
+            if (!req && wnd.webpackChunkbitburner) {
+                wnd.webpackChunkbitburner.push([[Symbol("infiltration-runner-runtime-state")], {}, (r) => { req = r; }]);
+                wnd.__bbWebpackRequire = req;
+            }
+            const { Player } = req("./src/Player.ts");
+            playerHasInfiltration = !!Player?.infiltration;
+        } catch {
+            playerHasInfiltration = null;
+        }
+
+        return JSON.stringify({ uiState, playerHasInfiltration });
+    })()`, '/Temp/infiltration-runtime-state.txt');
+    try {
+        return typeof raw === 'string' ? JSON.parse(raw) : raw;
+    } catch {
+        return { uiState: 'other', playerHasInfiltration: null };
+    }
+}
+
+async function waitForInfiltrationIdle(ns, timeout = infiltrationTeardownTimeout) {
+    const start = Date.now();
+    while (Date.now() - start < timeout) {
+        const state = await getInfiltrationRuntimeState(ns);
+        const infiltrationActive = state?.playerHasInfiltration === true;
+        const uiBusy = ["running", "start", "success", "hospitalized"].includes(state?.uiState);
+        if (!infiltrationActive && !uiBusy) return true;
+        await ns.sleep(50);
+    }
+    return false;
 }
 
 function clearInfiltrationActiveLock(ns) {

@@ -25,6 +25,7 @@ const stageCases = [
 	{ id: "minesweeper", expectedGames: ["remember all the mines", "mark all the mines"] },
 	{ id: "slash", expectedGames: ["guarding", "distracted"] },
 	{ id: "wirecutting", expectedGames: ["cut the wires with the following properties"] },
+	{ id: "wirecutting-fallback", expectedGames: ["cut the wires with the following properties"] },
 ];
 
 function requirePlaywright() {
@@ -151,6 +152,7 @@ async function main() {
 					Player.infiltration = infiltration;
 					infiltration.level = infiltration.maxLevel;
 					let stage;
+					let fallbackTargets = null;
 					switch (stageCase.id) {
 						case "backward":
 						case "backward-forward":
@@ -175,12 +177,21 @@ async function main() {
 							stage = new stageModules.slash(infiltration);
 							break;
 						case "wirecutting":
+						case "wirecutting-fallback":
 							stage = new stageModules.wirecutting(infiltration);
 							break;
 						default:
 							throw new Error(`Unknown stage case ${stageCase.id}`);
 					}
 					infiltration.stage = stage;
+					if (stageCase.id === "wirecutting-fallback") {
+						const staleTargets = [...stage.wiresToCut].map((index) => index + 1).sort((a, b) => a - b);
+						fallbackTargets = staleTargets.slice();
+						window.__autoinfTestHooks = {
+							getRuntimeInfiltrationStage: () => null,
+							getRemainingFallbackWireTargets: () => staleTargets.slice(),
+						};
+					}
 					Router.toPage(Page.Infiltration);
 					infiltration.updateEvent.emit();
 					window.__codexAutoInf.state.started = true;
@@ -195,14 +206,24 @@ async function main() {
 							const seenGames = logs
 								.filter((line) => line.includes("Infiltration game:"))
 								.map((line) => line.split("Infiltration game:")[1].trim().toLowerCase());
+							const sendSequence = logs
+								.filter((line) => line.includes("cut the wires send"))
+								.map((line) => Number(line.split("cut the wires send")[1].trim()))
+								.filter(Number.isFinite);
+							const fallbackSequenceOk = !fallbackTargets ||
+								(sendSequence.length === fallbackTargets.length &&
+									sendSequence.every((wire, index) => wire === fallbackTargets[index]));
 							return {
 								stageId: stageCase.id,
 								attempt,
-								ok: stageCase.expectedGames.every((name) => seenGames.includes(name)),
+								ok: stageCase.expectedGames.every((name) => seenGames.includes(name)) && fallbackSequenceOk,
+								reason: fallbackSequenceOk ? null : "fallback-send-sequence",
 								stage: stageName,
 								results,
 								seenGames,
 								expectedGames: stageCase.expectedGames,
+								sendSequence,
+								fallbackTargets,
 								logsTail: logs.slice(-120),
 								errors,
 							};
@@ -241,6 +262,7 @@ async function main() {
 						errors,
 					};
 				} finally {
+					delete window.__autoinfTestHooks;
 					console.log = oldLog;
 					console.error = oldError;
 				}
@@ -294,6 +316,7 @@ async function main() {
 			window.__autoinfilLogs = true;
 			const logs = [];
 			const errors = [];
+			let sawFailureMark = false;
 			const oldLog = console.log;
 			const oldError = console.error;
 			console.log = (...args) => {
@@ -354,14 +377,17 @@ async function main() {
 					const infil = Player.infiltration;
 					const stage = infil?.stage?.constructor?.name ?? null;
 					const results = infil?.results ?? "";
+					if (results.includes("✗")) {
+						sawFailureMark = true;
+					}
+					if (sawFailureMark) {
+						return { runNo, ok: false, reason: "failure-mark", stage, results, logsTail: logs.slice(-120), errors };
+					}
 					if (stage === "VictoryModel") {
 						return { runNo, ok: true, stage, results, logsTail: logs.slice(-60), errors };
 					}
 					if (!infil) {
 						return { runNo, ok: false, reason: "ended", stage: null, results, logsTail: logs.slice(-120), errors };
-					}
-					if (results.endsWith("✗")) {
-						return { runNo, ok: false, reason: "failure", stage, results, logsTail: logs.slice(-120), errors };
 					}
 					await new Promise((resolve) => setTimeout(resolve, 25));
 				}

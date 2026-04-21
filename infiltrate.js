@@ -9,7 +9,8 @@
 
 import { devConsole } from './helpers.js';
 
-const AUTOINFIL_VERSION = "autoinfil-2026-04-15-02";
+const AUTOINFIL_VERSION = "autoinfil-2026-04-17-10";
+const blankScreenObservationThreshold = 8;
 
 const state = {
 	// Name of the company that's infiltrated.
@@ -28,33 +29,106 @@ function debugGame(message, data = undefined) {
 	if (!isInfiltrateLoggingEnabled()) {
 		return;
 	}
+	const signature = data === undefined ? message : `${message}|${typeof data === "string" ? data : JSON.stringify(data)}`;
+	if (state.game.lastDebugSignature === signature) {
+		state.game.lastDebugRepeatCount = (state.game.lastDebugRepeatCount || 0) + 1;
+		return;
+	}
+	if (state.game.lastDebugRepeatCount > 0) {
+		devConsole("log", "Infiltration debug:", "repeated", JSON.stringify({
+			message: state.game.lastDebugSignature,
+			count: state.game.lastDebugRepeatCount,
+		}));
+	}
+	state.game.lastDebugSignature = signature;
+	state.game.lastDebugRepeatCount = 0;
 	if (data === undefined) devConsole("log", "Infiltration debug:", message);
 	else devConsole("log", "Infiltration debug:", message, data);
 }
 
-function shouldRetryProgress(progressKey, progressValue, minDelay = 45) {
-	const now = Date.now();
-	if (state.game[progressKey] !== progressValue) {
-		state.game[progressKey] = progressValue;
-		state.game.lastProgressAt = 0;
+function canSendForObservedProgress(progressKey, observedValue) {
+	const observedKey = `${progressKey}Observed`;
+	const pendingKey = `${progressKey}Pending`;
+	const repeatsKey = `${progressKey}Repeats`;
+	if (state.game[observedKey] !== observedValue) {
+		state.game[observedKey] = observedValue;
+		state.game[repeatsKey] = 0;
+		delete state.game[pendingKey];
 		return true;
 	}
-	if (!state.game.lastProgressAt || now - state.game.lastProgressAt >= minDelay) {
+	state.game[repeatsKey] = (state.game[repeatsKey] || 0) + 1;
+	if (!state.game[pendingKey]) {
 		return true;
 	}
-	return false;
+	return state.game[repeatsKey] >= 2;
 }
 
-function markProgressSend(progressKey, progressValue) {
-	state.game[progressKey] = progressValue;
-	state.game.lastProgressAt = Date.now();
+function markProgressSend(progressKey, observedValue, sentValue = observedValue) {
+	state.game[`${progressKey}Observed`] = observedValue;
+	state.game[`${progressKey}Pending`] = sentValue;
+	state.game[`${progressKey}Repeats`] = 0;
+	state.game.lastProgressTick = state.game.loopCount || 0;
+}
+
+function markGameComplete(reason) {
+	if (state.game.completed) {
+		return;
+	}
+	state.game.completed = true;
+	state.game.completeReason = reason;
+	state.game.completedTick = state.game.loopCount || 0;
+	debugGame("game complete", JSON.stringify({
+		game: state.game.current || null,
+		reason,
+	}));
+}
+
+function summarizeGameState() {
+	const summary = {};
+	for (const [key, value] of Object.entries(state.game)) {
+		if (value == null) continue;
+		if (["lastTitle", "lastVisibleTick", "lastInputTick", "lastProgressTick", "lastStallLogTick", "lastCountdownToken", "missingScreenLoops", "loopCount", "pendingTitleRepeats"].includes(key)) {
+			continue;
+		}
+		if (Array.isArray(value)) {
+			summary[key] = value.length > 12 ? { length: value.length, head: value.slice(0, 12) } : value;
+		} else if (typeof value === "object") {
+			summary[key] = "[object]";
+		} else {
+			summary[key] = value;
+		}
+	}
+	return summary;
+}
+
+function maybeLogGameStall(title, runtimeStageName) {
+	const nowTick = state.game.loopCount || 0;
+	const lastActivityTick = Math.max(
+		state.game.lastProgressTick || 0,
+		state.game.lastInputTick || 0,
+		state.game.lastVisibleTick || 0,
+	);
+	if (!lastActivityTick || nowTick - lastActivityTick < 15) {
+		return;
+	}
+	if (state.game.lastStallLogTick && nowTick - state.game.lastStallLogTick < 25) {
+		return;
+	}
+	state.game.lastStallLogTick = nowTick;
+	debugGame("game stall", JSON.stringify({
+		game: state.game.current || null,
+		title: title || null,
+		stage: runtimeStageName || null,
+		sinceTicks: nowTick - lastActivityTick,
+		state: summarizeGameState(),
+	}));
 }
 
 // Speed of game actions, in milliseconds.
 // Keep this conservative enough that the live client has time to commit state changes
 // between inputs, especially on long ECorp infiltrations.
-const baseSpeed = 50;
-const extraInputDelay = 50;
+const baseSpeed = 40;
+const extraInputDelay = 0;
 const speed = baseSpeed + extraInputDelay;
 
 // Small hack to save RAM.
@@ -102,23 +176,19 @@ const infiltrationGames = [
 				if (progress >= runtimeStage.answer.length) {
 					return;
 				}
-				if (!shouldRetryProgress("runtimeProgress", progress)) {
+				if (!canSendForObservedProgress("runtimeProgress", progress)) {
 					return;
 				}
 				const nextChar = runtimeStage.answer[progress];
-				markProgressSend("runtimeProgress", progress);
+				markProgressSend("runtimeProgress", progress, nextChar);
 				pressKey(nextChar);
 				return;
 			}
 			if (!state.game.data || !state.game.data.length) {
+				markGameComplete("type it local data exhausted");
 				delete state.game.data;
 				return;
 			}
-			const remaining = state.game.data.length;
-			if (!shouldRetryProgress("fallbackProgress", remaining, 70)) {
-				return;
-			}
-			markProgressSend("fallbackProgress", remaining);
 			pressKey(state.game.data.shift());
 		},
 	},	
@@ -143,23 +213,19 @@ const infiltrationGames = [
 				if (progress >= runtimeStage.answer.length) {
 					return;
 				}
-				if (!shouldRetryProgress("runtimeProgress", progress)) {
+				if (!canSendForObservedProgress("runtimeProgress", progress)) {
 					return;
 				}
 				const nextChar = runtimeStage.answer[progress];
-				markProgressSend("runtimeProgress", progress);
+				markProgressSend("runtimeProgress", progress, nextChar);
 				pressKey(nextChar);
 				return;
 			}
 			if (!state.game.data || !state.game.data.length) {
+				markGameComplete("type it backward local data exhausted");
 				delete state.game.data;
 				return;
 			}
-			const remaining = state.game.data.length;
-			if (!shouldRetryProgress("fallbackProgress", remaining, 70)) {
-				return;
-			}
-			markProgressSend("fallbackProgress", remaining);
 			pressKey(state.game.data.shift());
 		},
 	},
@@ -180,10 +246,10 @@ const infiltrationGames = [
 				if (!runtimeArrow) {
 					return;
 				}
-				if (!shouldRetryProgress("runtimeProgress", progress)) {
+				if (!canSendForObservedProgress("runtimeProgress", progress)) {
 					return;
 				}
-				markProgressSend("runtimeProgress", progress);
+				markProgressSend("runtimeProgress", progress, runtimeArrow);
 
 				switch (runtimeArrow) {
 					case "↑":
@@ -287,7 +353,7 @@ const infiltrationGames = [
 				if (typed >= runtimeStage.left.length) {
 					return;
 				}
-				if (!shouldRetryProgress("runtimeProgress", typed)) {
+				if (!canSendForObservedProgress("runtimeProgress", typed)) {
 					return;
 				}
 				const char = runtimeStage.left[runtimeStage.left.length - 1 - typed];
@@ -299,19 +365,15 @@ const infiltrationGames = [
 				if (!nextChar) {
 					return;
 				}
-				markProgressSend("runtimeProgress", typed);
+				markProgressSend("runtimeProgress", typed, nextChar);
 				pressKey(nextChar);
 				return;
 			}
 			if (!state.game.data || !state.game.data.length) {
+				markGameComplete("close the brackets local data exhausted");
 				delete state.game.data;
 				return;
 			}
-			const remaining = state.game.data.length;
-			if (!shouldRetryProgress("fallbackProgress", remaining, 70)) {
-				return;
-			}
-			markProgressSend("fallbackProgress", remaining);
 			pressKey(state.game.data.shift());
 		},
 	},
@@ -488,6 +550,23 @@ const infiltrationGames = [
 	{
 		name: "mark all the mines",
 		init: function (screen) {
+			const runtimeStage = getRuntimeInfiltrationStage();
+			if ((!Array.isArray(state.game.data) || !state.game.data.length) &&
+				runtimeStage?.constructor?.name === "MinesweeperModel" &&
+				Array.isArray(runtimeStage.minefield) &&
+				runtimeStage.minefield.length) {
+				state.game.data = runtimeStage.minefield.map(row => Array.isArray(row) ? [...row] : []);
+			}
+			if (!Array.isArray(state.game.data) || !state.game.data.length || !Array.isArray(state.game.data[0])) {
+				state.game.data = [];
+				state.game.x = 0;
+				state.game.y = 0;
+				state.game.cols = 0;
+				state.game.dir = 1;
+				state.game.target = null;
+				debugGame("mark all the mines init", "waiting for minefield");
+				return;
+			}
 			state.game.x = 0;
 			state.game.y = 0;
 			state.game.cols = state.game.data[0].length;
@@ -545,6 +624,9 @@ const infiltrationGames = [
 			}
 
 			let { data, x, y, cols, dir } = state.game;
+			if (!Array.isArray(data) || !data.length || !Array.isArray(data[0]) || !cols) {
+				return;
+			}
 
 			if (data[y][x]) {
 				debugGame("mark all the mines", `mark ${x},${y}`);
@@ -679,7 +761,7 @@ const infiltrationGames = [
 				const x = runtimeStage.x ?? 0;
 				const y = runtimeStage.y ?? 0;
 				const progressToken = `${currentAnswerIndex}:${x},${y}`;
-				if (!shouldRetryProgress("runtimeProgress", progressToken, 60)) {
+				if (!canSendForObservedProgress("runtimeProgress", progressToken)) {
 					return;
 				}
 				debugGame("match the symbols state", {
@@ -692,29 +774,25 @@ const infiltrationGames = [
 				});
 
 				if (toY < y) {
-					markProgressSend("runtimeProgress", progressToken);
+					markProgressSend("runtimeProgress", progressToken, "w");
 					pressKey("w");
 				} else if (toY > y) {
-					markProgressSend("runtimeProgress", progressToken);
+					markProgressSend("runtimeProgress", progressToken, "s");
 					pressKey("s");
 				} else if (toX < x) {
-					markProgressSend("runtimeProgress", progressToken);
+					markProgressSend("runtimeProgress", progressToken, "a");
 					pressKey("a");
 				} else if (toX > x) {
-					markProgressSend("runtimeProgress", progressToken);
+					markProgressSend("runtimeProgress", progressToken, "d");
 					pressKey("d");
 				} else {
-					const settleToken = `settled:${progressToken}`;
-					if (!shouldRetryProgress("runtimeSelection", settleToken, 90)) {
-						return;
-					}
 					debugGame("match the symbols select", {
 						index: currentAnswerIndex,
 						x,
 						y,
 						targetSymbol,
 					});
-					markProgressSend("runtimeProgress", progressToken);
+					markProgressSend("runtimeProgress", progressToken, " ");
 					pressKey(" ");
 				}
 				return;
@@ -729,30 +807,21 @@ const infiltrationGames = [
 
 			const to_y = target[0];
 			const to_x = target[1];
-			const progressToken = `${state.game.data.length}:${x},${y}`;
-			if (!shouldRetryProgress("fallbackProgress", progressToken, 70)) {
-				return;
-			}
 			debugGame("match the symbols target", `${to_x},${to_y}`);
 
 			if (to_y < y) {
-				markProgressSend("fallbackProgress", progressToken);
 				y--;
 				pressKey("w");
 			} else if (to_y > y) {
-				markProgressSend("fallbackProgress", progressToken);
 				y++;
 				pressKey("s");
 			} else if (to_x < x) {
-				markProgressSend("fallbackProgress", progressToken);
 				x--;
 				pressKey("a");
 			} else if (to_x > x) {
-				markProgressSend("fallbackProgress", progressToken);
 				x++;
 				pressKey("d");
 			} else {
-				markProgressSend("fallbackProgress", progressToken);
 				pressKey(" ");
 				state.game.data.shift();
 			}
@@ -764,111 +833,74 @@ const infiltrationGames = [
 	{
 		name: "cut the wires with the following properties",
 		init: function (screen) {
-			let numberHack = ["1", "2", "3", "4", "5", "6", "7", "8", "9"];
-			const colors = {
-				red: "red",
-				white: "white",
-				blue: "blue",
-				"rgb(255, 193, 7)": "yellow",
-			};
-			const wireColor = {
-				red: [],
-				white: [],
-				blue: [],
-				yellow: [],
-			};
-			//gather the instructions
-			var instructions = []
-			for (let child of screen.children) instructions.push(child);
-			var wiresData = instructions.pop();
-			instructions.shift();
-			instructions = getLines(instructions);
-			//get the wire information
-			const samples = getEl(wiresData, "p");
-			const wires = [];
-			//get the amount of wires
-			let wireCount = 0;
-			for (let i = wireCount; i < samples.length; i++) {
-				if (numberHack.includes(samples[i].innerText)) wireCount += 1;
-				else break;
+			const runtimeStage = getRuntimeInfiltrationStage();
+			if (runtimeStage?.constructor?.name === "WireCuttingModel" && runtimeStage.wiresToCut instanceof Set) {
+				state.game.data = [...runtimeStage.wiresToCut].map(index => index + 1).sort((a, b) => a - b);
+				debugGame("cut the wires init", JSON.stringify(state.game.data));
+				return;
 			}
-			let index = 0;
-			//get just the first 3 rows of wires.
-			for (let i = 0; i < 3; i++) {
-				//for each row
-				for (let j = 0; j < wireCount; j++) {
-					const node = samples[index];
-					const color = colors[node.style.color];
-					if (!color) {
-						index += 1;
-						continue;
-					}
-					wireColor[color].push(j + 1);
-					index += 1;
-				}
-			}
-
-			for (let i = 0; i < instructions.length; i++) {
-				const line = instructions[i].trim().toLowerCase();
-
-				if (!line || line.length < 10) {
-					continue;
-				}
-				if (-1 !== line.indexOf("cut wires number")) {
-					const parts = line.split(/(number\s*|\.)/);
-					wires.push(parseInt(parts[2]));
-				}
-				if (-1 !== line.indexOf("cut all wires colored")) {
-					const parts = line.split(/(colored\s*|\.)/);
-					const color = parts[2];
-
-					if (!wireColor[color]) {
-						// should never happen.
-						continue;
-					}
-
-					wireColor[color].forEach((num) => wires.push(num));
-				}
-			}
-
-			// new Set() removes duplicate elements.
-			state.game.data = [...new Set(wires)];
+			state.game.data = getRemainingFallbackWireTargets(screen);
 			debugGame("cut the wires init", JSON.stringify(state.game.data));
 		},
 		play: function (screen) {
 			const runtimeStage = getRuntimeInfiltrationStage();
-			const runtimeWireTargets = runtimeStage?.constructor?.name === "WireCuttingModel" && runtimeStage.wiresToCut instanceof Set
+			const isRuntimeWireStage = runtimeStage?.constructor?.name === "WireCuttingModel";
+			const runtimeWireTargets = isRuntimeWireStage && runtimeStage.wiresToCut instanceof Set
 				? [...runtimeStage.wiresToCut].map(index => index + 1)
 				: null;
-			if (runtimeStage?.constructor?.name === "WireCuttingModel" && runtimeStage.wiresToCut instanceof Set) {
+			if (isRuntimeWireStage && runtimeStage.wiresToCut instanceof Set) {
+				debugGame("cut the wires runtime", JSON.stringify({
+					remaining: runtimeStage.wiresToCut.size,
+					targets: [...runtimeStage.wiresToCut].map(index => index + 1).sort((a, b) => a - b),
+				}));
 				const remaining = runtimeStage.wiresToCut.size;
 				if (remaining === 0) {
 					return;
 				}
-				if (!shouldRetryProgress("runtimeProgress", remaining)) {
+				if (!canSendForObservedProgress("runtimeProgress", remaining)) {
 					return;
 				}
 				const nextWire = [...runtimeStage.wiresToCut].map(index => index + 1).sort((a, b) => a - b)[0];
 				if (nextWire == null) {
 					return;
 				}
-				markProgressSend("runtimeProgress", remaining);
+				markProgressSend("runtimeProgress", remaining, nextWire);
 				pressKey(nextWire.toString());
 				return;
 			}
-			const wire = runtimeWireTargets ?? state.game.data;
-			if (!wire || state.game.data === "done") {
+			if (isRuntimeWireStage) {
+				debugGame("cut the wires runtime", "waiting for wiresToCut");
 				return;
 			}
+			if (state.game.data === "done") {
+				debugGame("cut the wires fallback", JSON.stringify({
+					state: "done",
+					data: null,
+				}));
+				return;
+			}
+			const observedWireTargets = getRemainingFallbackWireTargets(screen);
+			if (!Array.isArray(state.game.data)) {
+				state.game.data = observedWireTargets;
+			}
+			const wire = Array.isArray(state.game.data) ? state.game.data : observedWireTargets;
+			if (!wire) {
+				debugGame("cut the wires fallback", JSON.stringify({
+					state: "empty",
+					data: null,
+				}));
+				return;
+			}
+			debugGame("cut the wires fallback", JSON.stringify({
+				data: Array.isArray(wire) ? wire : null,
+				observed: Array.isArray(observedWireTargets) ? observedWireTargets : null,
+			}));
 			if (!wire.length) {
+				markGameComplete("cut the wires local data exhausted");
 				state.game.data = "done";
 				return;
 			}
-			const remaining = wire.length;
-			if (!shouldRetryProgress("fallbackProgress", remaining, 85)) {
-				return;
-			}
-			markProgressSend("fallbackProgress", remaining);
+			debugGame("cut the wires send", wire[0]);
 			pressKey(wire[0].toString());
 			state.game.data = wire.slice(1);
 		},
@@ -885,6 +917,102 @@ const runtimeStageToGameName = {
 	SlashModel: null,
 	WireCuttingModel: "cut the wires with the following properties",
 };
+
+function getWireCuttingDomState(screen) {
+	const lines = getEl(screen, "p");
+	if (!lines.length) {
+		return null;
+	}
+	let wireCount = 0;
+	while (wireCount < lines.length && /^\d+$/.test(lines[wireCount].textContent?.trim() || "")) {
+		wireCount++;
+	}
+	if (!wireCount) {
+		return null;
+	}
+	const wireRows = [];
+	for (let row = 0; row < 11; row++) {
+		const rowData = [];
+		for (let col = 0; col < wireCount; col++) {
+			const node = lines[wireCount + row * wireCount + col];
+			rowData.push(node?.textContent?.trim() || "");
+		}
+		wireRows.push(rowData);
+	}
+	const cutWires = Array.from({ length: wireCount }, (_, index) => wireRows[3]?.[index] === "" || wireRows[4]?.[index] === "");
+	return { wireCount, cutWires };
+}
+
+function getRemainingFallbackWireTargets(screen) {
+	const hookTargets = callAutoinfTestHook("getRemainingFallbackWireTargets", {
+		screen,
+		game: state.game.current || null,
+		data: Array.isArray(state.game.data) ? [...state.game.data] : state.game.data,
+	});
+	if (hookTargets !== undefined) {
+		return hookTargets;
+	}
+	let numberHack = ["1", "2", "3", "4", "5", "6", "7", "8", "9"];
+	const colors = {
+		red: "red",
+		white: "white",
+		blue: "blue",
+		"rgb(255, 193, 7)": "yellow",
+	};
+	const wireColor = {
+		red: [],
+		white: [],
+		blue: [],
+		yellow: [],
+	};
+	let instructions = [];
+	for (const child of screen.children) instructions.push(child);
+	const wiresData = instructions.pop();
+	instructions.shift();
+	instructions = getLines(instructions);
+	const samples = getEl(wiresData, "p");
+	const wires = [];
+	let wireCount = 0;
+	for (let i = wireCount; i < samples.length; i++) {
+		if (numberHack.includes(samples[i].innerText)) wireCount += 1;
+		else break;
+	}
+	let index = 0;
+	for (let i = 0; i < 3; i++) {
+		for (let j = 0; j < wireCount; j++) {
+			const node = samples[index];
+			const color = colors[node.style.color];
+			if (color) {
+				wireColor[color].push(j + 1);
+			}
+			index += 1;
+		}
+	}
+	for (let i = 0; i < instructions.length; i++) {
+		const line = instructions[i].trim().toLowerCase();
+		if (!line || line.length < 10) continue;
+		const numberMatch = line.match(/^cut wire number\s+(\d+)\.?$/);
+		if (numberMatch) {
+			wires.push(parseInt(numberMatch[1], 10));
+			continue;
+		}
+		const colorMatch = line.match(/^cut all wires colored\s+([a-z]+)\.?$/);
+		if (colorMatch) {
+			const color = colorMatch[1];
+			if (wireColor[color]) wireColor[color].forEach((num) => wires.push(num));
+		}
+	}
+	const domState = getWireCuttingDomState(screen);
+	const uniqueWires = [...new Set(wires)].sort((a, b) => a - b);
+	debugGame("cut the wires parsed rules", JSON.stringify({
+		instructions,
+		targets: uniqueWires,
+	}));
+	if (!domState) {
+		return uniqueWires;
+	}
+	return uniqueWires.filter((wireNumber) => !domState.cutWires[wireNumber - 1]);
+}
 
 function findNextMinesweeperTarget(minefield, answer, startX, startY, width, height) {
 	let bestTarget = null;
@@ -1029,6 +1157,96 @@ function getLines(elements) {
 	elements.forEach((el) => lines.push(el.textContent));
 
 	return lines;
+}
+
+function getCandidateScreen(container) {
+	if (!container) {
+		return null;
+	}
+	return container.children.length >= 3 ? container.children[2] : container.lastElementChild ?? container;
+}
+
+function getScreenTitle(screen) {
+	if (!screen) {
+		return "";
+	}
+	const h4 = getEl(screen, "h4");
+	return h4.length ? h4[0].textContent.trim().toLowerCase().split(/[!.(]/)[0].trim() : "";
+}
+
+function getActiveInfiltrationContainer(containers) {
+	const containerList = Array.from(containers);
+	for (let i = containerList.length - 1; i >= 0; i--) {
+		const screen = getCandidateScreen(containerList[i]);
+		const title = getScreenTitle(screen);
+		if (title) {
+			return { container: containerList[i], screen, title };
+		}
+	}
+	const fallbackContainer = containerList[containerList.length - 1] ?? null;
+	const fallbackScreen = getCandidateScreen(fallbackContainer);
+	return { container: fallbackContainer, screen: fallbackScreen, title: getScreenTitle(fallbackScreen) };
+}
+
+function clearPendingTitle() {
+	delete state.game.pendingTitle;
+	delete state.game.pendingTitleRepeats;
+}
+
+function clearPendingWireState() {
+	delete state.game.pendingWire;
+	delete state.game.pendingWireRepeats;
+}
+
+function getConfirmedTitle(rawTitle, runtimeStageName) {
+	if (!rawTitle) {
+		debugGame("title cleared", runtimeStageName ?? "none");
+		clearPendingTitle();
+		return rawTitle;
+	}
+	const mappedRuntimeGame = runtimeStageToGameName[runtimeStageName] ?? null;
+	if (mappedRuntimeGame && rawTitle === mappedRuntimeGame) {
+		debugGame("title accepted by runtime", JSON.stringify({ rawTitle, runtimeStageName }));
+		clearPendingTitle();
+		return rawTitle;
+	}
+	if (runtimeStageName || !state.game.current || rawTitle === state.game.current || rawTitle === "get ready" || rawTitle === "infiltration successful") {
+		debugGame("title accepted", JSON.stringify({
+			rawTitle,
+			runtimeStageName,
+			current: state.game.current || null,
+		}));
+		clearPendingTitle();
+		return rawTitle;
+	}
+	if (state.game.pendingTitle !== rawTitle) {
+		state.game.pendingTitle = rawTitle;
+		state.game.pendingTitleRepeats = 1;
+		debugGame("pending title", rawTitle);
+		return state.game.current;
+	}
+	state.game.pendingTitleRepeats = (state.game.pendingTitleRepeats || 0) + 1;
+	if (state.game.pendingTitleRepeats < 2) {
+		return state.game.current;
+	}
+	clearPendingTitle();
+	return rawTitle;
+}
+
+function callAutoinfTestHook(name, ...args) {
+	const hook = wnd.__autoinfTestHooks?.[name];
+	if (typeof hook !== "function") {
+		return undefined;
+	}
+	try {
+		return hook(...args);
+	} catch (error) {
+		debugGame("test hook failed", JSON.stringify({
+			name,
+			error: error?.message ?? String(error),
+		}));
+		return undefined;
+	}
 }
 
 function getWebpackRequire() {
@@ -1227,6 +1445,10 @@ function findRuntimeInfiltrationStageFromReact() {
 }
 
 function getRuntimeInfiltrationStage() {
+	const hookStage = callAutoinfTestHook("getRuntimeInfiltrationStage");
+	if (hookStage !== undefined) {
+		return hookStage;
+	}
 	let webpackStatus = "unavailable";
 	try {
 		const req = getWebpackRequire();
@@ -1258,6 +1480,15 @@ function getRuntimeInfiltrationStage() {
  * Reset the state after infiltration is done.
  */
 function endInfiltration() {
+	if (state.game?.current || state.game?.previous) {
+		debugGame("end infiltration state", JSON.stringify({
+			company: state.company || null,
+			game: state.game.current || null,
+			previous: state.game.previous || null,
+			stage: state.game.runtimeStageName || null,
+			reason: state.game.completeReason || null,
+		}));
+	}
 	unwrapEventListeners();
 	state.company = "";
 	state.game = {};
@@ -1327,6 +1558,7 @@ function pressKey(keyOrCode) {
 		return;
 	}
 	const { key, code, keyCode, shiftKey = false } = keyInfo;
+	state.game.lastInputTick = state.game.loopCount || 0;
 	debugGame("pressKey", { key, code, keyCode, shiftKey });
 
 	function sendEvent(event) {
@@ -1390,33 +1622,128 @@ function waitForStart() {
  * Identify the current infiltration game.
  */
 function playGame() {
+	state.game.loopCount = (state.game.loopCount || 0) + 1;
 	const screens = doc.querySelectorAll(".MuiContainer-root");
 	const runtimeStage = getRuntimeInfiltrationStage();
 	const runtimeStageName = runtimeStage?.constructor?.name ?? null;
+	const runtimeRequire = getWebpackRequire();
+	const runtimePlayer = runtimeRequire ? getRuntimePlayer(runtimeRequire) : null;
+	const runtimeInfiltration = runtimePlayer?.infiltration ?? null;
+	const runtimeResults = runtimeInfiltration?.results ?? "";
+	if (state.game.runtimeStageName !== runtimeStageName) {
+		state.game.runtimeStageName = runtimeStageName;
+		logInfo("Infiltration stage:", runtimeStageName ?? "none");
+		debugGame("runtime stage", runtimeStageName ?? "none");
+	}
+	if (state.game.lastResults !== runtimeResults) {
+		state.game.lastResults = runtimeResults;
+		if (runtimeResults) {
+			debugGame("results", JSON.stringify({
+				results: runtimeResults,
+				game: state.game.current || null,
+				stage: runtimeStageName,
+			}));
+		}
+	}
 
 	if (!screens.length) {
 		if (!runtimeStage) {
+			if (runtimeInfiltration) {
+				debugGame("waiting for runtime infiltration state", JSON.stringify({
+					game: state.game.current || null,
+					results: runtimeResults || "",
+				}));
+				return;
+			}
+			state.game.missingScreenLoops = (state.game.missingScreenLoops || 0) + 1;
+			if (!state.game.completed && state.game.missingScreenLoops < blankScreenObservationThreshold) {
+				debugGame("waiting for blank screen transition", JSON.stringify({
+					game: state.game.current || null,
+					missingScreenLoops: state.game.missingScreenLoops,
+				}));
+				return;
+			}
+			if (state.game.completed) {
+				debugGame("ending after completed game blank screen", JSON.stringify({
+					game: state.game.current || null,
+					reason: state.game.completeReason || null,
+				}));
+				endInfiltration();
+				return;
+			}
+			debugGame("infiltration end", JSON.stringify({
+				company: state.company || null,
+				game: state.game.current || null,
+				previous: state.game.previous || null,
+				stage: state.game.runtimeStageName || null,
+				reason: "missing screen and runtime stage",
+			}));
+			logError("Infiltration ended unexpectedly:", {
+				company: state.company || null,
+				game: state.game.current || null,
+				previous: state.game.previous || null,
+				stage: state.game.runtimeStageName || null,
+			});
 			endInfiltration();
+		} else {
+			debugGame("waiting for infiltration screen", runtimeStageName);
 		}
 		return;
 	}
-	const container = screens[0];
-	if (container.children.length < 3 && runtimeStageName !== "CountdownModel" && runtimeStageName !== "VictoryModel" && runtimeStageName !== "IntroModel") {
+	delete state.game.missingScreenLoops;
+	const { container, screen, title: rawTitle } = getActiveInfiltrationContainer(screens);
+	const title = getConfirmedTitle(rawTitle, runtimeStageName);
+	if (!title && container.children.length < 3 && runtimeStageName !== "CountdownModel" && runtimeStageName !== "VictoryModel" && runtimeStageName !== "IntroModel") {
+		debugGame("waiting for screen content", JSON.stringify({
+			stage: runtimeStageName,
+			children: container.children.length,
+		}));
 		return;
 	}
-
-	const screen = container.children.length >= 3 ? container.children[2] : container.lastElementChild ?? container;
-	const h4 = getEl(screen, "h4");
-	const title = h4.length ? h4[0].textContent.trim().toLowerCase().split(/[!.(]/)[0].trim() : "";
+	if (state.game.lastTitle !== title) {
+		state.game.lastTitle = title;
+		logInfo("Infiltration title:", title || "(none)");
+		debugGame("title", title || "(none)");
+	}
+	if (title || runtimeStageName) {
+		state.game.lastVisibleTick = state.game.loopCount || 0;
+	}
 
 	if (runtimeStageName === "VictoryModel" || "infiltration successful" === title) {
+		debugGame("infiltration success", JSON.stringify({
+			company: state.company || null,
+			game: state.game.current || null,
+			stage: runtimeStageName,
+			title: title || null,
+		}));
 		endInfiltration();
 		return;
 	}
 
 	if (runtimeStageName === "CountdownModel" || "get ready" === title) {
+		if (state.game.current === "cut the wires with the following properties" && state.game.pendingWire != null) {
+			debugGame("cut the wires countdown transition", JSON.stringify({
+				wire: state.game.pendingWire,
+				title: title || null,
+				stage: runtimeStageName || null,
+			}));
+			clearPendingWireState();
+			if (!state.game.completed) {
+				markGameComplete("cut the wires advanced to countdown");
+			}
+		}
+		const countdownToken = `${title || ""}|${runtimeStageName || ""}|${state.game.current || ""}`;
+		if (state.game.lastCountdownToken !== countdownToken) {
+			state.game.lastCountdownToken = countdownToken;
+			debugGame("waiting for countdown", JSON.stringify({
+				title: title || null,
+				stage: runtimeStageName,
+				game: state.game.current || null,
+			}));
+		}
 		return;
 	}
+	delete state.game.lastCountdownToken;
 
 	let currentGameName = title || state.game.current || "";
 	if (runtimeStageName === "MinesweeperModel") {
@@ -1428,8 +1755,15 @@ function playGame() {
 	} else if (runtimeStageToGameName[runtimeStageName]) {
 		currentGameName = runtimeStageToGameName[runtimeStageName];
 	}
+	debugGame("game resolution", JSON.stringify({
+		title: title || null,
+		runtimeStageName,
+		current: state.game.current || null,
+		resolved: currentGameName || null,
+	}));
 
 	if (!currentGameName) {
+		maybeLogGameStall(title, runtimeStageName);
 		return;
 	}
 
@@ -1437,14 +1771,44 @@ function playGame() {
 
 	if (game) {
 		if (state.game.current !== currentGameName) {
-			state.game.current = currentGameName;
+			const prevGame = state.game;
+			const prevGameName = prevGame.current || "none";
+			const carryMinesData =
+				prevGame.current === "remember all the mines" &&
+				currentGameName === "mark all the mines" &&
+				Array.isArray(prevGame.data) &&
+				prevGame.data.length;
+			state.game = carryMinesData
+				? { current: currentGameName, previous: prevGame.current || null, data: prevGame.data }
+				: { current: currentGameName, previous: prevGame.current || null };
 			logInfo("Infiltration game:", currentGameName);
+			debugGame("game transition", `${prevGameName} -> ${currentGameName}`);
 			game.init(screen);
+			return;
+		}
+		if (state.game.completed) {
+			const completedToken = `${currentGameName}|${title || ""}|${runtimeStageName || ""}|${state.game.completeReason || ""}`;
+			if (state.game.lastCompletedWaitToken !== completedToken) {
+				state.game.lastCompletedWaitToken = completedToken;
+				debugGame("waiting for completed game transition", JSON.stringify({
+					game: currentGameName,
+					title: title || null,
+					stage: runtimeStageName || null,
+					reason: state.game.completeReason || null,
+				}));
+			}
+			return;
 		}
 
 		game.play(screen);
+		maybeLogGameStall(title, runtimeStageName);
 	} else {
-		logError("Unknown game:", currentGameName);
+		logError("Unknown game:", {
+			game: currentGameName,
+			previous: state.game.previous || null,
+			title: title || null,
+			stage: runtimeStageName || null,
+		});
 	}
 }
 

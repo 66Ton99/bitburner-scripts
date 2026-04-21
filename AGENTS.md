@@ -20,7 +20,6 @@ Project-specific guidance for coding agents working in `bitburner-scripts`.
 
 ## Infiltration Rules
 
-- Do not modify `infiltrate.js` unless the user explicitly asks for it.
 - Infiltration orchestration belongs in `work-for-factions.js` and `infiltration-runner.js`.
 - If changing infiltration behavior, prefer explicit parameters and small isolated helpers/scripts.
 - When debugging repeated infiltration retries, log the concrete failure reason, not just the selected target.
