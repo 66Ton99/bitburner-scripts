@@ -11,6 +11,7 @@ Project-specific guidance for coding agents working in `bitburner-scripts`.
 ## User Preferences
 
 - Keep responses concise and direct.
+- Do not make assumptions. Verify behavior, state, and root cause from code or runtime evidence before changing anything.
 - Use `apply_patch` for file edits.
 - Favor pragmatic fixes over theoretical refactors.
 - Do real runtime verification, not just static checks.
@@ -86,7 +87,6 @@ Project-specific guidance for coding agents working in `bitburner-scripts`.
 
 - After changing JS files, run `node --check` on each edited script.
 - If a behavior depends on runtime UI state, say so explicitly in the final response.
-- If changing infiltration stage handling, fallback DOM logic, or reward-click UI behavior, run `verify-infiltrate-runtime.js`, not just `node --check`.
 - Keep verifier-only debug enablement isolated to the verifier path; do not globally enable infiltration debug logs for live gameplay.
 - If changing `work-for-factions.js`, `autopilot.js`, or other orchestration scripts, prefer at least one live headless run that reaches the touched path.
 

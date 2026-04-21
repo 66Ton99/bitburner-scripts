@@ -73,10 +73,7 @@ Useful options:
 ## Infiltration Notes
 
 - `infiltrate.js` is browser automation for infiltration minigames.
-- Debug logging in `infiltrate.js` is optional and disabled by default. Error logging remains enabled.
-- For temporary live debugging in the browser console, use `window.__autoinfilLogs = true`. To turn it back off, use `window.__autoinfilLogs = false`.
 - `infiltration-runner.js` is the one-shot executor used by `work-for-factions.js` to start an infiltration, wait for completion, and claim the reward.
-- If you change infiltration UI logic or minigame handling, do not stop at syntax checks. Run `verify-infiltrate-runtime.js` to verify actual runtime behaviour.
 
 If you want more information about any script, try reading the source. I do my best to document things clearly. If it's not clear, feel free to raise an issue.
 
