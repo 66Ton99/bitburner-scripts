@@ -652,6 +652,13 @@ function normalizeGameTitle(title) {
  */
 function playGame() {
 	const screens = doc.querySelectorAll(".MuiContainer-root");
+	const bodyText = doc.body?.innerText || "";
+
+	if (bodyText.includes("Infiltration was cancelled because you were hospitalized")) {
+		console.error("Infiltration failed: hospitalized during", state.company || "unknown target");
+		endInfiltration();
+		return;
+	}
 
 	if (!screens.length) {
 		endInfiltration();
