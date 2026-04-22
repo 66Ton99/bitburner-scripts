@@ -135,9 +135,15 @@ async function isInfiltrationAutomationActive(ns) {
     })()`, '/Temp/infiltration-automation-active.txt');
 }
 
+async function forceKillInfiltrationAutomation(ns) {
+    await getNsDataThroughFile(ns, 'ns.scriptKill(ns.args[0], ns.args[1])',
+        '/Temp/kill-infiltrate-script.txt', [getFilePath('infiltrate.js'), 'home']);
+}
+
 async function ensureInfiltrationAutomationStarted(ns) {
-    if (await isInfiltrationAutomationActive(ns))
-        await ensureInfiltrationAutomationStopped(ns);
+    await ensureInfiltrationAutomationStopped(ns);
+    await forceKillInfiltrationAutomation(ns);
+    await ns.sleep(50);
     const pid = await getNsDataThroughFile(ns, 'ns.run(ns.args[0], 1, "--quiet")',
         '/Temp/run-infiltrate-quiet.txt', [getFilePath('infiltrate.js')]);
     if (!pid) return false;
@@ -159,7 +165,9 @@ async function ensureInfiltrationAutomationStopped(ns) {
             return true;
         await ns.sleep(50);
     }
-    return false;
+    await forceKillInfiltrationAutomation(ns);
+    await ns.sleep(50);
+    return !await isInfiltrationAutomationActive(ns);
 }
 
 async function clickInfiltrateCompanyButton(ns) {

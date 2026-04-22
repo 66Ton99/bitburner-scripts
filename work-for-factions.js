@@ -1,6 +1,6 @@
 import {
     instanceCount, getConfiguration, getNsDataThroughFile, getFilePath, getActiveSourceFiles, tryGetBitNodeMultipliers,
-    formatDuration, formatMoney, formatNumberShort, disableLogs, log, getErrorInfo, tail, devConsole
+    formatDuration, formatMoney, formatNumberShort, disableLogs, log, getErrorInfo, tail, devConsole, getStocksValue
 } from './helpers.js'
 
 let options;
@@ -112,8 +112,6 @@ const infiltrationTravelFailedLocationCooldown = 60 * 1000; // Avoid spam-retryi
 const minAdaptiveInfiltrationDifficulty = 1.0;
 const lowMoneyInfiltrationDifficulty = 2.5;
 const repInfiltrationDifficultyCap = 3.35;
-const repInfiltrationTrainingDifficultyWindow = 0.5;
-const repInfiltrationTrainingRepGainMultiplier = 1.5;
 const cityTravelCost = 200000;
 
 let shouldFocus; // Whether we should focus on work or let it be backgrounded (based on whether "Neuroreceptor Management Implant" is owned, or "--no-focus" is specified)
@@ -143,7 +141,10 @@ export async function main(ns) {
     options = runOptions; // We don't set the global "options" until we're sure this is the only running instance
     scriptPid = ns.pid;
     disableLogs(ns, ['sleep']);
-    if (!options['no-tail-windows']) tail(ns);
+    if (!options['no-tail-windows']) {
+        tail(ns);
+        ns.atExit(() => ns.ui.closeTail(ns.pid));
+    }
 
     // Reset globals whose value can persist between script restarts in weird situations
     lastTravel = crimeCount = currentBitnode = 0;
@@ -811,6 +812,18 @@ async function trainCombatStatsUpTo(ns, requirement, factionName = "unknown fact
     }
 }
 
+/** @param {NS} ns */
+async function ensureBackgroundDexterityTraining(ns) {
+    const player = await getPlayerInfo(ns);
+    if ((player.skills.dexterity || 0) >= 900)
+        return true;
+    const currentWork = await getCurrentWorkInfo(ns);
+    const currentClassType = String(currentWork.classType || "").toLowerCase();
+    if (["str", "def", "dex", "agi"].includes(currentClassType))
+        return currentClassType === "dex";
+    return await workOutAtGym(ns, false, "dex", "Powerhouse Gym");
+}
+
 /** @param {NS} ns
  * Helper to wait for studies to be complete */
 async function monitorStudies(ns, stat, requirement) {
@@ -1062,23 +1075,37 @@ export async function workForSingleFaction(ns, factionName, forceUnlockDonations
         }
         const remainingRep = Math.max(0, factionRepRequired - currentReputation);
         const currentMoney = (await getPlayerInfo(ns)).money;
+        const stockValue = await getStocksValue(ns);
+        const currentWealth = currentMoney + stockValue;
         const desiredAugCost = Math.max(0, mostExpensiveDesiredAugCostByFaction[factionName] || 0);
-        const moneyShortfall = Math.max(0, desiredAugCost - currentMoney);
+        const moneyShortfall = Math.max(0, desiredAugCost - currentWealth);
+        if (moneyShortfall > 0) {
+            const status = `Pausing faction infiltration for "${factionName}" to farm money ` +
+                `(current ${formatMoney(currentMoney)} cash + ${formatMoney(stockValue)} stock, ` +
+                `need ${formatMoney(moneyShortfall)} more for desired aug cost ${formatMoney(desiredAugCost)}).`;
+            if (lastFactionWorkStatus != status) {
+                lastFactionWorkStatus = status;
+                ns.print(status);
+            }
+            await workForInfiltrationMoney(ns, desiredAugCost);
+            continue;
+        }
         const bestLocation = await pickBestInfiltrationLocation(ns, remainingRep, currentMoney);
         if (!bestLocation) {
             ns.print(`No feasible infiltration target right now. Waiting instead of starting faction work for "${factionName}".`);
             await ns.sleep(loopSleepInterval);
             continue;
         }
-        const trainingTarget = await pickInfiltrationTrainingTarget(ns, currentMoney, bestLocation);
+        const trainingTarget = await pickInfiltrationTrainingTarget(ns, currentMoney, remainingRep, bestLocation);
         if (trainingTarget) {
             log(ns, `INFO: Training combat stats for "${factionName}" before infiltrating. ` +
-                `Current best target "${bestLocation.location.name}" pays ~${Math.round(bestLocation.reward.tradeRep).toLocaleString('en')} rep, ` +
-                `but "${trainingTarget.location.location.name}" would pay ~${Math.round(trainingTarget.location.reward.tradeRep).toLocaleString('en')} rep ` +
+                `Current best target "${bestLocation.location.name}" has ETA ${formatDuration(trainingTarget.currentBestEtaMs)}, ` +
+                `but "${trainingTarget.location.location.name}" is estimated faster at ${formatDuration(trainingTarget.totalEtaMs)} ` +
                 `once all combat stats reach ${trainingTarget.requiredCombatStat}.`, false, 'info');
             await trainCombatStatsUpTo(ns, trainingTarget.requiredCombatStat, `${factionName} infiltration`);
             continue;
         }
+        await ensureBackgroundDexterityTraining(ns);
         const playerBeforeTravel = await getPlayerInfo(ns);
         const travelNeeded = playerBeforeTravel.city != bestLocation.location.city;
         const targetSummary = `${factionName}|${bestLocation.location.city}|${bestLocation.location.name}|${playerBeforeTravel.city}|${travelNeeded}`;
@@ -1205,32 +1232,61 @@ function getRequiredCombatStatForInfiltration(infiltration, player, targetDiffic
     return Math.max(0, Math.ceil((requiredTotalStats - currentCharisma) / 4));
 }
 
-async function pickInfiltrationTrainingTarget(ns, currentMoney, currentBestLocation) {
+function estimateInfiltrationRunTimeMs(infiltration) {
+    const maxLevel = infiltration?.maxClearanceLevel || 1;
+    const difficulty = infiltration?.difficulty || 0;
+    return 4000 * maxLevel + 2000 * difficulty;
+}
+
+function estimateCombatTrainingTimeMs(player, requiredCombatStat) {
+    const statOrder = ["strength", "defense", "dexterity", "agility"];
+    return statOrder.reduce((total, stat) => {
+        const deficit = Math.max(0, requiredCombatStat - (player.skills[stat] || 0));
+        if (deficit <= 0) return total;
+        const rate = Math.max(0.001, classHeuristic(player, stat));
+        return total + (deficit / rate) * 60_000;
+    }, 0);
+}
+
+function estimateRepInfiltrationEtaMs(infiltration, remainingRep, travelNeeded, trainingTimeMs = 0) {
+    const repPerRun = Math.max(1, infiltration?.reward?.tradeRep || 0);
+    const runsNeeded = Math.max(1, Math.ceil(remainingRep / repPerRun));
+    const travelTimeMs = travelNeeded ? 30_000 : 0;
+    return trainingTimeMs + travelTimeMs + runsNeeded * estimateInfiltrationRunTimeMs(infiltration);
+}
+
+async function pickInfiltrationTrainingTarget(ns, currentMoney, remainingRep, currentBestLocation) {
     if (!currentBestLocation?.reward?.tradeRep) return null;
     const locations = await getNsDataThroughFile(ns, `ns.infiltration.getPossibleLocations()`, '/Temp/infiltration-locations.txt');
     if (!locations?.length) return null;
     const infiltrationByLocation = await getInfiltrationDataByLocation(ns, locations.map(location => location.name));
     const player = await getPlayerInfo(ns);
-    const currentBestRep = currentBestLocation.reward.tradeRep || 0;
     const currentCap = repInfiltrationDifficultyCap;
+    const currentBestEtaMs = estimateRepInfiltrationEtaMs(currentBestLocation, remainingRep, currentBestLocation.location?.city != player.city);
     const trainingCandidates = Object.values(infiltrationByLocation)
         .filter(infiltration => canReachInfiltrationLocation(infiltration, player.city, currentMoney) &&
-            (infiltration?.reward?.tradeRep || 0) >= currentBestRep * repInfiltrationTrainingRepGainMultiplier &&
-            infiltration?.difficulty > currentCap &&
-            infiltration?.difficulty <= currentCap + repInfiltrationTrainingDifficultyWindow)
+            infiltration?.difficulty > currentCap)
         .map(infiltration => ({
             location: infiltration,
             requiredCombatStat: getRequiredCombatStatForInfiltration(infiltration, player, currentCap)
         }))
         .filter(candidate => candidate.requiredCombatStat > 0 &&
             ["strength", "defense", "dexterity", "agility"].some(stat => player.skills[stat] < candidate.requiredCombatStat))
-        .sort((a, b) => b.location.reward.tradeRep - a.location.reward.tradeRep ||
-            a.requiredCombatStat - b.requiredCombatStat ||
-            a.location.difficulty - b.location.difficulty);
+        .map(candidate => {
+            const trainingTimeMs = estimateCombatTrainingTimeMs(player, candidate.requiredCombatStat);
+            const totalEtaMs = estimateRepInfiltrationEtaMs(candidate.location, remainingRep, candidate.location.location?.city != player.city, trainingTimeMs);
+            return { ...candidate, trainingTimeMs, totalEtaMs, currentBestEtaMs };
+        })
+        .filter(candidate => candidate.totalEtaMs < currentBestEtaMs)
+        .sort((a, b) => a.totalEtaMs - b.totalEtaMs ||
+            b.location.reward.tradeRep - a.location.reward.tradeRep ||
+            a.requiredCombatStat - b.requiredCombatStat);
     const selectedTrainingTarget = trainingCandidates[0] ?? null;
     if (selectedTrainingTarget)
         devConsoleLog(`Selected infiltration training target "${selectedTrainingTarget.location.location.name}" ` +
-            `requiring combat stats ${selectedTrainingTarget.requiredCombatStat} to unlock ~${Math.round(selectedTrainingTarget.location.reward.tradeRep).toLocaleString('en')} rep per run.`);
+            `requiring combat stats ${selectedTrainingTarget.requiredCombatStat}. ETA current="${formatDuration(selectedTrainingTarget.currentBestEtaMs)}", ` +
+            `training="${formatDuration(selectedTrainingTarget.trainingTimeMs)}", target="${formatDuration(selectedTrainingTarget.totalEtaMs)}", ` +
+            `rep/run ~${Math.round(selectedTrainingTarget.location.reward.tradeRep).toLocaleString('en')}.`);
     return selectedTrainingTarget;
 }
 
@@ -1324,6 +1380,7 @@ async function workForInfiltrationMoney(ns, moneyTarget) {
         await ns.sleep(loopSleepInterval);
         return false;
     }
+    await ensureBackgroundDexterityTraining(ns);
     const targetSummary = moneyTarget > currentMoney ?
         `target ${formatMoney(moneyTarget)}, ` :
         '';

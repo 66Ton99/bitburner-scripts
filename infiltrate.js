@@ -638,6 +638,15 @@ function waitForStart() {
 	btnStart.click();
 }
 
+function normalizeGameTitle(title) {
+	return title
+		.trim()
+		.toLowerCase()
+		.replace(/\s+/g, " ")
+		.replace(/\s*[!.()]+$/g, "")
+		.trim();
+}
+
 /**
  * Identify the current infiltration game.
  */
@@ -660,7 +669,7 @@ function playGame() {
 		return;
 	}
 
-	const title = h4[0].textContent.trim().toLowerCase().split(/[!.(]/)[0];
+	const title = normalizeGameTitle(h4[0].textContent);
 
 	if ("infiltration successful" === title) {
 		endInfiltration();
@@ -671,7 +680,7 @@ function playGame() {
 		return;
 	}
 
-	const game = infiltrationGames.find((game) => game.name === title);
+	const game = infiltrationGames.find((game) => title === game.name || title.startsWith(game.name));
 
 	if (game) {
 		if (state.game.current !== title) {
