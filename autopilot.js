@@ -813,7 +813,7 @@ export async function main(ns) {
         if (4 in unlockedSFs) // No big deal if we can't, casino.js has logic to find the stop button and click it.
             _ = await getNsDataThroughFile(ns, `ns.singularity.stopAction()`);
 
-        const pid = launchScriptHelper(ns, 'casino.js', ['--kill-all-scripts', true, '--on-completion-script', ns.getScriptName()]);
+        const pid = launchScriptHelper(ns, 'casino.js', ['--game', 'roulette', '--kill-all-scripts', true, '--on-completion-script', ns.getScriptName()]);
         if (pid) {
             await waitForProcessToComplete(ns, pid);
             await ns.sleep(10000); // Give time for this script to be killed if the game is being restarted by casino.js

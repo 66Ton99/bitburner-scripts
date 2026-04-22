@@ -86,6 +86,7 @@ Project-specific guidance for coding agents working in `bitburner-scripts`.
 ## Validation
 
 - After changing JS files, run `node --check` on each edited script.
+- Do not close runtime-affecting changes on theory alone. Verify them in live headless Bitburner runtime before the final response.
 - If a behavior depends on runtime UI state, say so explicitly in the final response.
 - Keep verifier-only debug enablement isolated to the verifier path; do not globally enable infiltration debug logs for live gameplay.
 - If changing `work-for-factions.js`, `autopilot.js`, or other orchestration scripts, prefer at least one live headless run that reaches the touched path.
