@@ -11,7 +11,7 @@ export function formatMoney(num, maxSignificantFigures = 6, maxDecimalPlaces = 3
 
 export function isDevToolsOpen() {
     try {
-        const wnd = eval("window");
+        const wnd = globalThis.window;
         if (!wnd) return false;
         const widthGap = Math.abs((wnd.outerWidth || 0) - (wnd.innerWidth || 0));
         const heightGap = Math.abs((wnd.outerHeight || 0) - (wnd.innerHeight || 0));
@@ -24,7 +24,7 @@ export function isDevToolsOpen() {
 export function devConsole(method, ...args) {
     if (!isDevToolsOpen()) return;
     try {
-        const consoleRef = eval("console");
+        const consoleRef = globalThis.console;
         const fn = consoleRef?.[method];
         if (typeof fn === "function") fn(...args);
     } catch { }

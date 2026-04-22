@@ -21,7 +21,7 @@ const state = {
 };
 
 // Speed of game actions, in milliseconds. Default 22
-const speed = 25;
+const speed = 22;
 
 // Small hack to save RAM.
 // This will work smoothly, because the script does not use
