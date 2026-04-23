@@ -14,9 +14,9 @@ function getSelectedGame(rawArgs) {
         if (rawArgs[i] !== '--game')
             continue;
         const value = rawArgs[i + 1];
-        return typeof value === 'string' ? value : 'blackjack';
+        return typeof value === 'string' ? value : 'roulette';
     }
-    return 'blackjack';
+    return 'roulette';
 }
 
 function removeGameArg(rawArgs) {
