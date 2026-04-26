@@ -1,7 +1,7 @@
 import {
     log, getFilePath, getConfiguration, instanceCount, getNsDataThroughFile, runCommand, waitForProcessToComplete,
     getActiveSourceFiles, tryGetBitNodeMultipliers, getStocksValue, unEscapeArrayArgs,
-    formatMoney, formatDuration, formatNumber, getErrorInfo, tail, jsonReplacer
+    formatMoney, formatDuration, formatNumber, formatRam, getErrorInfo, tail, jsonReplacer
 } from './helpers.js'
 
 const argsSchema = [ // The set of all command line arguments
@@ -1167,14 +1167,24 @@ export async function main(ns) {
     function launchScriptHelper(ns, baseScriptName, args = [], convertFileName = true) {
         if (!options['no-tail-windows'])
             tail(ns); // If we're going to be launching scripts, show our tail window so that we can easily be killed if the user wants to interrupt.
+        const scriptName = convertFileName ? getFilePath(baseScriptName) : baseScriptName;
         let pid, err;
-        try { pid = ns.run(convertFileName ? getFilePath(baseScriptName) : baseScriptName, 1, ...args); }
+        try { pid = ns.run(scriptName, 1, ...args); }
         catch (e) { err = e; }
         if (pid)
             log(ns, `INFO: Launched ${baseScriptName} (pid: ${pid}) with args: [${args.join(", ")}]`, true);
-        else
+        else {
+            let ramDiagnostic = "";
+            try {
+                const requiredRam = ns.getScriptRam(scriptName, 'home');
+                const homeMaxRam = ns.getServerMaxRam('home');
+                const homeUsedRam = ns.getServerUsedRam('home');
+                ramDiagnostic = `\nRAM: needs ${formatRam(requiredRam)}, free ${formatRam(homeMaxRam - homeUsedRam)} / max ${formatRam(homeMaxRam)} on home.`;
+            } catch { }
             log(ns, `ERROR: Failed to launch ${baseScriptName} with args: [${args.join(", ")}]` +
+                ramDiagnostic +
                 (err ? `\nCaught: ${getErrorInfo(err)}` : ''), true, 'error');
+        }
         return pid;
     }
 

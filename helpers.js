@@ -11,7 +11,8 @@ export function formatMoney(num, maxSignificantFigures = 6, maxDecimalPlaces = 3
 
 export function isDevToolsOpen() {
     try {
-        const wnd = globalThis.window;
+        // Avoid a direct "window" reference so importing helpers.js does not incur DOM RAM cost.
+        const wnd = eval("window");
         if (!wnd) return false;
         const widthGap = Math.abs((wnd.outerWidth || 0) - (wnd.innerWidth || 0));
         const heightGap = Math.abs((wnd.outerHeight || 0) - (wnd.innerHeight || 0));

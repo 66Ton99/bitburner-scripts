@@ -29,6 +29,30 @@ const speed = 22;
 const wnd = eval("window");
 const doc = wnd["document"];
 
+function getAutomationTimerIds() {
+	if (!Array.isArray(wnd.tmrAutoInfIds)) {
+		wnd.tmrAutoInfIds = [];
+	}
+	return wnd.tmrAutoInfIds;
+}
+
+function stopAutomation(print = null) {
+	const timerIds = getAutomationTimerIds();
+	if (wnd.tmrAutoInf) {
+		timerIds.push(wnd.tmrAutoInf);
+	}
+	const uniqueTimerIds = [...new Set(timerIds.filter(Boolean))];
+	if (uniqueTimerIds.length && print) {
+		print("Stopping automated infiltration...");
+	}
+	for (const timerId of uniqueTimerIds) {
+		clearInterval(timerId);
+	}
+	delete wnd.tmrAutoInf;
+	wnd.tmrAutoInfIds = [];
+	endInfiltration();
+}
+
 // List of all games and an automated solver.
 const infiltrationGames = [
 	{
@@ -458,7 +482,7 @@ export async function main(ns) {
 	}
 
 	if (args.status) {
-		if (wnd.tmrAutoInf) {
+		if (wnd.tmrAutoInf || getAutomationTimerIds().length > 0) {
 			print("Automated infiltration is active");
 		} else {
 			print("Automated infiltration is inactive");
@@ -466,11 +490,7 @@ export async function main(ns) {
 		return;
 	}
 
-	if (wnd.tmrAutoInf) {
-		print("Stopping automated infiltration...");
-		clearInterval(wnd.tmrAutoInf);
-		delete wnd.tmrAutoInf;
-	}
+	stopAutomation(print);
 
 	if (args.stop) {
 		return;
@@ -485,6 +505,7 @@ export async function main(ns) {
 	// Monitor the current screen and start infiltration once a
 	// valid screen is detected.
 	wnd.tmrAutoInf = setInterval(infLoop, speed);
+	getAutomationTimerIds().push(wnd.tmrAutoInf);
 
 	// Modify the addEventListener logic.
 	wrapEventListeners();
