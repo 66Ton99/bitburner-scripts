@@ -381,7 +381,10 @@ async function startAutoRoulette(ns) {
     const bet = playthrough.predictedWinner >= 0 ?
       Math.min(1e7, Math.floor(ns.getPlayer().money * 0.9)) :
       options['training-bet'];
-    if (bet <= 0) throw new Error("Not enough money to continue roulette automation.");
+    if (bet <= 0) {
+      log(ns, "WARNING: Not enough money to continue roulette automation. Reloading previous save...", true, 'warning');
+      return await reloadGame(ns);
+    }
     await setText(ns, wagerInput, `${bet}`);
     await click(ns, await findRequiredElement(ns, `//button[normalize-space(text())='${guess}']`));
     const result = await waitForRoundResult(ns, guess);
@@ -479,6 +482,26 @@ async function onCompletion(ns, kickedOutAfterPlaying = true) {
     log(ns, `INFO: casino-roulette.js shutting down and launching ${completionScript}...`, false, 'info');
   else
     log(ns, `WARNING: casino-roulette.js shutting down, but failed to launch ${completionScript}...`, false, 'warning');
+}
+
+async function reloadGame(ns) {
+  let attempts = 0;
+  let errMessage = '';
+  while (attempts++ <= 5) {
+    const win = eval("window");
+    win.onbeforeunload = null;
+    await ns.sleep(options['click-sleep-time']);
+    if (attempts < 2)
+      win.location = win.location;
+    else if (attempts < 3)
+      win.location.reload();
+    else if (attempts < 4)
+      win.location.reload(true);
+    await ns.sleep(10000);
+    errMessage = `casino-roulette.js asked the game to reload ${attempts} times, but it didn't.`;
+    log(ns, `WARNING: ${errMessage} Trying again...`, true, 'warning');
+  }
+  throw new Error(`${errMessage} Giving up.`);
 }
 
 async function killAllOtherScripts(ns, removeRemoteFiles) {
