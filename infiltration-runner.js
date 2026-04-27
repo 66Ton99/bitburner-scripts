@@ -66,6 +66,10 @@ export async function main(ns) {
                 clearInfiltrationActiveLock(ns);
                 if (!await waitForInfiltrationIdle(ns, infiltrationTeardownTimeout))
                     log(ns, `WARNING: Infiltration UI did not fully clear after success at ${options.company}.`, false, 'warning');
+                log(ns, clicked ?
+                    `SUCCESS: Claimed infiltration reward from ${options.company} for ${options.cash ? 'cash' : `faction rep with "${options.faction}"`}.` :
+                    `WARNING: Failed to claim infiltration reward from ${options.company} for ${options.cash ? 'cash' : `faction rep with "${options.faction}"`}.`,
+                    false, clicked ? 'success' : 'warning');
                 return finish(ns, options['result-file'], { success: clicked, reason: clicked ? 'success' : 'reward-click-failed' });
             }
             if (state == "hospitalized") {

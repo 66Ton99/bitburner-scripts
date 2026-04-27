@@ -212,8 +212,10 @@ async function mainLoop(ns) {
         await onTerritoryTick(ns, myGangInfo); //Do most things only once per territory tick
         isReadyForNextTerritoryTick = false;
         lastTerritoryPower = myGangInfo.power;
-    } else if (isReadyForNextTerritoryTick)
-        log(ns, `INFO: Waiting for territory to tick. (Waiting for gang power to change from ${formatNumberShort(lastTerritoryPower)}. ETA: ${formatDuration(territoryNextTick - thisLoopStart)}`);
+    } else if (isReadyForNextTerritoryTick) {
+        const previousPower = lastTerritoryPower == null ? "unknown" : formatNumberShort(lastTerritoryPower);
+        log(ns, `INFO: Waiting for territory to tick. (Waiting for gang power to change from ${previousPower}. ETA: ${formatDuration(territoryNextTick - thisLoopStart)}`);
+    }
     lastLoopTime = thisLoopStart; // Due to periodic lag, we must track the last time we checked, can't assume it was `updateInterval` ago.
 }
 
@@ -222,7 +224,8 @@ async function mainLoop(ns) {
 async function onTerritoryTick(ns, myGangInfo) {
     territoryNextTick = lastLoopTime + territoryTickTime / (ns.gang.getBonusTime() > 0 ? 5 : 1); // Reset the time the next tick will occur
     if (lastTerritoryPower != myGangInfo.power || lastTerritoryPower == null) {
-        log(ns, `Territory power updated from ${formatNumberShort(lastTerritoryPower)} to ${formatNumberShort(myGangInfo.power)}.`)
+        const previousPower = lastTerritoryPower == null ? "unknown" : formatNumberShort(lastTerritoryPower);
+        log(ns, `Territory power updated from ${previousPower} to ${formatNumberShort(myGangInfo.power)}.`)
         consecutiveTerritoryDetections++;
         if (consecutiveTerritoryDetections > 5 && territoryTickWaitPadding > updateInterval)
             territoryTickWaitPadding = Math.max(updateInterval, territoryTickWaitPadding - updateInterval);

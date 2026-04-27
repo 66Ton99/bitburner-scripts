@@ -1038,8 +1038,6 @@ export async function workForSingleFaction(ns, factionName, forceUnlockDonations
     // Ensure we get an invite to location-based factions we might want / need
     if (!await earnFactionInvite(ns, factionName))
         return ns.print(`We are not yet part of faction "${factionName}". Skipping working for faction...`);
-    if (playerGang == factionName) // Cannot work for your own gang faction.
-        return ns.print(`"${factionName}" is your gang faction. You can only earn rep in your gang via respect.`);
     // If we have already unlocked donations via favour, we can just buy the rep needed to unlock augmentations
     // (earning money is typically faster than earning reputation), so we'll skip trying to earn further reputation
     if (!forceRep && startingFavor >= favorToDonate)
@@ -1079,17 +1077,6 @@ export async function workForSingleFaction(ns, factionName, forceUnlockDonations
         const currentWealth = currentMoney + stockValue;
         const desiredAugCost = Math.max(0, mostExpensiveDesiredAugCostByFaction[factionName] || 0);
         const moneyShortfall = Math.max(0, desiredAugCost - currentWealth);
-        if (moneyShortfall > 0) {
-            const status = `Pausing faction infiltration for "${factionName}" to farm money ` +
-                `(current ${formatMoney(currentMoney)} cash + ${formatMoney(stockValue)} stock, ` +
-                `need ${formatMoney(moneyShortfall)} more for desired aug cost ${formatMoney(desiredAugCost)}).`;
-            if (lastFactionWorkStatus != status) {
-                lastFactionWorkStatus = status;
-                ns.print(status);
-            }
-            await workForInfiltrationMoney(ns, desiredAugCost);
-            continue;
-        }
         const bestLocation = await pickBestInfiltrationLocation(ns, remainingRep, currentMoney);
         if (!bestLocation) {
             ns.print(`No feasible infiltration target right now. Waiting instead of starting faction work for "${factionName}".`);
@@ -1132,6 +1119,8 @@ export async function workForSingleFaction(ns, factionName, forceUnlockDonations
                 noteHospitalizedInfiltration(bestLocation);
             if (infiltrationResult.reason == 'travel-failed')
                 noteTravelFailedInfiltration(bestLocation);
+            if (['timeout', 'reward-click-failed', 'button-not-found', 'start-failed'].includes(infiltrationResult.reason))
+                noteFailedInfiltration(bestLocation, infiltrationResult.reason);
             devConsoleLog(`Infiltration runner failed for "${factionName}" at "${bestLocation.location.name}" with reason "${infiltrationResult.reason}".`);
             log(ns, `WARN: Infiltration runner failed for "${factionName}" at "${bestLocation.location.name}" (${infiltrationResult.reason}). Retrying...`, false, 'warning');
             await ns.sleep(loopSleepInterval);
@@ -1180,8 +1169,11 @@ async function pickBestInfiltrationLocation(ns, remainingRep = Number.POSITIVE_I
         const cap = getCurrentRepInfiltrationDifficultyCap(infiltration, player.city, currentMoney);
         const reachable = canReachInfiltrationLocation(infiltration, player.city, currentMoney);
         const coolingDown = isLocationCoolingDown(infiltration.location?.name);
+        const skillReady = canHandleRepInfiltrationDifficulty(infiltration, player, cap);
+        const requiredCombatStat = skillReady ? 0 : getRequiredCombatStatForInfiltration(infiltration, player, cap);
         return `"${infiltration.location?.name}"@${infiltration.location?.city}: rep=${Math.round(infiltration.reward.tradeRep).toLocaleString('en')}, ` +
-            `diff=${infiltration.difficulty.toFixed(3)}, cap=${cap.toFixed(3)}, reachable=${reachable}, cooldown=${coolingDown}`;
+            `diff=${infiltration.difficulty.toFixed(3)}, cap=${cap.toFixed(3)}, skillReady=${skillReady}` +
+            `${skillReady ? '' : `, combat=${getMinCombatStat(player)}/${requiredCombatStat}`}, reachable=${reachable}, cooldown=${coolingDown}`;
     };
     const strongestOverallLocation = [...allLocations]
         .sort((a, b) => b.reward.tradeRep - a.reward.tradeRep || a.difficulty - b.difficulty)[0] ?? null;
@@ -1189,8 +1181,9 @@ async function pickBestInfiltrationLocation(ns, remainingRep = Number.POSITIVE_I
         .sort((a, b) => b.reward.tradeRep - a.reward.tradeRep || a.difficulty - b.difficulty)
         .slice(0, 5);
     const reachableLocations = allLocations
-        .filter(infiltration => infiltration?.difficulty < getCurrentRepInfiltrationDifficultyCap(infiltration, player.city, currentMoney) &&
-            canReachInfiltrationLocation(infiltration, player.city, currentMoney));
+        .filter(infiltration => canReachInfiltrationLocation(infiltration, player.city, currentMoney) &&
+            canHandleRepInfiltrationDifficulty(infiltration, player, getCurrentRepInfiltrationDifficultyCap(infiltration, player.city, currentMoney)) &&
+            !isLocationCoolingDown(infiltration.location?.name));
     const topReachableLocations = [...reachableLocations]
         .sort((a, b) => b.reward.tradeRep - a.reward.tradeRep || a.difficulty - b.difficulty)
         .slice(0, 5);
@@ -1209,9 +1202,12 @@ async function pickBestInfiltrationLocation(ns, remainingRep = Number.POSITIVE_I
         const strongestOverallCap = getCurrentRepInfiltrationDifficultyCap(strongestOverallLocation, player.city, currentMoney);
         const strongestOverallReachable = canReachInfiltrationLocation(strongestOverallLocation, player.city, currentMoney);
         const strongestOverallCoolingDown = isLocationCoolingDown(strongestOverallLocation.location?.name);
+        const strongestOverallSkillReady = canHandleRepInfiltrationDifficulty(strongestOverallLocation, player, strongestOverallCap);
+        const strongestOverallRequiredCombat = strongestOverallSkillReady ? 0 : getRequiredCombatStatForInfiltration(strongestOverallLocation, player, strongestOverallCap);
         devConsoleLog(`Selected infiltration target "${selectedLocation.location?.name}" (~${Math.round(selectedLocation.reward.tradeRep).toLocaleString('en')} rep) instead of strongest overall ` +
             `"${strongestOverallLocation.location?.name}" (~${Math.round(strongestOverallLocation.reward.tradeRep).toLocaleString('en')} rep). ` +
             `Reasons: difficulty ${strongestOverallLocation.difficulty.toFixed(3)} vs cap ${strongestOverallCap.toFixed(3)}, ` +
+            `skillReady=${strongestOverallSkillReady}${strongestOverallSkillReady ? '' : `, combat=${getMinCombatStat(player)}/${strongestOverallRequiredCombat}`}, ` +
             `reachable=${strongestOverallReachable}, cooldown=${strongestOverallCoolingDown}, currentCity="${player.city}".`);
     }
     if (selectedLocation)
@@ -1230,6 +1226,16 @@ function getRequiredCombatStatForInfiltration(infiltration, player, targetDiffic
     const intelligenceAdj = (player.skills.intelligence || 0) / 1600;
     const requiredTotalStats = Math.max(0, Math.ceil(Math.pow(Math.max(0, (startingSecurityLevel - targetDifficultyCap - intelligenceAdj) * 250), 1 / 0.9)));
     return Math.max(0, Math.ceil((requiredTotalStats - currentCharisma) / 4));
+}
+
+function canHandleRepInfiltrationDifficulty(infiltration, player, targetDifficultyCap = repInfiltrationDifficultyCap) {
+    if ((infiltration?.difficulty ?? Number.POSITIVE_INFINITY) < targetDifficultyCap) return true;
+    const requiredCombatStat = getRequiredCombatStatForInfiltration(infiltration, player, targetDifficultyCap);
+    return ["strength", "defense", "dexterity", "agility"].every(stat => (player.skills[stat] || 0) >= requiredCombatStat);
+}
+
+function getMinCombatStat(player) {
+    return Math.min(player.skills.strength || 0, player.skills.defense || 0, player.skills.dexterity || 0, player.skills.agility || 0);
 }
 
 function estimateInfiltrationRunTimeMs(infiltration) {
@@ -1263,7 +1269,7 @@ async function pickInfiltrationTrainingTarget(ns, currentMoney, remainingRep, cu
     const player = await getPlayerInfo(ns);
     const currentCap = repInfiltrationDifficultyCap;
     const currentBestEtaMs = estimateRepInfiltrationEtaMs(currentBestLocation, remainingRep, currentBestLocation.location?.city != player.city);
-    const trainingCandidates = Object.values(infiltrationByLocation)
+    const allTrainingCandidates = Object.values(infiltrationByLocation)
         .filter(infiltration => canReachInfiltrationLocation(infiltration, player.city, currentMoney) &&
             infiltration?.difficulty > currentCap)
         .map(infiltration => ({
@@ -1276,7 +1282,8 @@ async function pickInfiltrationTrainingTarget(ns, currentMoney, remainingRep, cu
             const trainingTimeMs = estimateCombatTrainingTimeMs(player, candidate.requiredCombatStat);
             const totalEtaMs = estimateRepInfiltrationEtaMs(candidate.location, remainingRep, candidate.location.location?.city != player.city, trainingTimeMs);
             return { ...candidate, trainingTimeMs, totalEtaMs, currentBestEtaMs };
-        })
+        });
+    const trainingCandidates = allTrainingCandidates
         .filter(candidate => candidate.totalEtaMs < currentBestEtaMs)
         .sort((a, b) => a.totalEtaMs - b.totalEtaMs ||
             b.location.reward.tradeRep - a.location.reward.tradeRep ||
@@ -1287,6 +1294,16 @@ async function pickInfiltrationTrainingTarget(ns, currentMoney, remainingRep, cu
             `requiring combat stats ${selectedTrainingTarget.requiredCombatStat}. ETA current="${formatDuration(selectedTrainingTarget.currentBestEtaMs)}", ` +
             `training="${formatDuration(selectedTrainingTarget.trainingTimeMs)}", target="${formatDuration(selectedTrainingTarget.totalEtaMs)}", ` +
             `rep/run ~${Math.round(selectedTrainingTarget.location.reward.tradeRep).toLocaleString('en')}.`);
+    else if (allTrainingCandidates.length > 0) {
+        const bestTrainingCandidate = allTrainingCandidates
+            .sort((a, b) => a.totalEtaMs - b.totalEtaMs ||
+                b.location.reward.tradeRep - a.location.reward.tradeRep ||
+                a.requiredCombatStat - b.requiredCombatStat)[0];
+        devConsoleLog(`Skipping infiltration training target "${bestTrainingCandidate.location.location.name}" because ETA ` +
+            `${formatDuration(bestTrainingCandidate.totalEtaMs)} is not better than current target ETA ${formatDuration(bestTrainingCandidate.currentBestEtaMs)}. ` +
+            `Combat ${getMinCombatStat(player)}/${bestTrainingCandidate.requiredCombatStat}, training ${formatDuration(bestTrainingCandidate.trainingTimeMs)}, ` +
+            `rep/run ~${Math.round(bestTrainingCandidate.location.reward.tradeRep).toLocaleString('en')}.`);
+    }
     return selectedTrainingTarget;
 }
 
@@ -1370,6 +1387,13 @@ function noteTravelFailedInfiltration(location) {
     if (locationName)
         recentHospitalizedLocations[locationName] = Date.now() + infiltrationTravelFailedLocationCooldown;
     devConsoleLog(`Infiltration location "${locationName}" put on cooldown after travel failure.`);
+}
+
+function noteFailedInfiltration(location, reason = "failure") {
+    const locationName = location?.location?.name;
+    if (locationName)
+        recentHospitalizedLocations[locationName] = Date.now() + infiltrationTravelFailedLocationCooldown;
+    devConsoleLog(`Infiltration location "${locationName}" put on cooldown after ${reason}.`);
 }
 
 async function workForInfiltrationMoney(ns, moneyTarget) {
@@ -1458,6 +1482,12 @@ async function runInfiltrationRunner(ns, city, company, factionName = null, take
     if (effectiveAllowTravel) args.push('--allow-travel');
     if (takeCash) args.push('--cash');
     else args.push('--faction', factionName);
+    ns.print(takeCash ?
+        `Starting infiltration at "${company}" for cash.` :
+        `Starting infiltration at "${company}" for faction rep with "${factionName}".`);
+    devConsoleLog(takeCash ?
+        `Starting infiltration at "${company}" for cash.` :
+        `Starting infiltration at "${company}" for faction rep with "${factionName}".`);
     const pid = await getNsDataThroughFile(ns, 'ns.run(ns.args[0], 1, ...JSON.parse(ns.args[1]))', null,
         [getFilePath('infiltration-runner.js'), JSON.stringify(args)]);
     if (!pid) return { success: false, reason: 'launch-failed' };
