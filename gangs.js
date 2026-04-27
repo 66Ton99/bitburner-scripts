@@ -192,7 +192,7 @@ async function mainLoop(ns) {
     const myGangInfo = await getNsDataThroughFile(ns, 'ns.gang.getGangInformation()');
     const thisLoopStart = Date.now();
     if (!territoryTickDetected) { // Detect the first territory tick by watching for other gang's territory power to update.
-        const otherGangInfo = await getNsDataThroughFile(ns, 'ns.gang.getOtherGangInformation()'); // Returns dict of { [gangName]: { "power": Number, "territory": Number } }
+        const otherGangInfo = await getOtherGangInformation(ns); // Returns dict of { [gangName]: { "power": Number, "territory": Number } }
         if (lastOtherGangInfo != null && JSON.stringify(otherGangInfo) != JSON.stringify(lastOtherGangInfo)) {
             territoryNextTick = lastLoopTime + territoryTickTime;
             territoryTickDetected = true;
@@ -512,7 +512,7 @@ async function waitForGameUpdate(ns, oldGangInfo) {
 async function enableOrDisableWarfare(ns, myGangInfo) {
     warfareFinished = Math.round(myGangInfo.territory * 2 ** 20) / 2 ** 20 /* Handle API imprecision */ >= 1;
     if (warfareFinished && !myGangInfo.territoryWarfareEngaged) return; // No need to engage once we hit 100%
-    const otherGangs = await getNsDataThroughFile(ns, 'ns.gang.getOtherGangInformation()'); // Returns dict of { [gangName]: { "power": Number, "territory": Number } }
+    const otherGangs = await getOtherGangInformation(ns); // Returns dict of { [gangName]: { "power": Number, "territory": Number } }
     let lowestWinChance = 1, totalWinChance = 0, totalActiveGangs = 0;
     let lowestWinChanceGang = "";
     for (const otherGang in otherGangs) {
@@ -534,6 +534,8 @@ async function enableOrDisableWarfare(ns, myGangInfo) {
 }
 
 // Ram-dodging helper to get gang information for each item in a list
+const getOtherGangInformation = /**@returns{Promise<{[gangName: string]: {power: number, territory: number};}>}*/ async (ns) =>
+    await getNsDataThroughFile(ns, `Object.fromEntries(Object.entries(ns.gang.getAllGangInformation()).filter(([gangName]) => gangName !== ns.args[0]))`, null, [myGangFaction]);
 const getGangInfoDict = /**@returns{Promise<{[gangMember: string]: any;}>}*/async (ns, elements, gangFunction) => await getDict(ns, elements, `gang.${gangFunction}`, `/Temp/gang-${gangFunction}.txt`);
 const getDict = /**@returns{Promise<{[key: string]: any;}>}*/ async (ns, elements, nsFunction, fileName) => await getNsDataThroughFile(ns, `Object.fromEntries(ns.args.map(o => [o, ns.${nsFunction}(o)]))`, fileName, elements);
 
