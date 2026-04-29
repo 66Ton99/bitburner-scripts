@@ -109,6 +109,7 @@ const checkForNewPrioritiesInterval = 10 * 60 * 1000; // 10 minutes. Interrupt w
 const waitForFactionInviteTime = 30 * 1000; // The game will only issue one new invite every 25 seconds, so if you earned two by travelling to one city, might have to wait a while
 const infiltrationHospitalizedLocationCooldown = 10 * 60 * 1000; // Avoid retrying a location that recently hospitalized us.
 const infiltrationTravelFailedLocationCooldown = 60 * 1000; // Avoid spam-retrying a location we currently cannot travel to.
+const infiltrationActiveLockFile = "/Temp/work-for-factions-infiltration-active.txt";
 const minAdaptiveInfiltrationDifficulty = 1.0;
 const lowMoneyInfiltrationDifficulty = 2.5;
 const repInfiltrationDifficultyCap = 3.35;
@@ -299,6 +300,7 @@ async function mainLoop(ns) {
         invites.filter(f => !skipFactions.includes(f) && !softCompletedFactions.includes(f));
     for (const invite of invitesToAccept)
         await tryJoinFaction(ns, invite);
+    await closeTransientGameWindows(ns);
     // Get some information about gangs (if unlocked)
     if (2 in dictSourceFiles) {
         if (!playerGang) { // Check if we've joined a gang since our last iteration
@@ -509,18 +511,26 @@ async function earnFactionInvite(ns, factionName) {
         ns.print(`${reasonPrefix} you have insufficient combat stats. Need: ${requirement} of each, Have ` +
             physicalStats.map(s => `${s.slice(0, 3)}: ${player.skills[s]}`).join(", "));
         const em = requirement / options['training-stat-per-multi-threshold'];
+        const needsKills = (requiredKillsByFaction[factionName] || 0) > player.numPeopleKilled;
+        const needsKarma = (requiredKarmaByFaction[factionName] || 0) > currentNegativeKarma;
+        const maxCombatGap = Math.max(...deficientStats.map(s => requirement - s.value));
+        const deferCombatGap = Math.max(25, Math.floor(requirement * 0.15));
+        if (options['prioritize-invites'] && !needsKills && !needsKarma && maxCombatGap > deferCombatGap)
+            return ns.print(`Deferring faction "${factionName}" invite because only combat training remains and the gap is still large ` +
+                `(${maxCombatGap} levels, threshold ${deferCombatGap}) while --prioritize-invites is enabled.`);
         // Hack: Create a rough heuristic suggesting how much multi we need to train physical stats in a reasonable amount of time.
         // TODO: Be smarter (time-based decision), and also consider whether training physical stats via GYM might be faster
-        if (deficientStats.some(s => crimeHeuristics[s.stat] < em))
+        if (!needsKills && !needsKarma && deficientStats.some(s => crimeHeuristics[s.stat] < em))
             return ns.print("Some mults * exp_mults * bitnode mults appear to be too low to increase stats in a reasonable amount of time. " +
                 `You can control this with --training-stat-per-multi-threshold. Current sqrt(mult*exp_mult*bn_mult*bn_exp_mult) ` +
                 `should be ~${formatNumberShort(em, 2)}, have ` + deficientStats.map(s => s.stat).map(s => `${s.slice(0, 3)}: sqrt(` +
                     `${formatNumberShort(player.mults[s])}*${formatNumberShort(player.mults[`${s}_exp`])}*` +
                     `${formatNumberShort(bitNodeMults[`${title(s)}LevelMultiplier`])}*` +
                     `${formatNumberShort(bitNodeMults.CrimeExpGain)})=${formatNumberShort(crimeHeuristics[s])}`).join(", "));
-        const needsKills = (requiredKillsByFaction[factionName] || 0) > player.numPeopleKilled;
-        const needsKarma = (requiredKarmaByFaction[factionName] || 0) > currentNegativeKarma;
-        if (!needsKills && !needsKarma) {
+        if (options['crime-focus'] || options['fast-crimes-only']) {
+            ns.print(`Using crimes to train combat stats for "${factionName}" because crime-focus is enabled.`);
+            doCrime = true;
+        } else if (!needsKills && !needsKarma) {
             workedForInvite = await trainCombatStatsUpTo(ns, requirement, factionName);
         } else {
             doCrime = true;
@@ -528,8 +538,17 @@ async function earnFactionInvite(ns, factionName) {
     }
     if (doCrime && options['no-crime'])
         return ns.print(`${reasonPrefix} Doing crime to meet faction requirements is disabled. (--no-crime or --no-focus)`);
-    if (doCrime)
-        workedForInvite = await crimeForKillsKarmaStats(ns, requiredKillsByFaction[factionName] || 0, requiredKarmaByFaction[factionName] || 0, requiredCombatByFaction[factionName] || 0);
+    if (doCrime) {
+        const combatRequirement = requiredCombatByFaction[factionName] || 0;
+        const currentCombatGap = combatRequirement ? Math.max(...["strength", "defense", "dexterity", "agility"]
+            .map(stat => combatRequirement - player.skills[stat])) : 0;
+        const deferCombatGap = Math.max(25, Math.floor(combatRequirement * 0.15));
+        const crimeCombatTarget = options['prioritize-invites'] && currentCombatGap > deferCombatGap ? 0 : combatRequirement;
+        if (combatRequirement && crimeCombatTarget == 0)
+            ns.print(`Using crimes only for kills/karma for "${factionName}" and deferring long combat grind ` +
+                `(${currentCombatGap} levels, threshold ${deferCombatGap}) while --prioritize-invites is enabled.`);
+        workedForInvite = await crimeForKillsKarmaStats(ns, requiredKillsByFaction[factionName] || 0, requiredKarmaByFaction[factionName] || 0, crimeCombatTarget);
+    }
 
     // Study for hack levels if that's what's keeping us
     // Note: Check if we have insuffient hack to backdoor this faction server. If we have sufficient hack, we will "waitForInvite" below assuming an external script is backdooring ASAP
@@ -770,6 +789,13 @@ async function workOutAtGym(ns, focus, stat, gymName = "Powerhouse Gym") {
         log(ns, `ERROR: No city mapping found for gym "${gymName}"`, false, 'error');
         return false;
     }
+    const player = await getPlayerInfo(ns);
+    const requiredMoney = options['pay-for-studies-threshold'] + (player.city == gymCity ? 0 : cityTravelCost);
+    if (player.money < requiredMoney) {
+        log(ns, `WARNING: Insufficient funds to train "${stat}" at "${gymName}". ` +
+            `Need ${formatMoney(requiredMoney)}, have ${formatMoney(player.money)}.`, false, 'warning');
+        return false;
+    }
     if (!await goToCity(ns, gymCity)) return false;
     if (await getNsDataThroughFile(ns, `ns.singularity.gymWorkout(ns.args[0], ns.args[1], ns.args[2])`, null, [gymName, stat, focus])) {
         log(ns, `Started training "${stat}" at "${gymName}"`, false, 'success');
@@ -780,10 +806,12 @@ async function workOutAtGym(ns, focus, stat, gymName = "Powerhouse Gym") {
 }
 
 /** @param {NS} ns */
-async function trainCombatStatsUpTo(ns, requirement, factionName = "unknown faction") {
+async function trainCombatStatsUpTo(ns, requirement, factionName = "unknown faction", preferredCity = null) {
     const statOrder = ["strength", "defense", "dexterity", "agility"];
     const gymStatBySkill = { strength: "str", defense: "def", dexterity: "dex", agility: "agi" };
-    const gymName = "Powerhouse Gym";
+    const initialPlayer = await getPlayerInfo(ns);
+    const gymName = bestGymByCity[initialPlayer.city] || bestGymByCity[preferredCity] || "Powerhouse Gym";
+    const gymCity = Object.entries(bestGymByCity).find(([, gym]) => gym == gymName)?.[0] || "Sector-12";
     let lastStatusUpdateTime = 0;
     let statToTrain = null;
     while (!breakToMainLoop()) {
@@ -800,11 +828,16 @@ async function trainCombatStatsUpTo(ns, requirement, factionName = "unknown fact
         const currentClassType = String(currentWork.classType || "").toLowerCase();
         if (currentClassType !== expectedGymStat || currentWork.location !== gymName) {
             if (await isValidInterruption(ns, currentWork)) return;
+            if (player.city != gymCity)
+                devConsoleLog(`Departure from "${player.city}" to "${gymCity}" for combat training at "${gymName}" before "${factionName}".`);
             if (!await workOutAtGym(ns, shouldFocus, expectedGymStat, gymName)) return false;
+            const playerAfterGymTravel = await getPlayerInfo(ns);
+            if (player.city != playerAfterGymTravel.city)
+                devConsoleLog(`Arrived from "${player.city}" to "${playerAfterGymTravel.city}" for combat training at "${gymName}" before "${factionName}".`);
         }
         if ((Date.now() - lastStatusUpdateTime) > statusUpdateInterval) {
             lastStatusUpdateTime = Date.now();
-            log(ns, `Training combat stats at ${gymName} for "${factionName}" until all reach ${requirement}. ` +
+            log(ns, `Training combat stats at ${gymName} in ${gymCity} for "${factionName}" until all reach ${requirement}. ` +
                 `Currently Str: ${player.skills.strength}, Def: ${player.skills.defense}, Dex: ${player.skills.dexterity}, Agi: ${player.skills.agility}. ` +
                 `Training ${statToTrain}.`, false, 'info');
         }
@@ -813,15 +846,75 @@ async function trainCombatStatsUpTo(ns, requirement, factionName = "unknown fact
 }
 
 /** @param {NS} ns */
-async function ensureBackgroundDexterityTraining(ns) {
+async function startBackgroundCombatTraining(ns, requirement, factionName = "unknown faction", preferredCity = null) {
+    const statOrder = ["strength", "defense", "dexterity", "agility"];
+    const gymStatBySkill = { strength: "str", defense: "def", dexterity: "dex", agility: "agi" };
     const player = await getPlayerInfo(ns);
-    if ((player.skills.dexterity || 0) >= 900)
-        return true;
+    const deficientStats = statOrder.filter(stat => player.skills[stat] < requirement);
+    if (deficientStats.length == 0) return true;
+    const gymName = bestGymByCity[player.city];
+    const statToTrain = deficientStats.sort((a, b) => player.skills[a] - player.skills[b])[0];
+    const expectedGymStat = gymStatBySkill[statToTrain];
     const currentWork = await getCurrentWorkInfo(ns);
     const currentClassType = String(currentWork.classType || "").toLowerCase();
-    if (["str", "def", "dex", "agi"].includes(currentClassType))
-        return currentClassType === "dex";
-    return await workOutAtGym(ns, false, "dex", "Powerhouse Gym");
+    if (!gymName) {
+        if (["str", "def", "dex", "agi"].includes(currentClassType) && currentClassType !== expectedGymStat) {
+            await stop(ns);
+            log(ns, `Stopped unrelated background ${currentClassType} training because "${factionName}" needs ${statToTrain}, ` +
+                `but city ${player.city} has no gym. Infiltration will continue.`, false, 'info');
+        } else {
+            log(ns, `Cannot prepare background ${statToTrain} training for "${factionName}" because city ${player.city} has no gym. ` +
+                `Infiltration will continue.`, false, 'info');
+        }
+        return false;
+    }
+    if (currentClassType === expectedGymStat && currentWork.location === gymName) return true;
+    if (currentWork.type && !["CLASS", ""].includes(currentWork.type)) {
+        await stop(ns);
+        log(ns, `Stopped current ${currentWork.type} work to prepare background ${statToTrain} training at ${gymName} ` +
+            `before "${factionName}". Infiltration still has priority.`, false, 'info');
+    }
+    const started = await workOutAtGym(ns, false, expectedGymStat, gymName);
+    if (started)
+        log(ns, `Prepared background ${statToTrain} training at ${gymName} for "${factionName}" before starting infiltration. ` +
+            `Current combat min ${getMinCombatStat(player)}, target ${requirement}.`, false, 'info');
+    else
+        log(ns, `Failed to prepare background ${statToTrain} training at ${gymName} for "${factionName}". ` +
+            `Infiltration will continue.`, false, 'warning');
+    return started;
+}
+
+/** @param {NS} ns */
+async function stopBackgroundCombatTraining(ns, reason = "infiltration") {
+    const currentWork = await getCurrentWorkInfo(ns);
+    const currentClassType = String(currentWork.classType || "").toLowerCase();
+    if (!["str", "def", "dex", "agi"].includes(currentClassType)) return false;
+    await stop(ns);
+    log(ns, `Stopped background ${currentClassType} training before ${reason}. Infiltration has priority.`, false, 'info');
+    return true;
+}
+
+/** @param {NS} ns */
+async function ensureBackgroundWeakestCombatTraining(ns, reason = "infiltration") {
+    const statOrder = ["strength", "defense", "dexterity", "agility"];
+    const gymStatBySkill = { strength: "str", defense: "def", dexterity: "dex", agility: "agi" };
+    const player = await getPlayerInfo(ns);
+    const gymName = bestGymByCity[player.city];
+    if (!gymName) return false;
+    const statToTrain = statOrder.sort((a, b) => (player.skills[a] || 0) - (player.skills[b] || 0))[0];
+    const expectedGymStat = gymStatBySkill[statToTrain];
+    const currentWork = await getCurrentWorkInfo(ns);
+    const currentClassType = String(currentWork.classType || "").toLowerCase();
+    if (currentClassType === expectedGymStat && currentWork.location === gymName) return true;
+    if (currentWork.type && !["CLASS", ""].includes(currentWork.type)) {
+        await stop(ns);
+        log(ns, `Stopped current ${currentWork.type} work to prepare background ${statToTrain} training before ${reason}.`, false, 'info');
+    }
+    const started = await workOutAtGym(ns, false, expectedGymStat, gymName);
+    if (started)
+        log(ns, `Prepared background ${statToTrain} training at ${gymName} before ${reason}. ` +
+            `Combat min ${getMinCombatStat(player)}.`, false, 'info');
+    return started;
 }
 
 /** @param {NS} ns
@@ -917,6 +1010,66 @@ async function getCurrentWorkInfo(ns) {
  *  @returns {Promise<string[]>} List of new faction invites */
 async function checkFactionInvites(ns) {
     return await getNsDataThroughFile(ns, 'ns.singularity.checkFactionInvitations()');
+}
+
+/** @param {NS} ns */
+async function closeTransientGameWindows(ns) {
+    const closedCount = await getNsDataThroughFile(ns, `(() => {
+        const doc = eval("document");
+        const textOf = el => (el?.innerText || el?.textContent || "").trim();
+        const lowerTextOf = el => textOf(el).toLowerCase();
+        const infiltrationMarkers = [
+            "infiltration", "infiltrating", "maximum clearance level", "clearance level",
+            "trade for reputation", "sell for money", "start infiltration"
+        ];
+        if (infiltrationMarkers.some(marker => lowerTextOf(doc.body).includes(marker)))
+            return 0;
+
+        const scriptMarkers = [
+            "script editor", "recent scripts", "active scripts", "log", "tail",
+            "kill script", "threads", "ram usage"
+        ];
+        const selectors = [
+            ".MuiDialog-root",
+            ".MuiPopover-root",
+            ".MuiMenu-root",
+            ".MuiModal-root",
+            "[role='dialog']",
+            "[role='menu']",
+            "[role='presentation']"
+        ];
+        const candidates = Array.from(doc.querySelectorAll(selectors.join(",")))
+            .filter(el => {
+                const text = lowerTextOf(el);
+                if (!text) return false;
+                if (infiltrationMarkers.some(marker => text.includes(marker))) return false;
+                if (scriptMarkers.some(marker => text.includes(marker))) return false;
+                return text.includes("invitation") || text.includes("message") || text.includes("letter") ||
+                    text.includes("faction") || text.includes("joined") || text.includes("congratulations") ||
+                    text.includes("would like") || text.includes("invite");
+            });
+
+        let closed = 0;
+        const closeTexts = ["close", "ok", "okay", "cancel", "no", "x", "×"];
+        for (const el of candidates) {
+            const buttons = Array.from(el.querySelectorAll("button,[role='button']"));
+            const closeButton = buttons.find(button => {
+                const label = (button.getAttribute("aria-label") || textOf(button)).trim().toLowerCase();
+                return closeTexts.includes(label);
+            }) || buttons[buttons.length - 1];
+            if (closeButton) {
+                closeButton.click();
+                closed++;
+            }
+        }
+        if (closed == 0 && candidates.length > 0) {
+            doc.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", code: "Escape", bubbles: true }));
+            closed = candidates.length;
+        }
+        return closed;
+    })()`, '/Temp/close-transient-game-windows.txt');
+    if (closedCount > 0)
+        devConsoleLog(`Closed ${closedCount} transient game window${closedCount == 1 ? '' : 's'} after processing faction invitations/messages.`);
 }
 
 /** @param {NS} ns
@@ -1085,14 +1238,11 @@ export async function workForSingleFaction(ns, factionName, forceUnlockDonations
         }
         const trainingTarget = await pickInfiltrationTrainingTarget(ns, currentMoney, remainingRep, bestLocation);
         if (trainingTarget) {
-            log(ns, `INFO: Training combat stats for "${factionName}" before infiltrating. ` +
+            log(ns, `INFO: Will train combat stats for "${factionName}" in the background while infiltrating. ` +
                 `Current best target "${bestLocation.location.name}" has ETA ${formatDuration(trainingTarget.currentBestEtaMs)}, ` +
-                `but "${trainingTarget.location.location.name}" is estimated faster at ${formatDuration(trainingTarget.totalEtaMs)} ` +
+                `and "${trainingTarget.location.location.name}" is estimated at ${formatDuration(trainingTarget.totalEtaMs)} ` +
                 `once all combat stats reach ${trainingTarget.requiredCombatStat}.`, false, 'info');
-            await trainCombatStatsUpTo(ns, trainingTarget.requiredCombatStat, `${factionName} infiltration`);
-            continue;
         }
-        await ensureBackgroundDexterityTraining(ns);
         const playerBeforeTravel = await getPlayerInfo(ns);
         const travelNeeded = playerBeforeTravel.city != bestLocation.location.city;
         const targetSummary = `${factionName}|${bestLocation.location.city}|${bestLocation.location.name}|${playerBeforeTravel.city}|${travelNeeded}`;
@@ -1113,6 +1263,11 @@ export async function workForSingleFaction(ns, factionName, forceUnlockDonations
                 continue;
             }
         }
+        if (trainingTarget)
+            await startBackgroundCombatTraining(ns, trainingTarget.requiredCombatStat, `${factionName} infiltration`, bestLocation.location.city);
+        else
+            await ensureBackgroundWeakestCombatTraining(ns, `${factionName} infiltration`);
+        devConsoleLog(`Starting infiltration runner for "${factionName}" at "${bestLocation.location.name}". Infiltration has priority until the runner finishes.`);
         const infiltrationResult = await runInfiltrationRunner(ns, bestLocation.location.city, bestLocation.location.name, factionName, false, false);
         if (!infiltrationResult.success) {
             if (infiltrationResult.reason == 'hospitalized')
@@ -1271,6 +1426,7 @@ async function pickInfiltrationTrainingTarget(ns, currentMoney, remainingRep, cu
     const currentBestEtaMs = estimateRepInfiltrationEtaMs(currentBestLocation, remainingRep, currentBestLocation.location?.city != player.city);
     const allTrainingCandidates = Object.values(infiltrationByLocation)
         .filter(infiltration => canReachInfiltrationLocation(infiltration, player.city, currentMoney) &&
+            (infiltration?.reward?.tradeRep || 0) > (currentBestLocation?.reward?.tradeRep || 0) &&
             infiltration?.difficulty > currentCap)
         .map(infiltration => ({
             location: infiltration,
@@ -1284,26 +1440,16 @@ async function pickInfiltrationTrainingTarget(ns, currentMoney, remainingRep, cu
             return { ...candidate, trainingTimeMs, totalEtaMs, currentBestEtaMs };
         });
     const trainingCandidates = allTrainingCandidates
-        .filter(candidate => candidate.totalEtaMs < currentBestEtaMs)
-        .sort((a, b) => a.totalEtaMs - b.totalEtaMs ||
-            b.location.reward.tradeRep - a.location.reward.tradeRep ||
+        .sort((a, b) => b.location.reward.tradeRep - a.location.reward.tradeRep ||
+            a.totalEtaMs - b.totalEtaMs ||
             a.requiredCombatStat - b.requiredCombatStat);
     const selectedTrainingTarget = trainingCandidates[0] ?? null;
     if (selectedTrainingTarget)
         devConsoleLog(`Selected infiltration training target "${selectedTrainingTarget.location.location.name}" ` +
             `requiring combat stats ${selectedTrainingTarget.requiredCombatStat}. ETA current="${formatDuration(selectedTrainingTarget.currentBestEtaMs)}", ` +
             `training="${formatDuration(selectedTrainingTarget.trainingTimeMs)}", target="${formatDuration(selectedTrainingTarget.totalEtaMs)}", ` +
-            `rep/run ~${Math.round(selectedTrainingTarget.location.reward.tradeRep).toLocaleString('en')}.`);
-    else if (allTrainingCandidates.length > 0) {
-        const bestTrainingCandidate = allTrainingCandidates
-            .sort((a, b) => a.totalEtaMs - b.totalEtaMs ||
-                b.location.reward.tradeRep - a.location.reward.tradeRep ||
-                a.requiredCombatStat - b.requiredCombatStat)[0];
-        devConsoleLog(`Skipping infiltration training target "${bestTrainingCandidate.location.location.name}" because ETA ` +
-            `${formatDuration(bestTrainingCandidate.totalEtaMs)} is not better than current target ETA ${formatDuration(bestTrainingCandidate.currentBestEtaMs)}. ` +
-            `Combat ${getMinCombatStat(player)}/${bestTrainingCandidate.requiredCombatStat}, training ${formatDuration(bestTrainingCandidate.trainingTimeMs)}, ` +
-            `rep/run ~${Math.round(bestTrainingCandidate.location.reward.tradeRep).toLocaleString('en')}.`);
-    }
+            `rep/run ~${Math.round(selectedTrainingTarget.location.reward.tradeRep).toLocaleString('en')}` +
+            `${selectedTrainingTarget.totalEtaMs > selectedTrainingTarget.currentBestEtaMs ? ', slower than current target but training can run in background' : ''}.`);
     return selectedTrainingTarget;
 }
 
@@ -1404,7 +1550,7 @@ async function workForInfiltrationMoney(ns, moneyTarget) {
         await ns.sleep(loopSleepInterval);
         return false;
     }
-    await ensureBackgroundDexterityTraining(ns);
+    await ensureBackgroundWeakestCombatTraining(ns, "money infiltration");
     const targetSummary = moneyTarget > currentMoney ?
         `target ${formatMoney(moneyTarget)}, ` :
         '';
