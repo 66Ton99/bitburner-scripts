@@ -114,6 +114,7 @@ const minAdaptiveInfiltrationDifficulty = 1.0;
 const lowMoneyInfiltrationDifficulty = 2.5;
 const repInfiltrationDifficultyCap = 3.35;
 const cityTravelCost = 200000;
+const silhouetteStatDeferralMargin = 100;
 
 let shouldFocus; // Whether we should focus on work or let it be backgrounded (based on whether "Neuroreceptor Management Implant" is owned, or "--no-focus" is specified)
 // And a bunch of globals because managing state and encapsulation is hard.
@@ -123,6 +124,55 @@ let firstFactions, skipFactions, completedFactions, softCompletedFactions, mostE
 let scriptPid = "?";
 let recentHospitalizedLocations = {};
 let bitNodeMults = (/**@returns{BitNodeMultipliers}*/() => undefined)(); // Trick to get strong typing in mono
+let netburnersEligibility = { nodes: 0, levels: 0, ram: 0, cores: 0, ready: false };
+
+function shouldDeferSilhouette(player) {
+    if (player.factions.includes("Silhouette"))
+        return false;
+    if (options['no-company-work'])
+        return true;
+    const maxCompanyStatModifier = Math.max(...companySpecificConfigs.map(c => c.statModifier || 0));
+    const requiredHack = Math.max(...jobs.flatMap(job => job.reqHck).filter(req => req > 0)) + maxCompanyStatModifier;
+    const requiredCha = Math.max(...jobs.flatMap(job => job.reqCha).filter(req => req > 0)) + maxCompanyStatModifier;
+    return player.skills.hacking < requiredHack - silhouetteStatDeferralMargin ||
+        player.skills.charisma < requiredCha - silhouetteStatDeferralMargin;
+}
+
+function shouldDeferNetburners(player) {
+    if (player.factions.includes("Netburners"))
+        return false;
+    return player.skills.hacking < (requiredHackByFaction["Netburners"] || 0) ||
+        netburnersEligibility.nodes === 0 ||
+        !netburnersEligibility.ready;
+}
+
+function isCompanyInviteFaction(factionName) {
+    return preferredCompanyFactionOrder.includes(factionName) || factionName === "Silhouette";
+}
+
+function getCompanyInviteHackRequirement(factionName) {
+    const itJob = jobs.find(j => j.name == "IT");
+    const companyConfig = companySpecificConfigs.find(c => c.name == factionName);
+    return (itJob?.reqHck?.[0] || 0) + (companyConfig?.statModifier || 0);
+}
+
+function shouldDeferCompanyFaction(player, factionName) {
+    if (!isCompanyInviteFaction(factionName) || player.factions.includes(factionName))
+        return false;
+    if (options['no-company-work'])
+        return true;
+    return player.skills.hacking < getCompanyInviteHackRequirement(factionName);
+}
+
+function canPursueFaction(player, factionName) {
+    if (isCompanyInviteFaction(factionName) && factionName !== "Silhouette")
+        return !shouldDeferCompanyFaction(player, factionName);
+    if (factionName === "Silhouette")
+        return !shouldDeferSilhouette(player);
+    if (factionName === "Netburners")
+        return !shouldDeferNetburners(player);
+    return true;
+}
 
 export function autocomplete(data, args) {
     data.flags(argsSchema);
@@ -219,6 +269,7 @@ async function loadStartupData(ns) {
     const dictAugStats = await getNsDataThroughFile(ns, dictCommand('ns.singularity.getAugmentationStats(o)'), '/Temp/getAugmentationStats.txt', augmentationNames);
     const ownedAugmentations = await getNsDataThroughFile(ns, `ns.singularity.getOwnedAugmentations(true)`, '/Temp/player-augs-purchased.txt');
     const installedAugmentations = await getNsDataThroughFile(ns, `ns.singularity.getOwnedAugmentations()`, '/Temp/player-augs-installed.txt');
+    await refreshNetburnersEligibility(ns);
     // Based on what augmentations we own, we can change our own behaviour (e.g. whether to allow work to steal focus)
     hasFocusPenalty = !installedAugmentations.includes("Neuroreceptor Management Implant"); // Check if we have an augmentation that lets us not have to focus at work (always nicer if we can background it)
     shouldFocus = !options['no-focus'] && hasFocusPenalty; // Focus at work for the best rate of rep gain, unless focus activities are disabled via command line
@@ -329,6 +380,7 @@ async function mainLoop(ns) {
         await workForInfiltrationMoney(ns, options['infiltrate-for-money-under']);
         return;
     }
+    await refreshNetburnersEligibility(ns);
 
     // Remove Fulcrum from our "EarlyFactionOrder" if hack level is insufficient to backdoor their server
     let priorityFactions = options['crime-focus'] ? preferredCrimeFactionOrder.slice() : preferredEarlyFactionOrder.slice();
@@ -344,10 +396,12 @@ async function mainLoop(ns) {
         priorityFactions.push("The Covenant");
         ns.print(`We're in BN10, which means we should add The Covenant to our priority faction list, so you can purchase sleeves and sleeve memory.`);
     }
+    if (shouldDeferSilhouette(player))
+        priorityFactions = priorityFactions.filter(f => f != "Silhouette");
 
     // Strategy 1: Tackle a consolidated list of desired faction order, interleaving simple factions and megacorporations
     const factionWorkOrder = firstFactions.concat(priorityFactions.filter(f => // Remove factions from our initial "work order" if we've bought all desired augmentations.
-        !firstFactions.includes(f) && !skipFactions.includes(f) && !softCompletedFactions.includes(f)));
+        !firstFactions.includes(f) && !skipFactions.includes(f) && !softCompletedFactions.includes(f) && canPursueFaction(player, f)));
     for (const faction of factionWorkOrder) {
         if (breakToMainLoop()) break; // Only continue on to the next faction if it isn't time for a high-level update.
         let earnedNewFactionInvite = false;
@@ -367,7 +421,7 @@ async function mainLoop(ns) {
     if (scope <= 2 || breakToMainLoop()) return;
 
     // Strategy 3: Work for any megacorporations not yet completed to earn their faction invites. Once joined, we don't lose these factions on reset.
-    let megacorpFactions = preferredCompanyFactionOrder.filter(f => !skipFactions.includes(f));
+    let megacorpFactions = preferredCompanyFactionOrder.filter(f => !skipFactions.includes(f) && canPursueFaction(player, f));
     if (!options['no-company-work'])
         await workForAllMegacorps(ns, megacorpFactions, false);
     if (scope <= 3 || breakToMainLoop()) return;
@@ -380,7 +434,7 @@ async function mainLoop(ns) {
     // Strategies 5+ now work towards getting an invite to *all factions in the game*
     let joinedFactions = player.factions; // In case our hard-coded list of factions is missing anything, merge it with the list of all factions
     let knownFactions = factions.concat(joinedFactions.filter(f => !factions.includes(f)));
-    let allIncompleteFactions = knownFactions.filter(f => !skipFactions.includes(f) && !completedFactions.includes(f))
+    let allIncompleteFactions = knownFactions.filter(f => !skipFactions.includes(f) && !completedFactions.includes(f) && canPursueFaction(player, f))
         .sort((a, b) => mostExpensiveAugByFaction[a] - mostExpensiveAugByFaction[b]); // sort by least-expensive final aug (correlated to easiest faction-invite requirement)
     // Preserve the faction work order we've decided on previously, and only use the above sort order for every other faction added on to the end
     let allFactionsWorkOrder = factionWorkOrder.filter(f => allIncompleteFactions.includes(f))
@@ -464,10 +518,57 @@ const crimeHeuristic = (player, stat) => heuristic(player, stat, bitNodeMults.Cr
 const classHeuristic = (player, stat) => heuristic(player, stat, bitNodeMults.ClassGymExpGain); // When training in university
 
 /** @param {NS} ns */
+async function refreshNetburnersEligibility(ns) {
+    const [nodeCount, totalLevels, totalRam, totalCores] = await getNsDataThroughFile(ns,
+        '(() => {' +
+        'const nodes = [...Array(ns.hacknet.numNodes()).keys()].map(i => ns.hacknet.getNodeStats(i));' +
+        'return [nodes.length, ...nodes.reduce(([l, r, c], s) => [l + s.level, r + s.ram, c + s.cores], [0, 0, 0])];' +
+        '})()',
+        '/Temp/hacknet-Netburners-stats.txt');
+    netburnersEligibility = {
+        nodes: nodeCount,
+        levels: totalLevels,
+        ram: totalRam,
+        cores: totalCores,
+        ready: nodeCount > 0 && totalLevels >= 100 && totalRam >= 8 && totalCores >= 4,
+    };
+}
+
+/** @param {NS} ns */
 async function earnFactionInvite(ns, factionName) {
     let player = await getPlayerInfo(ns);
     const joinedFactions = player.factions;
     if (joinedFactions.includes(factionName)) return true;
+    if (!canPursueFaction(player, factionName)) {
+        if (factionName == "Silhouette" && options['no-company-work'])
+            return ns.print(`Deferring faction "Silhouette" because --no-company-work prevents earning its invite.`);
+        if (isCompanyInviteFaction(factionName) && factionName !== "Silhouette") {
+            const requiredHack = getCompanyInviteHackRequirement(factionName);
+            if (options['no-company-work'])
+                return ns.print(`Deferring faction "${factionName}" because --no-company-work prevents earning its invite.`);
+            return ns.print(`Deferring faction "${factionName}" until hack level is at least ${requiredHack} ` +
+                `so company work can start immediately (current Hack ${player.skills.hacking}).`);
+        }
+        if (factionName == "Silhouette") {
+            const maxCompanyStatModifier = Math.max(...companySpecificConfigs.map(c => c.statModifier || 0));
+            const requiredHack = Math.max(...jobs.flatMap(job => job.reqHck).filter(req => req > 0)) + maxCompanyStatModifier;
+            const requiredCha = Math.max(...jobs.flatMap(job => job.reqCha).filter(req => req > 0)) + maxCompanyStatModifier;
+            return ns.print(`Deferring faction "Silhouette" until we're closer to executive company requirements. ` +
+                `Need roughly Hack ${requiredHack - silhouetteStatDeferralMargin}+ and Cha ${requiredCha - silhouetteStatDeferralMargin}+ ` +
+                `(current Hack ${player.skills.hacking}, Cha ${player.skills.charisma}).`);
+        }
+        if (factionName == "Netburners") {
+            const requiredHack = requiredHackByFaction["Netburners"] || 0;
+            if (player.skills.hacking < requiredHack)
+                return ns.print(`Deferring faction "Netburners" until hack level is at least ${requiredHack} ` +
+                    `(current Hack ${player.skills.hacking}).`);
+            if (netburnersEligibility.nodes === 0)
+                return ns.print(`Deferring faction "Netburners" because hacknet is still effectively disabled for early game ` +
+                    `(0 nodes purchased).`);
+            return ns.print(`Deferring faction "Netburners" until hacknet requirements are already met: ` +
+                `${netburnersEligibility.levels}/100 levels, ${netburnersEligibility.ram}/8 ram, ${netburnersEligibility.cores}/4 cores.`);
+        }
+    }
     var invitations = await checkFactionInvites(ns);
     if (invitations.includes(factionName))
         return await tryJoinFaction(ns, factionName);

@@ -45,6 +45,10 @@ Project-specific guidance for coding agents working in `bitburner-scripts`.
 - Avoid arbitrary crime fallback behavior with no concrete goal.
 - Do not trigger installs purely because many augmentations are awaiting install if there is no money for additional purchases and more non-NeuroFlux augmentations remain.
 - `autopilot.js` timed `xp-mode` is not useful once hack level is already high; avoid reintroducing aggressive XP-mode relaunching at high hack.
+- `Netburners` should be skipped in the default early-game autopilot flow while hacknet is intentionally deferred.
+- If re-enabling `Netburners`, do it only in a late-game autopilot path that also enables actual hacknet progression; do not merely remove the skip and leave hacknet disabled.
+- Company-work grinding, including the `Silhouette`/CEO path, should stay disabled in the default early-game autopilot flow.
+- If re-enabling company-work in autopilot, do it only in an explicit late-game path; do not leave `--no-company-work` permanently enabled if late-game company factions are expected to progress.
 
 ## Bitburner DEV 3.0.0 Notes
 

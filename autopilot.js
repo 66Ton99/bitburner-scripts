@@ -44,6 +44,8 @@ export function autocomplete(data, args) {
 export async function main(ns) {
     const persistentLog = "log.autopilot.txt";
     const factionManagerOutputFile = "/Temp/affordable-augs.txt"; // Temp file produced by faction manager with status information
+    const lateGameNetburnersMoneyThreshold = 100e9;
+    const lateGameCompanyWorkMoneyThreshold = 100e9;
     const defaultBnOrder = [ // The order in which we intend to play bitnodes
         // 1st Priority: Key new features and/or major stat boosts
         4.3,  // Normal. Need singularity to automate everything, and need the API costs reduced from 16x -> 4x -> 1x reliably do so from the start of each BN
@@ -591,6 +593,8 @@ export async function main(ns) {
         const existingDaemon = findScript('daemon.js');
         let daemonArgs = []; // The args we currently want deamon to have
         let daemonRelaunchMessage; // Will hold any special messages we want to show the user if relaunching daemon.
+        const pursueNetburnersLateGame = player.money >= lateGameNetburnersMoneyThreshold;
+        const pursueCompanyFactionsLateGame = player.money >= lateGameCompanyWorkMoneyThreshold;
 
         // If daemon.js is already running in --looping-mode, we should not restart it, because
         // TODO: currently daemon.js has no ability to kill it's loops on shutdown (so the next instance will be stuck with no RAM available)
@@ -645,6 +649,8 @@ export async function main(ns) {
             }
             // Prevent daemon from starting "work-for-faction.js" since we now manage that script
             daemonArgs.push('--disable-script', getFilePath('work-for-factions.js'));
+            if (pursueNetburnersLateGame)
+                daemonArgs.push('--enable-hacknet-upgrade-manager');
             // In BN8, always run in a mode that prioritizes stock market manipulation
             if (resetInfo.currentNode == 8) daemonArgs.push("--stock-manipulation-focus");
             // Don't run the script to join and manage bladeburner if it is explicitly disabled
@@ -693,9 +699,12 @@ export async function main(ns) {
             !facmanOutput?.affordable_augs?.includes(`CashRoot Starter Kit`) &&
             !facmanOutput?.awaiting_install_augs?.includes(`CashRoot Starter Kit`);
         const workForFactionsArgs = [
-            "--fast-crimes-only", // Essentially means we do mug until we can do homicide, then stick to homicide
-            "--no-company-work"
+            "--fast-crimes-only" // Essentially means we do mug until we can do homicide, then stick to homicide
         ];
+        if (!pursueCompanyFactionsLateGame)
+            workForFactionsArgs.push("--no-company-work");
+        if (!pursueNetburnersLateGame)
+            workForFactionsArgs.push("--skip", "Netburners");
         if (shouldForceSector12)
             workForFactionsArgs.push("--first", "Sector-12"); // CashRoot Starter Kit is a strong cheap early aug and worth prioritizing
         if (!options['disable-casino'] && !ranCasino) workForFactionsArgs.push("--infiltrate-for-money-under", 300000);
