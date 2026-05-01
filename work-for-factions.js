@@ -123,6 +123,7 @@ let dictSourceFiles, dictFactionFavors, playerGang, mainLoopStart, scope, numJoi
 let firstFactions, skipFactions, completedFactions, softCompletedFactions, mostExpensiveAugByFaction, mostExpensiveDesiredAugByFaction, mostExpensiveDesiredAugCostByFaction;
 let scriptPid = "?";
 let recentHospitalizedLocations = {};
+let recentFactionInviteDeferrals = {};
 let bitNodeMults = (/**@returns{BitNodeMultipliers}*/() => undefined)(); // Trick to get strong typing in mono
 let netburnersEligibility = { nodes: 0, levels: 0, ram: 0, cores: 0, ready: false };
 
@@ -141,9 +142,17 @@ function shouldDeferSilhouette(player) {
 function shouldDeferNetburners(player) {
     if (player.factions.includes("Netburners"))
         return false;
-    return player.skills.hacking < (requiredHackByFaction["Netburners"] || 0) ||
-        netburnersEligibility.nodes === 0 ||
-        !netburnersEligibility.ready;
+    return player.skills.hacking < (requiredHackByFaction["Netburners"] || 0);
+}
+
+function deferFactionInvite(ns, factionName, message, cooldownMs = 5 * 60 * 1000) {
+    const now = Date.now();
+    const lastLog = recentFactionInviteDeferrals[factionName] ?? 0;
+    if (now - lastLog >= cooldownMs) {
+        recentFactionInviteDeferrals[factionName] = now;
+        ns.print(message);
+    }
+    return "deferred";
 }
 
 function isCompanyInviteFaction(factionName) {
@@ -267,7 +276,6 @@ async function loadStartupData(ns) {
     const dictAugRepReqs = await getNsDataThroughFile(ns, dictCommand('ns.singularity.getAugmentationRepReq(o)'), '/Temp/getAugmentationRepReqs.txt', augmentationNames);
     const dictAugPrices = await getNsDataThroughFile(ns, dictCommand('ns.singularity.getAugmentationPrice(o)'), '/Temp/getAugmentationPrices.txt', augmentationNames);
     const dictAugStats = await getNsDataThroughFile(ns, dictCommand('ns.singularity.getAugmentationStats(o)'), '/Temp/getAugmentationStats.txt', augmentationNames);
-    const ownedAugmentations = await getNsDataThroughFile(ns, `ns.singularity.getOwnedAugmentations(true)`, '/Temp/player-augs-purchased.txt');
     const installedAugmentations = await getNsDataThroughFile(ns, `ns.singularity.getOwnedAugmentations()`, '/Temp/player-augs-installed.txt');
     await refreshNetburnersEligibility(ns);
     // Based on what augmentations we own, we can change our own behaviour (e.g. whether to allow work to steal focus)
@@ -286,7 +294,8 @@ async function loadStartupData(ns) {
             dictFactionAugs[faction] = dictFactionAugs[faction].filter(a => !gangAugs.includes(a));
     }
 
-    const isRelevantAug = aug => aug !== strNF && !ownedAugmentations.includes(aug);
+    // Treat "awaiting install" augmentations as still relevant for faction progression in the current reset.
+    const isRelevantAug = aug => aug !== strNF && !installedAugmentations.includes(aug);
     const isDesiredAug = aug => isRelevantAug(aug) && (
         options['desired-augs'].includes(aug) ||
         Object.keys(dictAugStats[aug]).length == 0 || options['desired-stats'].length == 0 ||
@@ -392,7 +401,8 @@ async function mainLoop(ns) {
         }
     } // TODO: Otherwise, if we get Fulcrum, we have no need for a couple other company factions
     // If we're in BN 10, we can purchase special Sleeve-related things from the Covenant, so we should always try join it
-    if (currentBitnode == 10 && !priorityFactions.includes("The Covenant")) {
+    if (currentBitnode == 10 && !priorityFactions.includes("The Covenant") &&
+        !completedFactions.includes("The Covenant") && !softCompletedFactions.includes("The Covenant")) {
         priorityFactions.push("The Covenant");
         ns.print(`We're in BN10, which means we should add The Covenant to our priority faction list, so you can purchase sleeves and sleeve memory.`);
     }
@@ -484,7 +494,10 @@ async function mainLoop(ns) {
         }
     }
     if (!foundWork) { // If our hands are tied, wait and re-check later rather than farming money with no explicit target.
-        ns.print(`INFO: Nothing to do. Sleeping for 30 seconds to see if magically we join a faction`);
+        if (allIncompleteFactions.length == 0 && factionsNeedingMoreRep.length == 0)
+            ns.print(`INFO: Nothing to do. All relevant factions are already complete or intentionally skipped. Sleeping for 30 seconds.`);
+        else
+            ns.print(`INFO: Nothing to do. Sleeping for 30 seconds to see if magically we join a faction`);
         await ns.sleep(30000);
     }
     if (scope <= 9) scope--; // Cap the 'scope' value from increasing perpetually when we're on our last strategy
@@ -560,13 +573,8 @@ async function earnFactionInvite(ns, factionName) {
         if (factionName == "Netburners") {
             const requiredHack = requiredHackByFaction["Netburners"] || 0;
             if (player.skills.hacking < requiredHack)
-                return ns.print(`Deferring faction "Netburners" until hack level is at least ${requiredHack} ` +
+                return deferFactionInvite(ns, factionName, `Deferring faction "Netburners" until hack level is at least ${requiredHack} ` +
                     `(current Hack ${player.skills.hacking}).`);
-            if (netburnersEligibility.nodes === 0)
-                return ns.print(`Deferring faction "Netburners" because hacknet is still effectively disabled for early game ` +
-                    `(0 nodes purchased).`);
-            return ns.print(`Deferring faction "Netburners" until hacknet requirements are already met: ` +
-                `${netburnersEligibility.levels}/100 levels, ${netburnersEligibility.ram}/8 ram, ${netburnersEligibility.cores}/4 cores.`);
         }
     }
     var invitations = await checkFactionInvites(ns);
@@ -743,13 +751,9 @@ async function earnFactionInvite(ns, factionName) {
 
     // Special case: check hacknet stats before we try to join Netburners
     if ("Netburners" == factionName) {
-        const [totalLevels, totalRam, totalCores] = await getNsDataThroughFile(ns,
-            '[...Array(ns.hacknet.numNodes()).keys()].map(i => ns.hacknet.getNodeStats(i))' +
-            '.reduce(([l, r, c], s) => [l + s.level, r + s.ram, c + s.cores], [0, 0, 0])',
-            '/Temp/hacknet-Netburners-stats.txt');
-        if (totalLevels < 100 || totalRam < 8 || totalCores < 4)
-            return ns.print(`${reasonPrefix} hacknet total stats do not yet meet requirements: ` +
-                `${totalLevels}/100 levels, ${totalRam}/8 ram, ${totalCores}/4 cores`);
+        if (!netburnersEligibility.ready)
+            return deferFactionInvite(ns, factionName, `Deferring faction "Netburners" until hacknet totals meet requirements: ` +
+                `${netburnersEligibility.levels}/100 levels, ${netburnersEligibility.ram}/8 ram, ${netburnersEligibility.cores}/4 cores.`);
     }
 
     if (breakToMainLoop()) return false;
@@ -1290,7 +1294,10 @@ export async function workForSingleFaction(ns, factionName, forceUnlockDonations
     if (!forceRep && highestRepAug == -1 && !firstFactions.includes(factionName) && !options['get-invited-to-every-faction'])
         return ns.print(`All "${factionName}" augmentations are owned. Skipping unlocking faction...`);
     // Ensure we get an invite to location-based factions we might want / need
-    if (!await earnFactionInvite(ns, factionName))
+    const inviteStatus = await earnFactionInvite(ns, factionName);
+    if (inviteStatus === "deferred")
+        return false;
+    if (!inviteStatus)
         return ns.print(`We are not yet part of faction "${factionName}". Skipping working for faction...`);
     // If we have already unlocked donations via favour, we can just buy the rep needed to unlock augmentations
     // (earning money is typically faster than earning reputation), so we'll skip trying to earn further reputation

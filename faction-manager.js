@@ -179,15 +179,15 @@ export async function main(ns) {
         log(ns, 'INFO: Skipping joining available factions due to the --ignore-player-data flag set.');
     else {
         log(ns, 'Joining available factions...');
-        let forceJoinFactions = options['force-join'] || [];
+        let forceJoinFactions = options['force-join'] ? [...options['force-join']] : [];
         // If the user didn't set the 'force-join' option, there are some defaults we should apply
-        if (!forceJoinFactions) {
+        if (options['force-join'] == null) {
             // If we're in BN 10, we can purchase special Sleeve-related things from the Covenant, so we should always join it
             if (bitNode == 10)
                 forceJoinFactions.push("The Covenant");
             // If gangs are an available feature, we should by default want to join any available gang factions
             if (!gangFaction && 2 in ownedSourceFiles && ns.heart.break() <= -53000) {
-                forceJoinFactions.push(potentialGangFactions); // Try to join all gang factions as we near unlocking gangs, regardless of their augmentations
+                forceJoinFactions.push(...potentialGangFactions); // Try to join all gang factions as we near unlocking gangs, regardless of their augmentations
                 log(ns, `INFO: Will join any gang faction because Karma is at ${formatNumberShort(ns.heart.break())}`, printToTerminal, printToTerminal ? 'info' : undefined);
             }
         }

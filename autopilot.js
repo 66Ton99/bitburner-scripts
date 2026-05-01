@@ -55,7 +55,7 @@ export async function main(ns) {
         2.1,  // Easy.   Unlocks gangs, which reduces the need to grind faction and company rep for getting access to most augmentations, speeding up all BNs
 
         // 2nd Priority: More new features, from Harder BNs. Things will slow down for a while, but the new features should pay in dividends for all future BNs
-        10.1, // Hard.   Unlock Sleeves (which tremendously speed along gangs outside of BN2) and grafting (can speed up slow rep-gain BNs). // TODO: Buying / upgrading sleeve mem has no API, requires manual interaction. Can we automate this with UI clicking like casino.js?
+        10.1, // Hard.   Unlock Sleeves (which tremendously speed along gangs outside of BN2) and grafting (can speed up slow rep-gain BNs).
         8.2,  // Hard.   8.1 immediately unlocks stocks, 8.2 doubles stock earning rate with shorts. Stocks are never nerfed in any BN (4S can be made too pricey though), and we have a good pre-4S stock script.
         13.1, // Hard.   Unlock Stanek's Gift. We've put a lot of effort into min/maxing the Tetris, so we should try to get it early, even though it's a hard BN. I might change my mind and push this down if it proves too slow.
         7.1,  // Hard.   Unlocks the bladeburner API (and bladeburner outside of BN 6/7). Many recommend it before BN9 since it ends up being a faster win condition in some of the tougher bitnodes ahead.
@@ -70,7 +70,7 @@ export async function main(ns) {
         13.3, // Hard.   Make stanek's gift bigger to get more/different boosts
         9.2,  // Hard.   Start with 128 GB home ram. Speeds up slow-starting new BNs, but less important with good ram-dodging scripts. Hacknet productin/costs improved by 12% -> 18%.
         9.3,  // Hard.   Start each new BN with an already powerful hacknet server, but *only until the first reset*, which is a bit of a damper. Hacknet productin/costs improved by 18% -> 21%
-        10.3, // Hard.   Get the last 2 sleeves (6 => 8) to boost their productivity ~30%. These really help with Bladeburner below. Putting this a little later because buying sleeves memory upgrades requires manual intervention right now.
+        10.3, // Hard.   Get the last 2 sleeves (6 => 8) to boost their productivity ~30%. These really help with Bladeburner below.
 
         // 4th Priority: Play some Bladeburners. Mostly not used to beat other BNs, because for much of the BN this can't be done concurrently with player actions like crime/faction work, and no other BNs are "tuned" to be beaten via Bladeburner win condition
         6.3,  // Normal. The 3 easier bladeburner BNs. Boosts combat stats by 8% -> 12% -> 14%
@@ -446,9 +446,9 @@ export async function main(ns) {
                     sleevesMaxedOut = true; // Flag is used elsewhere to allow continued installs
             }
             if (reasonToStay) {
-                log_once(ns, `WARNING: ${reasonToStay}\nTry not to leave BN10 before buying all you can from the faction "The Covenant", especially sleeve memory!` +
-                    `\nNOTE: You can ONLY buy sleeves & memory from The Covenant in BN10, which is why it's important to do this before you leave.`, true);
-                return true; // Return true, but do not set `bnCompletionSuppressed = true` so we can auto-reset once the user intervenes.
+                log_once(ns, `WARNING: ${reasonToStay}\nAutomation should keep buying sleeves and sleeve memory from "The Covenant" while you remain in BN10 and have enough money.` +
+                    `\nNOTE: You can ONLY buy sleeves & memory from The Covenant in BN10, so auto-reset will keep waiting until this is done.`, true);
+                return true; // Return true, but do not set `bnCompletionSuppressed = true` so we can auto-reset once sleeve automation finishes.
             }
         }
         if (options['disable-auto-destroy-bn']) {
@@ -595,6 +595,12 @@ export async function main(ns) {
         let daemonRelaunchMessage; // Will hold any special messages we want to show the user if relaunching daemon.
         const pursueNetburnersLateGame = player.money >= lateGameNetburnersMoneyThreshold;
         const pursueCompanyFactionsLateGame = player.money >= lateGameCompanyWorkMoneyThreshold;
+        if (pursueNetburnersLateGame || pursueCompanyFactionsLateGame) {
+            const enabledFeatures = [];
+            if (pursueNetburnersLateGame) enabledFeatures.push("hacknet progression for Netburners");
+            if (pursueCompanyFactionsLateGame) enabledFeatures.push("company work for company factions");
+            log_once(ns, `INFO: Late-game faction mode is active. Enabling ${enabledFeatures.join(" and ")}.`);
+        }
 
         // If daemon.js is already running in --looping-mode, we should not restart it, because
         // TODO: currently daemon.js has no ability to kill it's loops on shutdown (so the next instance will be stuck with no RAM available)

@@ -38,6 +38,7 @@ const sleeveBbContractNames = ["Tracking", "Bounty Hunter", "Retirement"];
 const minBbContracts = 2; // There should be this many contracts remaining before sleeves attempt them
 const minBbProbability = 0.99; // Player chance should be this high before sleeves attempt contracts
 const waitForContractCooldown = 60 * 1000; // 1 minute - Cooldown when contract count or probability gets too low
+const covenantFactionName = "The Covenant";
 
 let cachedCrimeStats, workByFaction; // Cache of crime statistics and which factions support which work
 let task, lastStatusUpdateTime, lastPurchaseTime, lastPurchaseStatusUpdate, availableAugs, cacheExpiry,
@@ -121,6 +122,12 @@ async function getCurrentWorkInfo(ns) {
 }
 
 /** @param {NS} ns
+ * @returns {Promise<ResetInfo>} */
+async function getResetInfo(ns) {
+    return await getNsDataThroughFile(ns, 'ns.getResetInfo()');
+}
+
+/** @param {NS} ns
  * @param {number} numSleeves
  * @returns {Promise<SleevePerson[]>} */
 async function getAllSleeves(ns, numSleeves) {
@@ -129,22 +136,92 @@ async function getAllSleeves(ns, numSleeves) {
 }
 
 /** @param {NS} ns
+ * @param {number} sleeveNumber
+ * @param {number} currentMemory
+ * @param {number} budget
+ * @returns {Promise<number>} */
+async function getAffordableMemoryUpgradeAmount(ns, sleeveNumber, currentMemory, budget) {
+    let low = 0;
+    let high = 100 - currentMemory;
+    while (low < high) {
+        const mid = Math.ceil((low + high) / 2);
+        const cost = await getNsDataThroughFile(ns, 'ns.sleeve.getMemoryUpgradeCost(ns.args[0], ns.args[1])', null, [sleeveNumber, mid]);
+        if (cost <= budget) low = mid;
+        else high = mid - 1;
+    }
+    return low;
+}
+
+/** @param {NS} ns
+ * @param {Player} playerInfo
+ * @param {ResetInfo} resetInfo
+ * @param {number} reserve
+ * @param {number} currentSleeveCount
+ * @param {SleevePerson[]} sleeveInfo
+ * @returns {Promise<{spent: number, numSleeves: number, sleeveInfo: SleevePerson[]}>} */
+async function manageSleeveInfrastructure(ns, playerInfo, resetInfo, reserve, currentSleeveCount, sleeveInfo) {
+    if (resetInfo.currentNode != 10 || !playerInfo.factions.includes(covenantFactionName))
+        return { spent: 0, numSleeves: currentSleeveCount, sleeveInfo };
+
+    let spent = 0;
+    let numSleeves = currentSleeveCount;
+    let sleeves = sleeveInfo;
+    let availableMoney = playerInfo.money - reserve;
+    const targetSleeveCount = Math.min(8, 6 + (ownedSourceFiles[10] || 0));
+
+    while (numSleeves < targetSleeveCount) {
+        const cost = await getNsDataThroughFile(ns, 'ns.sleeve.getSleeveCost()');
+        if (!Number.isFinite(cost) || cost > availableMoney) break;
+        const result = await getNsDataThroughFile(ns, 'ns.sleeve.purchaseSleeve()');
+        if (!result?.success) {
+            log(ns, `WARNING: Failed to purchase an additional sleeve: ${result?.message || "unknown error"}`, false, 'warning');
+            return { spent, numSleeves, sleeveInfo: sleeves };
+        }
+        spent += cost;
+        availableMoney -= cost;
+        numSleeves++;
+        log(ns, `SUCCESS: Purchased sleeve ${numSleeves - 1} from ${covenantFactionName} for ${formatMoney(cost)}.`, true, 'success');
+        sleeves = await getAllSleeves(ns, numSleeves);
+    }
+
+    for (let i = 0; i < numSleeves && availableMoney > 0; i++) {
+        const memoryMissing = 100 - sleeves[i].memory;
+        if (memoryMissing <= 0) continue;
+        const amount = await getAffordableMemoryUpgradeAmount(ns, i, sleeves[i].memory, availableMoney);
+        if (amount <= 0) continue;
+        const cost = await getNsDataThroughFile(ns, 'ns.sleeve.getMemoryUpgradeCost(ns.args[0], ns.args[1])', null, [i, amount]);
+        const result = await getNsDataThroughFile(ns, 'ns.sleeve.upgradeMemory(ns.args[0], ns.args[1])', null, [i, amount]);
+        if (!result?.success) {
+            log(ns, `WARNING: Failed to upgrade sleeve ${i} memory by ${amount}: ${result?.message || "unknown error"}`, false, 'warning');
+            continue;
+        }
+        spent += cost;
+        availableMoney -= cost;
+        sleeves[i].memory += amount;
+        log(ns, `SUCCESS: Upgraded sleeve ${i} memory by ${amount} to ${sleeves[i].memory}/100 for ${formatMoney(cost)}.`, true, 'success');
+    }
+
+    return { spent, numSleeves, sleeveInfo: sleeves };
+}
+
+/** @param {NS} ns
  * Main loop that gathers data, checks on all sleeves, and manages them. */
 async function mainLoop(ns) {
     // Update info
     numSleeves = await getNsDataThroughFile(ns, `ns.sleeve.getNumSleeves()`);
     const playerInfo = await getPlayerInfo(ns);
+    const resetInfo = await getResetInfo(ns);
     // If we have not yet detected that we are in bladeburner, do that now (unless disabled)
     if (!options['disable-bladeburner'] && !playerInBladeburner)
         playerInBladeburner = await getNsDataThroughFile(ns, 'ns.bladeburner.inBladeburner()');
     const playerWorkInfo = await getCurrentWorkInfo(ns);
     if (!playerInGang) playerInGang = !(2 in ownedSourceFiles) ? false : await getNsDataThroughFile(ns, 'ns.gang.inGang()');
     let globalReserve = Number(ns.read("reserve.txt") || 0);
-    let budget = (playerInfo.money - (options['reserve'] || globalReserve)) * options['aug-budget'];
+    const reserve = options['reserve'] ?? globalReserve;
     // Estimate the cost of sleeves training over the next time interval to see if (ignoring income) we would drop below our reserve.
     const costByNextLoop = interval / 1000 * task.filter(t => t.startsWith("train")).length * 12000; // TODO: Training cost/sec seems to be a bug. Should be 1/5 this ($2400/sec)
     // Get time in current bitnode (to cap how long we'll train sleeves)
-    const timeInBitnode = Date.now() - (await getNsDataThroughFile(ns, 'ns.getResetInfo()')).lastNodeReset
+    const timeInBitnode = Date.now() - resetInfo.lastNodeReset
     let canTrain = !options['disable-training'] &&
         // To avoid training forever when mults are crippling, stop training if we've been in the bitnode a certain amount of time
         (options['training-cap-seconds'] * 1000 > timeInBitnode) &&
@@ -171,8 +248,12 @@ async function mainLoop(ns) {
     } else
         bladeburnerCityChaos = 0, bladeburnerContractChances = {}, bladeburnerContractCounts = {};
 
-    // Update all sleeve information and loop over all sleeves to do some individual checks and task assignments
+    // Update all sleeve information. In BN10, first spend on permanent sleeve capacity / memory before temporary sleeve augs.
     let sleeveInfo = await getAllSleeves(ns, numSleeves);
+    const infrastructureResult = await manageSleeveInfrastructure(ns, playerInfo, resetInfo, reserve, numSleeves, sleeveInfo);
+    numSleeves = infrastructureResult.numSleeves;
+    sleeveInfo = infrastructureResult.sleeveInfo;
+    let budget = Math.max(0, playerInfo.money - reserve - infrastructureResult.spent) * options['aug-budget'];
 
     // If not disabled, set the "follow player" sleeve to be the first sleeve with 0 shock
     followPlayerSleeve = options['disable-follow-player'] ? -1 : undefined;

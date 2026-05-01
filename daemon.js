@@ -249,6 +249,22 @@ export async function main(ns) {
         return shouldReserve;
     }
 
+    /** Returns the reserve to enforce for hacknet spending.
+     * In late BN10 autopilot, allow a small bootstrap budget for hacknet without giving up the sleeve reserve entirely.
+     * @param {NS} ns
+     * @returns {number} */
+    function hacknetReserve(ns) {
+        const shouldReserve = reservedMoney(ns);
+        if (!options?.['enable-hacknet-upgrade-manager'])
+            return shouldReserve;
+        if (bitNodeN == 10 && shouldReserve >= 100e15) {
+            const playerMoney = getPlayerMoney(ns);
+            const bootstrapBudget = Math.min(playerMoney * 0.01, 1e15); // Allow up to 1% of cash, capped at 1q, for late-game hacknet ramp-up
+            return Math.max(0, shouldReserve - bootstrapBudget);
+        }
+        return shouldReserve;
+    }
+
     /** @param {NS} ns **/
     async function startup(ns) {
         daemonHost = "home"; // ns.getHostname(); // get the name of this node (realistically, will always be home)
@@ -356,7 +372,15 @@ export async function main(ns) {
             options['enable-hacknet-upgrade-manager'] &&
             bitNodeMults.HacknetNodeMoney > 0 && // Ensure hacknet is not disabled in this BN
             reqRam(Math.min(64, homeReservedRam + 6.1)) && // These scripts consume 6.1 GB and keep running a long time, so we want to ensure we have more than the home reservered RAM amount available if home reserved RAM is a small number
-            getPlayerMoney(ns) > reservedMoney(ns); // Player money exceeds the reserve (otherwise it will sit there buying nothing)
+            getPlayerMoney(ns) > hacknetReserve(ns); // Player money exceeds the hacknet reserve (which may intentionally allow a small late-game bootstrap budget)
+        if (options['enable-hacknet-upgrade-manager']) {
+            const fullReserve = reservedMoney(ns);
+            const effectiveReserve = hacknetReserve(ns);
+            if (effectiveReserve < fullReserve)
+                log(ns, `INFO: Late-game BN10 hacknet bootstrap is active. Preserving ${formatMoney(fullReserve)} overall, but allowing hacknet to spend down to ${formatMoney(effectiveReserve)}.`);
+            else
+                log(ns, `INFO: Hacknet upgrade manager is enabled. Current hacknet reserve is ${formatMoney(effectiveReserve)}.`);
+        }
 
         // ASYNCHRONOUS HELPERS
         // Set up "asynchronous helpers" - standalone scripts to manage certain aspacts of the game. daemon.js launches each of these once when ready (but not again if they are shut down)
@@ -364,7 +388,7 @@ export async function main(ns) {
             { name: "stats.js", shouldRun: () => reqRam(64), shouldTail: false }, // Adds stats not usually in the HUD (nice to have)
             { name: "go.js", shouldRun: () => reqRam(64), minRamReq: 20.2, shouldTail: options['tail-go'] }, // Play go.js (various multipliers, but large dynamic ram requirements)
             { name: "stockmaster.js", shouldRun: () => reqRam(64), args: openTailWindows ? ["--show-market-summary"] : [] }, // Start our stockmaster
-            { name: "hacknet-upgrade-manager.js", shouldRun: () => shouldUpgradeHacknet(), args: ["-c", "--max-payoff-time", "1h", "--interval", "0"], shouldTail: false }, // One-time kickstart of hash income by buying everything with up to 1h payoff time immediately
+            { name: "hacknet-upgrade-manager.js", shouldRun: () => shouldUpgradeHacknet(), args: () => ["-c", "--max-payoff-time", "1h", "--interval", "0", "--reserve", hacknetReserve(ns)], shouldTail: false }, // One-time kickstart of hash income by buying everything with up to 1h payoff time immediately
             { name: "spend-hacknet-hashes.js", shouldRun: () => reqRam(64) && 9 in dictSourceFiles, args: [], shouldTail: false }, // Always have this running to make sure hashes aren't wasted
             { name: "sleeve.js", shouldRun: () => reqRam(64) && 10 in dictSourceFiles }, // Script to create manage our sleeves for us
             { name: "gangs.js", shouldRun: () => reqRam(64) && 2 in dictSourceFiles }, // Script to create manage our gang for us
@@ -396,10 +420,10 @@ export async function main(ns) {
             { interval: 26000, name: "/Tasks/program-manager.js", shouldRun: () => 4 in dictSourceFiles && ownedCracks.length != 5 },
             { interval: 27000, name: "/Tasks/contractor.js", minRamReq: 14.2 }, // Periodically look for coding contracts that need solving
             // Buy every hacknet upgrade with up to 4h payoff if it is less than 10% of our current money or 8h if it is less than 1% of our current money.
-            { interval: 28000, name: "hacknet-upgrade-manager.js", shouldRun: shouldUpgradeHacknet, args: () => ["-c", "--max-payoff-time", "4h", "--max-spend", getPlayerMoney(ns) * 0.1] },
-            { interval: 28500, name: "hacknet-upgrade-manager.js", shouldRun: shouldUpgradeHacknet, args: () => ["-c", "--max-payoff-time", "8h", "--max-spend", getPlayerMoney(ns) * 0.01] },
+            { interval: 28000, name: "hacknet-upgrade-manager.js", shouldRun: shouldUpgradeHacknet, args: () => ["-c", "--max-payoff-time", "4h", "--max-spend", getPlayerMoney(ns) * 0.1, "--reserve", hacknetReserve(ns)] },
+            { interval: 28500, name: "hacknet-upgrade-manager.js", shouldRun: shouldUpgradeHacknet, args: () => ["-c", "--max-payoff-time", "8h", "--max-spend", getPlayerMoney(ns) * 0.01, "--reserve", hacknetReserve(ns)] },
             // Buy upgrades regardless of payoff if they cost less than 0.1% of our money
-            { interval: 29000, name: "hacknet-upgrade-manager.js", shouldRun: shouldUpgradeHacknet, args: () => ["-c", "--max-payoff-time", "1E100h", "--max-spend", getPlayerMoney(ns) * 0.001] },
+            { interval: 29000, name: "hacknet-upgrade-manager.js", shouldRun: shouldUpgradeHacknet, args: () => ["-c", "--max-payoff-time", "1E100h", "--max-spend", getPlayerMoney(ns) * 0.001, "--reserve", hacknetReserve(ns)] },
             {   // Spend about 50% of un-reserved cash on home RAM upgrades (permanent) when they become available
                 interval: 30000, name: "/Tasks/ram-manager.js", args: () => ['--budget', 0.5, '--reserve', reservedMoney(ns)],
                 shouldRun: () => 4 in dictSourceFiles && shouldImproveHacking() // Only trigger if hack income is important
