@@ -20,7 +20,7 @@ let options;
 const argsSchema = [
     // Behaviour-changing flags
     ['disable-stock-manipulation', false], // You must now opt *out* of stock-manipulation mode by enabling this flag.
-    ['stock-manipulation-focus', false], // Stocks are main source of income - kill any scripts that would do them harm (TODO: Enable automatically in BN8)
+    ['stock-manipulation-focus', false], // Stocks are main source of income - kill any scripts that would do them harm (enabled automatically in BN8)
     ['s', true], // (obsolete) Enable Stock Manipulation. This is now true for default, but left as a valid argument for backwards-compatibility.
     ['stock-manipulation', true], // (obsolete) Same as above
 
@@ -322,7 +322,7 @@ export async function main(ns) {
         hackOnly = options.h || options['hack-only'];
         xpOnly = options.x || options['xp-only'];
         stockMode = (options.s || options['stock-manipulation'] || options['stock-manipulation-focus']) && !options['disable-stock-manipulation'];
-        stockFocus = options['stock-manipulation-focus'] && !options['disable-stock-manipulation'];
+        stockFocus = (bitNodeN == 8 || options['stock-manipulation-focus']) && !options['disable-stock-manipulation'];
         useHacknetNodes = options.n || options['use-hacknet-nodes'] || options['use-hacknet-servers'];
         verbose = options.v || options['verbose'];
         runOnce = options.o || options['run-once'];
