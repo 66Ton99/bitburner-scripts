@@ -53,6 +53,7 @@ Project-specific guidance for coding agents working in `bitburner-scripts`.
 - `autopilot.js` may launch corporation automation only when corporations are actually available: current BN3 or SF3.3+. Keep the launcher lightweight; do not import `corporation.js` from `run-corporation.js`.
 - Keep `casino.js` as a lightweight dispatcher. Shared casino runtime helpers belong outside it, and autopilot RAM checks should target the selected casino game script, not just the dispatcher.
 - Do not reference `ns.singularity.*` directly from shared casino helpers; pass optional callbacks from scripts that can afford singularity, otherwise use UI clicks to avoid high no-SF4 RAM costs.
+- Keep grafting automation conservative and isolated in `graft-manager.js`. `autopilot.js` may launch it, but should not choose graft targets inline. In BN8, grafting must preserve the Daedalus cash floor and focus on stock/cash acceleration via hacking speed/grow/chance, not broad augmentation collection or pure hack XP.
 - Do not trigger installs purely because many augmentations are awaiting install if there is no money for additional purchases and more non-NeuroFlux augmentations remain.
 - `autopilot.js` timed `xp-mode` is not useful once hack level is already high; avoid reintroducing aggressive XP-mode relaunching at high hack.
 - Keep Bitburner 3.0 Darknet orchestration in `Tasks/darknet-manager.js`. `autopilot.js` should only keep the manager running, and Darknet scripts should avoid `tprint` in normal automation mode so they do not spam the main terminal.

@@ -24,6 +24,7 @@ const argsSchema = [ // The set of all command line arguments
     ['disable-casino', false], // Set to true to disable running the casino.js script automatically
     ['disable-corporation', false], // Set to true to disable running corporation automation when BN3/SF3.3 makes it available
     ['disable-darknet', false], // Set to true to disable running Bitburner 3.0 darknet automation
+    ['disable-grafting', false], // Set to true to disable conservative augmentation grafting automation
     ['spend-hashes-on-server-hacking-threshold', 0.1], // Threshold for how good hacking multipliers must be to merit spending hashes for boosting hack income. Set to a large number to disable this entirely.
     ['on-completion-script', null], // Spawn this script when we defeat the bitnode
     ['on-completion-script-args', []], // Optional args to pass to the script when we defeat the bitnode
@@ -129,7 +130,7 @@ export async function main(ns) {
 
         log(ns, "INFO: Auto-pilot engaged...", true, 'info');
         // The game does not allow boolean flags to be turned "off" via command line, only on. Since this gets saved, notify the user about how they can turn it off.
-        const flagsSet = ['disable-auto-destroy-bn', 'disable-bladeburner', 'disable-wait-for-4s', 'disable-rush-gangs', 'disable-corporation', 'disable-darknet'].filter(f => options[f]);
+        const flagsSet = ['disable-auto-destroy-bn', 'disable-bladeburner', 'disable-wait-for-4s', 'disable-rush-gangs', 'disable-corporation', 'disable-darknet', 'disable-grafting'].filter(f => options[f]);
         for (const flag of flagsSet)
             log(ns, `WARNING: You have previously enabled the flag "--${flag}". Because of the way this script saves its run settings, the ` +
                 `only way to now turn this back off will be to manually edit or delete the file ${ns.getScriptName()}.config.txt`, true);
@@ -599,6 +600,7 @@ export async function main(ns) {
         }
 
         await maybeLaunchDarknetAutomation(ns, findScript);
+        await maybeLaunchGraftingAutomation(ns, findScript, player);
 
         // Spend hacknet hashes on our boosting best hack-income server once established
         let existingSpendHashesProc = findScript('spend-hacknet-hashes.js', s => s.args.includes("--spend-on-server"))
@@ -823,6 +825,35 @@ export async function main(ns) {
         else
             log_once(ns, `INFO: Waiting to launch darknet automation until home has enough free RAM for Tasks/darknet-manager.js. ` +
                 `Needs ${formatRam(darknetLauncherRam)}, free ${formatRam(homeFreeRam)} / max ${formatRam(homeRam)}.`);
+    }
+
+    /** Launch conservative grafting automation when SF10/BN10 makes it available.
+     * @param {NS} ns
+     * @param {(baseScriptName: string, filter?: (value: ProcessInfo, index: number, array: ProcessInfo[]) => unknown) => ProcessInfo} findScript
+     * @param {Player} player */
+    async function maybeLaunchGraftingAutomation(ns, findScript, player) {
+        if (options['disable-grafting']) return;
+        if (!ns.fileExists('graft-manager.js', 'home')) return;
+        if (findScript('graft-manager.js')) return;
+        if (resetInfo.currentNode != 10 && !(10 in unlockedSFs)) return;
+        if (await checkIfGrafting(ns)) return;
+
+        let graftReserve = Number(ns.read("reserve.txt") || 0);
+        const graftArgs = ['--reserve', graftReserve];
+        if (resetInfo.currentNode == 8) {
+            graftReserve = Math.max(graftReserve, 100e9); // Grafting spends cash, so do not rely on stock-covered reserve here.
+            graftArgs[1] = graftReserve;
+            graftArgs.push('--bn8-stock-mode', '--allow-interrupt', '--min-net-worth', 250e9, '--max-spend-frac', 0.10, '--max-time', 60 * 60 * 1000);
+            if (player.money < 100e9) return; // Do not spend the Daedalus invite cash floor in BN8.
+        }
+        const graftManager = getFilePath('graft-manager.js');
+        const graftManagerRam = ns.getScriptRam(graftManager, 'home');
+        const homeFreeRam = homeRam - await getNsDataThroughFile(ns, `ns.getServerUsedRam(ns.args[0])`, null, ["home"]);
+        if (graftManagerRam <= homeFreeRam)
+            launchScriptHelper(ns, 'graft-manager.js', graftArgs);
+        else
+            log_once(ns, `INFO: Waiting to launch grafting automation until home has enough free RAM for graft-manager.js. ` +
+                `Needs ${formatRam(graftManagerRam)}, free ${formatRam(homeFreeRam)} / max ${formatRam(homeRam)}.`);
     }
 
     /** Buy exactly one missing BN10 Covenant sleeve infrastructure item when cash is already available.
