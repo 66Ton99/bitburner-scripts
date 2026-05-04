@@ -17,6 +17,7 @@ const default_hidden_stats = ['bladeburner', 'hacknet']; // Hide from the summar
 const output_file = "/Temp/affordable-augs.txt"; // Temp file produced for autopilot.js to relay information about current owned & affordable augs.
 const staneksGift = "Stanek's Gift - Genesis";
 const factionsWithoutDonation = ["Bladeburners", "Church of the Machine God", "Shadows of Anarchy"]; // Not allowed to donate to these factions for rep
+const bn8CashReserve = 25e6;
 
 // Factors used in calculations
 const nfCountMult = 1.14; // Factors that control how NeuroFlux prices scale
@@ -34,6 +35,29 @@ let purchaseableAugs = (/**@returns {AugmentationData[]}*/() => [])();
 let bitNodeMults = (/**@returns{BitNodeMultipliers}*/() => undefined)();
 let printToTerminal, ignorePlayerData;
 let _ns; // Used to avoid passing ns to functions that don't need it except for some logs.
+
+function getBn8CashReserve() {
+    return bitNode == 8 ? bn8CashReserve : 0;
+}
+
+function getReservedCash() {
+    return Math.max(Number(_ns?.read("reserve.txt") || 0), getBn8CashReserve());
+}
+
+/** @param {NS} ns @param {{[bitNode: number]: number}} ownedSourceFiles */
+async function shouldDisableNeuroFluxForBn10Sleeves(ns, ownedSourceFiles) {
+    if (bitNode != 10) return false;
+    try {
+        const targetSleeveCount = Math.min(8, 6 + (ownedSourceFiles[10] || 0));
+        const numSleeves = await getNsDataThroughFile(ns, `ns.sleeve.getNumSleeves()`);
+        if (numSleeves < targetSleeveCount) return true;
+        const sleeveInfo = await getNsDataThroughFile(ns, `ns.args.map(i => ns.sleeve.getSleeve(i))`,
+            '/Temp/facman-sleeve-getSleeve-all.txt', [...Array(numSleeves).keys()]);
+        return sleeveInfo.some(sleeve => sleeve.memory < 100);
+    } catch {
+        return false;
+    }
+}
 
 let options = null; // A copy of the options used at construction time
 const argsSchema = [ // The set of all command line arguments
@@ -150,6 +174,11 @@ export async function main(ns) {
         await getNsDataThroughFile(ns, 'ns.singularity.getOwnedAugmentations()', '/Temp/player-augs-installed.txt');
     numAugsAwaitingInstall = ownedAugmentations.length - installedAugmentations.length;
     if (options['neuroflux-disabled']) omitAugs.push(strNF);
+    else if (await shouldDisableNeuroFluxForBn10Sleeves(ns, ownedSourceFiles)) {
+        options['neuroflux-disabled'] = true;
+        omitAugs.push(strNF);
+        log(ns, `INFO: Disabling ${strNF} purchases because BN10 Covenant sleeves/memory are not complete yet.`, printToTerminal);
+    }
     simulatedOwnedAugmentations = ignorePlayerData ? [] : ownedAugmentations.filter(a => a != strNF);
     // Clear "priority" / "desired" lists of any augs we already own
     priorityAugs = priorityAugs.filter(name => !simulatedOwnedAugmentations.includes(name));
@@ -491,7 +520,7 @@ class AugmentationData {
                 .map(prop => shorten(prop) + ': ' + Math.round((this.stats[prop] + Number.EPSILON) * 100) / 100).join(', ') + ` }`));
         const factionName = this.getFromJoined() || this.getFromAny;
         const fCreep = Math.max(0, factionName.length - factionColWidth);
-        const budget = playerData.money + stockValue;
+        const budget = Math.max(0, playerData.money + stockValue - getReservedCash());
         const augNameShort = this.displayName.length <= (augColWidth - fCreep) ? this.displayName :
             `${this.displayName.slice(0, Math.ceil(augColWidth / 2 - 3 - fCreep))}...${this.displayName.slice(this.displayName.length - Math.floor(augColWidth / 2))}`;
         return `${this.desired ? '*' : ' '} Price: ${formatMoney(this.price, 4).padEnd(7)} ${this.price <= budget ? '✓' : '✗'}  ` +
@@ -696,7 +725,7 @@ async function manageFilteredSubset(ns, outputRows, subsetName, subset, printLis
 async function managePurchaseableAugs(ns, outputRows, accessibleAugs) {
     // Refresh player data to get an accurate read of current money
     playerData = await getPlayerInfo(ns);
-    const budget = playerData.money + stockValue;
+    const budget = Math.max(0, playerData.money + stockValue - getReservedCash());
     let totalRepCost, totalAugCost, dropped, restart;
     // We will make every effort to keep "priority" augs in the purchase order, but start dropping them if we find we cannot afford them all
     const inaccessiblePriorityAugs = priorityAugs.filter(name => {
@@ -892,7 +921,8 @@ async function purchaseDesiredAugs(ns) {
         stockValue = 0;
         playerData = await getPlayerInfo(ns);
     }
-    while (purchaseableAugs.length > 0 && totalAugCost + totalRepCost > playerData.money) {
+    let spendableMoney = Math.max(0, playerData.money - getReservedCash());
+    while (purchaseableAugs.length > 0 && totalAugCost + totalRepCost > spendableMoney) {
         let mostExpensiveAug = purchaseableAugs
             .filter(a => !priorityAugs.includes(a.name))
             .slice()
@@ -907,14 +937,17 @@ async function purchaseDesiredAugs(ns) {
         }
         purchaseableAugs = sortAugs(ns, purchaseableAugs.filter(aug => aug !== mostExpensiveAug));
         [purchaseFactionDonations, totalRepCost, totalAugCost] = computeCosts(purchaseableAugs);
+        spendableMoney = Math.max(0, playerData.money - getReservedCash());
     }
-    if (totalAugCost + totalRepCost > playerData.money && totalAugCost + totalRepCost > playerData.money * 1.1) // If we're way off affording this, something is probably wrong
+    if (purchaseableAugs.length == 0 || totalAugCost + totalRepCost <= 0)
+        return log(ns, `INFO: Cannot afford to buy any augmentations at this time.`, printToTerminal)
+    if (totalAugCost + totalRepCost > spendableMoney && totalAugCost + totalRepCost > spendableMoney * 1.1) // If we're way off affording this, something is probably wrong
         return log(ns, `ERROR: Purchase order total cost (${getCostString(totalAugCost, totalRepCost)})` +
-            ` is far more than current player money (${formatMoney(playerData.money)}). Your money may have recently changed (It was ${formatMoney(startingPlayerMoney)} at startup), ` +
+            ` is far more than current spendable player money (${formatMoney(spendableMoney)} of ${formatMoney(playerData.money)}). Your money may have recently changed (It was ${formatMoney(startingPlayerMoney)} at startup), ` +
             `or there may be a bug in purchasing logic.`, printToTerminal, 'error');
-    if (totalAugCost + totalRepCost > playerData.money) // If we're just a little off affording this, it could be because a bit of money was just spent? Just warn and buy what we can
+    if (totalAugCost + totalRepCost > spendableMoney) // If we're just a little off affording this, it could be because a bit of money was just spent? Just warn and buy what we can
         log(ns, `WARNING: Purchase order total cost (${getCostString(totalAugCost, totalRepCost)})` +
-            ` is a bit more than current player money (${formatMoney(playerData.money)}). Did something else spend some money? ` +
+            ` is a bit more than current spendable player money (${formatMoney(spendableMoney)} of ${formatMoney(playerData.money)}). Did something else spend some money? ` +
             `(We had ${formatMoney(startingPlayerMoney)} at startup). Will proceed with buying most of the purchase order.`, printToTerminal, 'warning');
     // Donate to factions if necessary (using a ram-dodging script of course)
     if (Object.keys(purchaseFactionDonations).length > 0 && Object.values(purchaseFactionDonations).some(v => v > 0)) {
@@ -925,8 +958,6 @@ async function purchaseDesiredAugs(ns) {
             log(ns, `ERROR: One or more attempts to donate to factions for reputation failed. Go investigate!`, printToTerminal, 'error');
     }
     // Purchase desired augs (using a ram-dodging script of course)
-    if (purchaseableAugs.length == 0)
-        return log(ns, `INFO: Cannot afford to buy any augmentations at this time.`, printToTerminal)
     const purchased = await getNsDataThroughFile(ns, 'JSON.parse(ns.args[0]).reduce((total, o) => total + (ns.singularity.purchaseAugmentation(o.faction, o.augmentation) ? 1 : 0), 0)',
         '/Temp/facman-purchase-augs.txt', [JSON.stringify(purchaseableAugs.map(aug => ({ faction: aug.getFromJoined(), augmentation: aug.name })))]);
     if (purchased == purchaseableAugs.length)

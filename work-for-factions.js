@@ -114,6 +114,7 @@ const minAdaptiveInfiltrationDifficulty = 1.0;
 const lowMoneyInfiltrationDifficulty = 2.5;
 const repInfiltrationDifficultyCap = 3.35;
 const cityTravelCost = 200000;
+const bn8CashReserve = 25e6;
 const silhouetteStatDeferralMargin = 100;
 
 let shouldFocus; // Whether we should focus on work or let it be backgrounded (based on whether "Neuroreceptor Management Implant" is owned, or "--no-focus" is specified)
@@ -126,6 +127,7 @@ let recentHospitalizedLocations = {};
 let recentFactionInviteDeferrals = {};
 let bitNodeMults = (/**@returns{BitNodeMultipliers}*/() => undefined)(); // Trick to get strong typing in mono
 let netburnersEligibility = { nodes: 0, levels: 0, ram: 0, cores: 0, ready: false };
+let lastMoneyFallbackStatus = "";
 
 function shouldDeferSilhouette(player) {
     if (player.factions.includes("Silhouette"))
@@ -338,6 +340,7 @@ let lastMainLoopMessage = "";
 /** @param {NS} ns */
 async function mainLoop(ns) {
     if (!breakToMainLoop()) scope++; // Increase the scope of work if the last iteration completed early (i.e. due to all work within that scope being complete)
+    scope = Math.min(scope, 9);
     mainLoopStart = Date.now();
     // If changing our loop scope, log a message
     const loopMessage = `INFO: Currently work scope is anything <= priority level: ${scope}`;
@@ -348,6 +351,7 @@ async function mainLoop(ns) {
     const player = await getPlayerInfo(ns);
     const resetInfo = await getResetInfoRd(ns);
     currentBitnode = resetInfo.currentNode;
+    await stopBn8PaidWorkIfCashIsLow(ns, player);
     if (player.factions.length > numJoinedFactions) { // If we've recently joined a new faction, reset our work scope
         scope = 1; // Back to basics until we've satisfied all highest-priority work
         numJoinedFactions = player.factions.length;
@@ -505,6 +509,27 @@ async function mainLoop(ns) {
 
 // Ram-dodging helper, runs a command for all items in a list and returns a dictionary.
 const dictCommand = (command) => `Object.fromEntries(ns.args.map(o => [o, ${command}]))`;
+
+function isBn8() {
+    return currentBitnode == 8;
+}
+
+function hasBn8CashBuffer(player, additionalSpend = 0) {
+    return !isBn8() || player.money - additionalSpend >= bn8CashReserve;
+}
+
+/** @param {NS} ns */
+async function stopBn8PaidWorkIfCashIsLow(ns, player = null) {
+    if (!isBn8()) return false;
+    player = player || await getPlayerInfo(ns);
+    if (player.money >= bn8CashReserve) return false;
+    const currentWork = await getCurrentWorkInfo(ns);
+    if (currentWork?.type != "CLASS") return false;
+    await stop(ns);
+    log(ns, `WARNING: Stopped paid training/studying in BN8 because cash fell below ${formatMoney(bn8CashReserve)} ` +
+        `(current ${formatMoney(player.money)}).`, false, 'warning');
+    return true;
+}
 
 const requiredMoneyByFaction = {
     "Tian Di Hui": 1E6, "Sector-12": 15E6, "Chongqing": 20E6, "New Tokyo": 20E6, "Ishima": 30E6, "Aevum": 40E6, "Volhaven": 50E6,
@@ -770,6 +795,11 @@ async function goToCity(ns, cityName) {
         ns.print(`Already in city ${cityName}`);
         return true;
     }
+    if (!hasBn8CashBuffer(player, cityTravelCost)) {
+        log(ns, `WARNING: Skipping travel from ${player.city} to ${cityName} in BN8 to preserve ${formatMoney(bn8CashReserve)} cash buffer. ` +
+            `Need ${formatMoney(cityTravelCost + bn8CashReserve)}, have ${formatMoney(player.money)}.`, false, 'warning');
+        return false;
+    }
     if (await getNsDataThroughFile(ns, `ns.singularity.travelToCity(ns.args[0])`, null, [cityName])) {
         const updatedPlayer = await getPlayerInfo(ns);
         if (updatedPlayer.city == cityName) {
@@ -858,7 +888,7 @@ export async function crimeForKillsKarmaStats(ns, reqKills, reqKarma, reqStats, 
 
 /** @param {NS} ns */
 async function studyForCharisma(ns, focus) {
-    await goToCity(ns, 'Volhaven');
+    if (!await goToCity(ns, 'Volhaven')) return false;
     return await study(ns, focus, 'Leadership', 'ZB Institute of Technology');
 }
 
@@ -871,7 +901,13 @@ async function study(ns, focus, course, university = null) {
         log(ns, `WARNING: Could not study '${course}' because --no-studying is set.`, false, 'warning');
         return;
     }
-    const playerCity = (await getPlayerInfo(ns)).city;
+    const player = await getPlayerInfo(ns);
+    if (!hasBn8CashBuffer(player)) {
+        log(ns, `WARNING: Skipping paid study '${course}' in BN8 to preserve ${formatMoney(bn8CashReserve)} cash buffer. ` +
+            `Have ${formatMoney(player.money)}.`, false, 'warning');
+        return false;
+    }
+    const playerCity = player.city;
     if (!university) { // Auto-detect the university in our city
         university = uniByCity[playerCity];
         if (!university) {
@@ -895,7 +931,10 @@ async function workOutAtGym(ns, focus, stat, gymName = "Powerhouse Gym") {
         return false;
     }
     const player = await getPlayerInfo(ns);
-    const requiredMoney = options['pay-for-studies-threshold'] + (player.city == gymCity ? 0 : cityTravelCost);
+    const travelSpend = player.city == gymCity ? 0 : cityTravelCost;
+    const requiredMoney = isBn8() ?
+        Math.max(options['pay-for-studies-threshold'] + travelSpend, bn8CashReserve + travelSpend) :
+        options['pay-for-studies-threshold'] + travelSpend;
     if (player.money < requiredMoney) {
         log(ns, `WARNING: Insufficient funds to train "${stat}" at "${gymName}". ` +
             `Need ${formatMoney(requiredMoney)}, have ${formatMoney(player.money)}.`, false, 'warning');
@@ -1356,16 +1395,14 @@ export async function workForSingleFaction(ns, factionName, forceUnlockDonations
         const targetSummary = `${factionName}|${bestLocation.location.city}|${bestLocation.location.name}|${playerBeforeTravel.city}|${travelNeeded}`;
         if (targetSummary != lastSelectedInfiltrationTarget) {
             lastSelectedInfiltrationTarget = targetSummary;
-            devConsoleLog(`Selected infiltration target "${bestLocation.location.name}" in "${bestLocation.location.city}" for "${factionName}". ` +
-                `Current rep: ${Math.round(currentReputation).toLocaleString('en')}. Target rep: ${Math.round(factionRepRequired).toLocaleString('en')}. ` +
-                `Remaining: ${Math.round(remainingRep).toLocaleString('en')}. Current city: "${playerBeforeTravel.city}". Travel needed: ${travelNeeded}.`);
+            devConsoleLog(`Infiltrating "${bestLocation.location.name}"@${bestLocation.location.city} for "${factionName}" ` +
+                `(${Math.round(remainingRep).toLocaleString('en')} rep remaining, ~${Math.round(bestLocation.reward.tradeRep).toLocaleString('en')}/run` +
+                `${travelNeeded ? `, travel ${playerBeforeTravel.city}->${bestLocation.location.city}` : ''}).`);
         }
-        if (travelNeeded)
-            devConsoleLog(`Departure from "${playerBeforeTravel.city}" to "${bestLocation.location.city}" for infiltration at "${bestLocation.location.name}".`);
         if (travelNeeded) {
             const travelWorked = await goToCity(ns, bestLocation.location.city);
-            devConsoleLog(`${travelWorked ? 'Arrived' : 'Travel failed'} from "${playerBeforeTravel.city}" to "${bestLocation.location.city}" for infiltration at "${bestLocation.location.name}".`);
             if (!travelWorked) {
+                devConsoleLog(`Travel failed from "${playerBeforeTravel.city}" to "${bestLocation.location.city}" for infiltration at "${bestLocation.location.name}".`);
                 noteTravelFailedInfiltration(bestLocation);
                 await ns.sleep(loopSleepInterval);
                 continue;
@@ -1375,7 +1412,6 @@ export async function workForSingleFaction(ns, factionName, forceUnlockDonations
             await startBackgroundCombatTraining(ns, trainingTarget.requiredCombatStat, `${factionName} infiltration`, bestLocation.location.city);
         else
             await ensureBackgroundWeakestCombatTraining(ns, `${factionName} infiltration`);
-        devConsoleLog(`Starting infiltration runner for "${factionName}" at "${bestLocation.location.name}". Infiltration has priority until the runner finishes.`);
         const infiltrationResult = await runInfiltrationRunner(ns, bestLocation.location.city, bestLocation.location.name, factionName, false, false);
         if (!infiltrationResult.success) {
             if (infiltrationResult.reason == 'hospitalized')
@@ -1401,7 +1437,6 @@ export async function workForSingleFaction(ns, factionName, forceUnlockDonations
         }
         if (await tryPurchaseAugmentations(ns)) {
             await loadStartupData(ns);
-            devConsoleLog(`Reloaded faction and augmentation data after purchase attempt.`);
             return true;
         }
         await tryBuyReputation(ns);
@@ -1428,53 +1463,16 @@ async function pickBestInfiltrationLocation(ns, remainingRep = Number.POSITIVE_I
     const infiltrationByLocation = await getInfiltrationDataByLocation(ns, locations.map(location => location.name));
     const player = await getPlayerInfo(ns);
     const allLocations = Object.values(infiltrationByLocation);
-    const describeInfiltration = infiltration => {
-        const cap = getCurrentRepInfiltrationDifficultyCap(infiltration, player.city, currentMoney);
-        const reachable = canReachInfiltrationLocation(infiltration, player.city, currentMoney);
-        const coolingDown = isLocationCoolingDown(infiltration.location?.name);
-        const skillReady = canHandleRepInfiltrationDifficulty(infiltration, player, cap);
-        const requiredCombatStat = skillReady ? 0 : getRequiredCombatStatForInfiltration(infiltration, player, cap);
-        return `"${infiltration.location?.name}"@${infiltration.location?.city}: rep=${Math.round(infiltration.reward.tradeRep).toLocaleString('en')}, ` +
-            `diff=${infiltration.difficulty.toFixed(3)}, cap=${cap.toFixed(3)}, skillReady=${skillReady}` +
-            `${skillReady ? '' : `, combat=${getMinCombatStat(player)}/${requiredCombatStat}`}, reachable=${reachable}, cooldown=${coolingDown}`;
-    };
-    const strongestOverallLocation = [...allLocations]
-        .sort((a, b) => b.reward.tradeRep - a.reward.tradeRep || a.difficulty - b.difficulty)[0] ?? null;
-    const topOverallLocations = [...allLocations]
-        .sort((a, b) => b.reward.tradeRep - a.reward.tradeRep || a.difficulty - b.difficulty)
-        .slice(0, 5);
     const reachableLocations = allLocations
         .filter(infiltration => canReachInfiltrationLocation(infiltration, player.city, currentMoney) &&
             canHandleRepInfiltrationDifficulty(infiltration, player, getCurrentRepInfiltrationDifficultyCap(infiltration, player.city, currentMoney)) &&
             !isLocationCoolingDown(infiltration.location?.name));
-    const topReachableLocations = [...reachableLocations]
-        .sort((a, b) => b.reward.tradeRep - a.reward.tradeRep || a.difficulty - b.difficulty)
-        .slice(0, 5);
-    const strongestReachableLocation = [...reachableLocations]
-        .sort((a, b) => b.reward.tradeRep - a.reward.tradeRep || a.difficulty - b.difficulty)[0] ?? null;
     const candidateLocations = reachableLocations;
     if (candidateLocations.length == 0) return null;
     const selectedLocation = Number.isFinite(remainingRep) ?
         ([...candidateLocations].sort((a, b) => compareRepInfiltrationTargets(a, b, remainingRep, player.city))[0] ?? null) :
         (candidateLocations
             .sort((a, b) => b.reward.tradeRep - a.reward.tradeRep || a.difficulty - b.difficulty)[0] ?? null);
-    devConsoleLog(`Faction infiltration scan for remainingRep=${Math.round(remainingRep).toLocaleString('en')}, currentCity="${player.city}", currentMoney=${Math.round(currentMoney).toLocaleString('en')}. ` +
-        `Top overall: ${topOverallLocations.map(describeInfiltration).join(' | ')}. ` +
-        `Top reachable: ${topReachableLocations.map(describeInfiltration).join(' | ')}.`);
-    if (selectedLocation && strongestOverallLocation && selectedLocation.location?.name != strongestOverallLocation.location?.name) {
-        const strongestOverallCap = getCurrentRepInfiltrationDifficultyCap(strongestOverallLocation, player.city, currentMoney);
-        const strongestOverallReachable = canReachInfiltrationLocation(strongestOverallLocation, player.city, currentMoney);
-        const strongestOverallCoolingDown = isLocationCoolingDown(strongestOverallLocation.location?.name);
-        const strongestOverallSkillReady = canHandleRepInfiltrationDifficulty(strongestOverallLocation, player, strongestOverallCap);
-        const strongestOverallRequiredCombat = strongestOverallSkillReady ? 0 : getRequiredCombatStatForInfiltration(strongestOverallLocation, player, strongestOverallCap);
-        devConsoleLog(`Selected infiltration target "${selectedLocation.location?.name}" (~${Math.round(selectedLocation.reward.tradeRep).toLocaleString('en')} rep) instead of strongest overall ` +
-            `"${strongestOverallLocation.location?.name}" (~${Math.round(strongestOverallLocation.reward.tradeRep).toLocaleString('en')} rep). ` +
-            `Reasons: difficulty ${strongestOverallLocation.difficulty.toFixed(3)} vs cap ${strongestOverallCap.toFixed(3)}, ` +
-            `skillReady=${strongestOverallSkillReady}${strongestOverallSkillReady ? '' : `, combat=${getMinCombatStat(player)}/${strongestOverallRequiredCombat}`}, ` +
-            `reachable=${strongestOverallReachable}, cooldown=${strongestOverallCoolingDown}, currentCity="${player.city}".`);
-    }
-    if (selectedLocation)
-        devConsoleLog(`Final faction infiltration target: ${describeInfiltration(selectedLocation)}.`);
     return selectedLocation;
 }
 
@@ -1591,17 +1589,52 @@ function getRepInfiltrationTargetStats(infiltration, remainingRep, currentCity) 
     return { tradeRep, difficulty, runCount, overshoot, travelPenalty };
 }
 
-async function pickBestMoneyInfiltrationLocation(ns, currentMoney = Number.POSITIVE_INFINITY) {
+async function pickBestMoneyInfiltrationLocation(ns, currentMoney = Number.POSITIVE_INFINITY, scanResult = null) {
     const locations = await getNsDataThroughFile(ns, `ns.infiltration.getPossibleLocations()`, '/Temp/infiltration-locations.txt');
     if (!locations?.length) return null;
     const infiltrationByLocation = await getInfiltrationDataByLocation(ns, locations.map(location => location.name));
     const player = await getPlayerInfo(ns);
-    return Object.values(infiltrationByLocation)
+    const localPossibleLocations = locations
+        .filter(location => location?.city == player.city)
+        .sort((a, b) => String(a.name).localeCompare(String(b.name)));
+    if (scanResult) {
+        scanResult.hasLocalMoneyTarget = localPossibleLocations.length > 0;
+        scanResult.bestLocalMoneyTarget = localPossibleLocations[0] ?
+            { location: localPossibleLocations[0], reward: { sellCash: 0 }, difficulty: Number.POSITIVE_INFINITY, maxClearanceLevel: 0, startingSecurityLevel: Number.POSITIVE_INFINITY } :
+            null;
+    }
+    if (!infiltrationByLocation || typeof infiltrationByLocation != 'object' || Array.isArray(infiltrationByLocation)) {
+        devConsoleLog(`Money infiltration scan could not read infiltration details: ${String(infiltrationByLocation).slice(0, 500)}`);
+        return scanResult?.bestLocalMoneyTarget ?? null;
+    }
+    const allLocations = Object.values(infiltrationByLocation)
+        .filter(infiltration => infiltration && typeof infiltration == 'object' && infiltration.location);
+    const reachableLocations = allLocations
         .filter(infiltration => infiltration?.reward?.sellCash > 0 &&
-            infiltration?.difficulty < getCurrentInfiltrationDifficultyCap(infiltration, player.city, currentMoney) &&
             canReachInfiltrationLocation(infiltration, player.city, currentMoney) &&
-            !isLocationCoolingDown(infiltration.location?.name))
+            canHandleRepInfiltrationDifficulty(infiltration, player, getCurrentInfiltrationDifficultyCap(infiltration, player.city, currentMoney)) &&
+            !isLocationCoolingDown(infiltration.location?.name));
+    const localMoneyLocations = allLocations
+        .filter(infiltration => infiltration?.reward?.sellCash > 0 &&
+            infiltration.location?.city == player.city)
+        .sort((a, b) => b.reward.sellCash - a.reward.sellCash || a.difficulty - b.difficulty);
+    if (scanResult) {
+        scanResult.hasLocalMoneyTarget = scanResult.hasLocalMoneyTarget || localMoneyLocations.length > 0;
+        scanResult.bestLocalMoneyTarget = localMoneyLocations[0] ?? scanResult.bestLocalMoneyTarget ?? null;
+    }
+    if (reachableLocations.length == 0) {
+        devConsoleLog(`Money infiltration scan found no feasible targets for currentCity="${player.city}", currentMoney=${Math.round(currentMoney).toLocaleString('en')}. ` +
+            `locations=${locations.length}, detailedLocations=${allLocations.length}, localPossible=${localPossibleLocations.map(location => `"${location.name}"`).join(', ') || 'none'}.`);
+        if (scanResult?.bestLocalMoneyTarget && !Number.isFinite(scanResult.bestLocalMoneyTarget.difficulty))
+            return scanResult.bestLocalMoneyTarget;
+        return null;
+    }
+    const selectedLocation = reachableLocations
         .sort((a, b) => b.reward.sellCash - a.reward.sellCash || a.difficulty - b.difficulty)[0] ?? null;
+    if (selectedLocation)
+        devConsoleLog(`Money infiltration target "${selectedLocation.location?.name}"@${selectedLocation.location?.city} ` +
+            `(payout ~${formatMoney(selectedLocation.reward.sellCash || 0)}).`);
+    return selectedLocation;
 }
 
 function canReachInfiltrationLocation(infiltration, currentCity, currentMoney) {
@@ -1652,18 +1685,33 @@ function noteFailedInfiltration(location, reason = "failure") {
 
 async function workForInfiltrationMoney(ns, moneyTarget) {
     const currentMoney = (await getPlayerInfo(ns)).money;
-    const bestLocation = await pickBestMoneyInfiltrationLocation(ns, currentMoney);
-    if (!bestLocation) {
-        ns.print(`No feasible infiltration target right now. Waiting instead of farming cash.`);
+    if ((bitNodeMults.InfiltrationMoney || 0) <= 0) {
+        const status = `Infiltration currently pays $0 in this BitNode. Waiting instead of farming money via infiltration or crime.`;
+        if (status != lastMoneyFallbackStatus) {
+            lastMoneyFallbackStatus = status;
+            ns.print(status);
+        }
         await ns.sleep(loopSleepInterval);
         return false;
     }
+    const moneyInfiltrationScan = {};
+    const bestLocation = await pickBestMoneyInfiltrationLocation(ns, currentMoney, moneyInfiltrationScan);
+    if (!bestLocation) {
+        if (moneyInfiltrationScan.hasLocalMoneyTarget)
+            return await waitForLocalMoneyInfiltration(ns, moneyInfiltrationScan.bestLocalMoneyTarget);
+        return await workForFallbackCrimeMoney(ns, moneyTarget);
+    }
+    return await runMoneyInfiltration(ns, bestLocation, currentMoney, moneyTarget);
+}
+
+/** @param {NS} ns */
+async function runMoneyInfiltration(ns, bestLocation, currentMoney, moneyTarget) {
     await ensureBackgroundWeakestCombatTraining(ns, "money infiltration");
     const targetSummary = moneyTarget > currentMoney ?
         `target ${formatMoney(moneyTarget)}, ` :
         '';
     const status = `Using infiltration at "${bestLocation.location.name}" for money ` +
-        `(current ${formatMoney(currentMoney)}, ${targetSummary}payout ~${formatMoney(bestLocation.reward.sellCash)}).`;
+        `(current ${formatMoney(currentMoney)}, ${targetSummary}payout ${bestLocation.reward.sellCash > 0 ? `~${formatMoney(bestLocation.reward.sellCash)}` : 'unknown'}).`;
     if (lastFactionWorkStatus != status) {
         lastFactionWorkStatus = status;
         ns.print(status);
@@ -1671,10 +1719,9 @@ async function workForInfiltrationMoney(ns, moneyTarget) {
     const playerBeforeTravel = await getPlayerInfo(ns);
     const travelNeeded = playerBeforeTravel.city != bestLocation.location.city;
     if (travelNeeded) {
-        devConsoleLog(`Departure from "${playerBeforeTravel.city}" to "${bestLocation.location.city}" for infiltration at "${bestLocation.location.name}".`);
         const travelWorked = await goToCity(ns, bestLocation.location.city);
-        devConsoleLog(`${travelWorked ? 'Arrived' : 'Travel failed'} from "${playerBeforeTravel.city}" to "${bestLocation.location.city}" for infiltration at "${bestLocation.location.name}".`);
         if (!travelWorked) {
+            devConsoleLog(`Travel failed from "${playerBeforeTravel.city}" to "${bestLocation.location.city}" for money infiltration at "${bestLocation.location.name}".`);
             noteTravelFailedInfiltration(bestLocation);
             return false;
         }
@@ -1688,6 +1735,80 @@ async function workForInfiltrationMoney(ns, moneyTarget) {
         log(ns, `WARN: Money infiltration runner failed at "${bestLocation.location.name}" (${infiltrationResult.reason}).`, false, 'warning');
     }
     return infiltrationResult.success;
+}
+
+/** @param {NS} ns */
+async function waitForLocalMoneyInfiltration(ns, localLocation) {
+    const player = await getPlayerInfo(ns);
+    const cap = getCurrentInfiltrationDifficultyCap(localLocation, player.city, player.money);
+    const requiredCombatStat = getRequiredCombatStatForInfiltration(localLocation, player, cap);
+    const status = `Local money infiltration target "${localLocation.location.name}" exists, but no currently feasible infiltration target was selected. ` +
+        `Waiting instead of falling back to crime. Combat min ${getMinCombatStat(player)}, target ${requiredCombatStat}, ` +
+        `difficulty ${Number.isFinite(localLocation.difficulty) ? localLocation.difficulty.toFixed(3) : 'unknown'}, ` +
+        `cap ${Number.isFinite(cap) ? cap.toFixed(3) : 'unknown'}.`;
+    if (status != lastMoneyFallbackStatus) {
+        lastMoneyFallbackStatus = status;
+        ns.print(status);
+    }
+    if (requiredCombatStat > 0)
+        await startBackgroundCombatTraining(ns, requiredCombatStat, "money infiltration", localLocation.location.city);
+    else
+        await ensureBackgroundWeakestCombatTraining(ns, "money infiltration");
+    await ns.sleep(loopSleepInterval);
+    return false;
+}
+
+/** @param {NS} ns */
+async function workForFallbackCrimeMoney(ns, moneyTarget) {
+    const player = await getPlayerInfo(ns);
+    if (options['no-crime'] || options['no-focus']) {
+        ns.print(`No feasible infiltration target right now, and crime fallback is disabled. Waiting instead of farming cash.`);
+        await ns.sleep(loopSleepInterval);
+        return false;
+    }
+    if ((bitNodeMults.CrimeMoney || 0) <= 0) {
+        const currentWork = await getCurrentWorkInfo(ns);
+        if (currentWork?.type == "CRIME")
+            await stop(ns);
+        const status = `No feasible infiltration target right now, and crimes currently pay $0 in this BitNode. Waiting instead of farming zero-cash crime.`;
+        if (status != lastMoneyFallbackStatus) {
+            lastMoneyFallbackStatus = status;
+            ns.print(status);
+        }
+        await ns.sleep(loopSleepInterval);
+        return false;
+    }
+    const mugStats = await getNsDataThroughFile(ns, 'ns.singularity.getCrimeStats(ns.args[0])', '/Temp/crime-money-fallback.txt', ["Mug"]);
+    if ((mugStats?.money || 0) <= 0) {
+        const currentWork = await getCurrentWorkInfo(ns);
+        if (currentWork?.type == "CRIME" && String(currentWork?.crimeType || "").includes("Mug"))
+            await stop(ns);
+        const status = `No feasible infiltration target right now, and "Mug" currently pays ${formatMoney(mugStats?.money || 0)}. ` +
+            `Waiting instead of farming zero-cash crime.`;
+        if (status != lastMoneyFallbackStatus) {
+            lastMoneyFallbackStatus = status;
+            ns.print(status);
+        }
+        await ns.sleep(loopSleepInterval);
+        return false;
+    }
+    const fallbackTarget = Math.max(0, Math.min(moneyTarget, cityTravelCost));
+    const status = `No feasible infiltration target right now. Falling back to "Mug" until cash reaches ${formatMoney(fallbackTarget)} ` +
+        `(current ${formatMoney(player.money)}, payout ${formatMoney(mugStats.money)}).`;
+    if (status != lastMoneyFallbackStatus) {
+        lastMoneyFallbackStatus = status;
+        ns.print(status);
+    }
+    const currentWork = await getCurrentWorkInfo(ns);
+    const crimeType = currentWork?.crimeType || "";
+    if (!(currentWork?.type == "CRIME" && crimeType.includes("Mug"))) {
+        if (await isValidInterruption(ns, currentWork)) return false;
+        const focusArg = shouldFocus === undefined ? true : shouldFocus;
+        await getNsDataThroughFile(ns, 'ns.singularity.commitCrime(ns.args[0], ns.args[1])', null, ["Mug", focusArg]);
+        if (shouldFocus && !options['no-tail-windows']) tail(ns);
+    }
+    await ns.sleep(Math.max(loopSleepInterval, mugStats.time || 0));
+    return true;
 }
 
 function devConsoleLog(message) {
@@ -1714,7 +1835,6 @@ async function tryPurchaseAugmentations(ns) {
         devConsoleLog(`Could not launch faction-manager.js for purchases.`);
         return false;
     }
-    devConsoleLog(`Launched faction-manager.js (pid ${pid}) to purchase augmentations.`);
     while (await getNsDataThroughFile(ns, 'ns.isRunning(ns.args[0])', null, [pid]))
         await ns.sleep(100);
     return true;
@@ -1736,12 +1856,6 @@ async function runInfiltrationRunner(ns, city, company, factionName = null, take
     if (effectiveAllowTravel) args.push('--allow-travel');
     if (takeCash) args.push('--cash');
     else args.push('--faction', factionName);
-    ns.print(takeCash ?
-        `Starting infiltration at "${company}" for cash.` :
-        `Starting infiltration at "${company}" for faction rep with "${factionName}".`);
-    devConsoleLog(takeCash ?
-        `Starting infiltration at "${company}" for cash.` :
-        `Starting infiltration at "${company}" for faction rep with "${factionName}".`);
     const pid = await getNsDataThroughFile(ns, 'ns.run(ns.args[0], 1, ...JSON.parse(ns.args[1]))', null,
         [getFilePath('infiltration-runner.js'), JSON.stringify(args)]);
     if (!pid) return { success: false, reason: 'launch-failed' };

@@ -108,6 +108,9 @@ export async function main(ns) {
     let installCountdownResets = 0; // Number of times we've reset the countdown because our affordable augs has increased
     let bnCompletionSuppressed = false; // Flag if we've detected that we've won the BN, but are suppressing a restart
     let sleevesMaxedOut = false; // Flag used only when the player is replaying BN 10 with all sleeves but has suppressed auto-destroying the BN, to allow continued auto-installs
+    let bn10SleevesIncomplete = false; // Flag used after BN10 is complete to preserve cash for Covenant sleeve purchases
+    let bn10SleeveReserve = 0; // Current cash reserve needed for the next Covenant sleeve or memory purchase
+    let cachedStocksValue = 0;
     let loggedBnCompletion = false; // Flag set to ensure that if we choose to stay in the BN, we only log the "BN completed" message once per reset.
     let have4STixApi = false; // Whether we have access to the 4S (stockmarket) API. Once confirmed true, we can stop checking.
     let have4SData = false; // Whether we have access to 4S (stockmarket) data. Once confirmed true, we can stop checking.
@@ -245,9 +248,10 @@ export async function main(ns) {
         await updateCachedData(ns);
         let stocksValue = 0;
         try { stocksValue = await getStocksValue(ns); } catch { /* Assume if this fails (insufficient ram) we also have no stocks */ }
-        manageReservedMoney(ns, player, stocksValue);
+        cachedStocksValue = stocksValue;
         await checkOnDaedalusStatus(ns, player, stocksValue);
         await checkIfBnIsComplete(ns, player);
+        manageReservedMoney(ns, player, stocksValue);
         await maybeAcceptStaneksGift(ns, player);
         await checkOnRunningScripts(ns, player);
         await maybeDoCasino(ns, player);
@@ -434,15 +438,23 @@ export async function main(ns) {
             const shouldHaveSleeveCount = Math.min(8, 6 + (dictOwnedSourceFiles[10] || 0));
             const numSleeves = await getNsDataThroughFile(ns, `ns.sleeve.getNumSleeves()`);
             let reasonToStay = null;
-            if (numSleeves < shouldHaveSleeveCount)
+            bn10SleevesIncomplete = false;
+            bn10SleeveReserve = 0;
+            if (numSleeves < shouldHaveSleeveCount) {
                 reasonToStay = `Detected that you only have ${numSleeves} sleeves, but you could have ${shouldHaveSleeveCount}.`;
-            else {
+                bn10SleevesIncomplete = true;
+                bn10SleeveReserve = await getNsDataThroughFile(ns, `ns.sleeve.getSleeveCost()`);
+            } else {
                 let sleeveInfo = (/** @returns {SleevePerson[]} */() => [])();
                 sleeveInfo = await getNsDataThroughFile(ns, `ns.args.map(i => ns.sleeve.getSleeve(i))`, '/Temp/sleeve-getSleeve-all.txt', [...Array(numSleeves).keys()]);
-                if (sleeveInfo.some(s => s.memory < 100))
+                if (sleeveInfo.some(s => s.memory < 100)) {
                     reasonToStay = `Detected that you have ${numSleeves}/${shouldHaveSleeveCount} sleeves, but they do not all have the maximum memory of 100:\n  ` +
                         sleeveInfo.map((s, i) => `- Sleeve ${i} has ${s.memory}/100 memory`).join('\n  ');
-                else
+                    bn10SleevesIncomplete = true;
+                    bn10SleeveReserve = Math.max(...await getNsDataThroughFile(ns,
+                        `ns.args.map(i => ns.sleeve.getMemoryUpgradeCost(i, 100 - ns.sleeve.getSleeve(i).memory))`,
+                        '/Temp/sleeve-memory-costs.txt', [...Array(numSleeves).keys()]));
+                } else
                     sleevesMaxedOut = true; // Flag is used elsewhere to allow continued installs
             }
             if (reasonToStay) {
@@ -529,12 +541,38 @@ export async function main(ns) {
         // See if home ram has improved. We hold back on launching certain scripts if we are low on home RAM
         homeRam = await getNsDataThroughFile(ns, `ns.getServerMaxRam(ns.args[0])`, null, ["home"]);
 
+        const stockmasterLiquidating = findScript('stockmaster.js', s => s.args.includes("--liquidate") || s.args.includes("-l"));
+        const stockmasterTrading = findScript('stockmaster.js', s => !s.args.includes("--liquidate") && !s.args.includes("-l"));
+        if (bn10SleevesIncomplete && bn10SleeveReserve > 0 && cachedStocksValue > 0 && player.money < bn10SleeveReserve &&
+            player.money + cachedStocksValue >= bn10SleeveReserve && !stockmasterLiquidating) {
+            log(ns, `INFO: Liquidating stocks because BN10 Covenant sleeve/memory purchase is affordable by net worth, but not cash.`);
+            launchScriptHelper(ns, 'stockmaster.js', ['--liquidate']);
+            return;
+        }
+        if (bn10SleevesIncomplete && bn10SleeveReserve > 0 && player.money >= bn10SleeveReserve)
+            await tryPurchaseBn10SleeveGoal(ns);
+
         // Launch stock-master in a way that emphasizes it as our main source of income early-on
-        if (!findScript('stockmaster.js') && !disableStockmasterForDaedalus && homeRam >= 32)
-            launchScriptHelper(ns, 'stockmaster.js', [
-                "--fracH", resetInfo.currentNode == 8 ? 0.001 : 0.1, // Fraction of wealth to keep as cash (10% - unless in BN8)
-                "--reserve", 0, // Override to ignore the global reserve.txt. Any money we reserve can more or less safely live as stocks
-            ]);
+        if (!stockmasterLiquidating && !disableStockmasterForDaedalus && homeRam >= 32) {
+            const stockCashFraction = bn10SleevesIncomplete ? 0.001 : 0.1;
+            const stockmasterArgs = [
+                "--fracH", stockCashFraction, // Fraction of wealth to keep as cash
+                "--reserve", 0, // Stockmaster is allowed to invest; autopilot liquidates when a BN10 sleeve purchase becomes affordable
+            ];
+            const getArgValue = (args, flag, fallback = null) => {
+                const index = args.indexOf(flag);
+                return index == -1 ? fallback : args[index + 1];
+            };
+            const stockmasterNeedsRestart = stockmasterTrading &&
+                (Number(getArgValue(stockmasterTrading.args, "--fracH", Number.NaN)) != stockCashFraction ||
+                    Number(getArgValue(stockmasterTrading.args, "--reserve", Number.NaN)) != stockmasterArgs[3]);
+            if (stockmasterNeedsRestart) {
+                log(ns, `INFO: Restarting stockmaster.js with reserve ${formatMoney(stockmasterArgs[3])} for BN10 Covenant sleeves/memory.`);
+                await killScript(ns, 'stockmaster.js', runningScripts, stockmasterTrading);
+                launchScriptHelper(ns, 'stockmaster.js', stockmasterArgs);
+            } else if (!stockmasterTrading)
+                launchScriptHelper(ns, 'stockmaster.js', stockmasterArgs);
+        }
 
         // Launch sleeves and allow them to also ignore the reserve so they can train up to boost gang unlock speed
         if ((10 in unlockedSFs) && (2 in unlockedSFs) && !findScript('sleeve.js')) {
@@ -713,7 +751,8 @@ export async function main(ns) {
             workForFactionsArgs.push("--skip", "Netburners");
         if (shouldForceSector12)
             workForFactionsArgs.push("--first", "Sector-12"); // CashRoot Starter Kit is a strong cheap early aug and worth prioritizing
-        if (!options['disable-casino'] && !ranCasino) workForFactionsArgs.push("--infiltrate-for-money-under", 300000);
+        if (!options['disable-casino'] && !ranCasino && resetInfo.currentNode != 8)
+            workForFactionsArgs.push("--infiltrate-for-money-under", 300000);
         // Relay the options to suppress tail windows and ignore bladeburner
         if (options['no-tail-windows']) workForFactionsArgs.push('--no-tail-windows');
         if (options['disable-bladeburner']) workForFactionsArgs.push("--no-bladeburner-check")
@@ -748,6 +787,47 @@ export async function main(ns) {
             // NOTE: Default work-for-factions behaviour is to spend hashes on coding contracts, which suits us fine
             launchScriptHelper(ns, 'work-for-factions.js', rushGang ? rushGangsArgs : workForFactionsArgs);
         }
+    }
+
+    /** Buy exactly one missing BN10 Covenant sleeve infrastructure item when cash is already available.
+     * This prevents autopilot from waiting for sleeve.js while still allowing stockmaster to keep trading.
+     * @param {NS} ns */
+    async function tryPurchaseBn10SleeveGoal(ns) {
+        if (resetInfo.currentNode != 10 || !bn10SleevesIncomplete) return false;
+        const shouldHaveSleeveCount = Math.min(8, 6 + (dictOwnedSourceFiles[10] || 0));
+        const numSleeves = await getNsDataThroughFile(ns, `ns.sleeve.getNumSleeves()`);
+        if (numSleeves < shouldHaveSleeveCount) {
+            const cost = await getNsDataThroughFile(ns, `ns.sleeve.getSleeveCost()`);
+            if ((await getPlayerInfo(ns)).money < cost) return false;
+            const result = await getNsDataThroughFile(ns, `ns.sleeve.purchaseSleeve()`);
+            if (result?.success) {
+                log(ns, `SUCCESS: Purchased Covenant sleeve ${numSleeves} for ${formatMoney(cost)}.`, true, 'success');
+                lastScriptsCheck = 0;
+                return true;
+            }
+            log(ns, `WARNING: Failed to purchase Covenant sleeve: ${result?.message || "unknown error"}`, true, 'warning');
+            return false;
+        }
+
+        const sleeveInfo = await getNsDataThroughFile(ns, `ns.args.map(i => ns.sleeve.getSleeve(i))`,
+            '/Temp/autopilot-sleeve-getSleeve-all.txt', [...Array(numSleeves).keys()]);
+        const sleeveToUpgrade = sleeveInfo.findIndex(sleeve => sleeve.memory < 100);
+        if (sleeveToUpgrade == -1) {
+            bn10SleevesIncomplete = false;
+            bn10SleeveReserve = 0;
+            return false;
+        }
+        const amount = 100 - sleeveInfo[sleeveToUpgrade].memory;
+        const cost = await getNsDataThroughFile(ns, `ns.sleeve.getMemoryUpgradeCost(ns.args[0], ns.args[1])`, null, [sleeveToUpgrade, amount]);
+        if ((await getPlayerInfo(ns)).money < cost) return false;
+        const result = await getNsDataThroughFile(ns, `ns.sleeve.upgradeMemory(ns.args[0], ns.args[1])`, null, [sleeveToUpgrade, amount]);
+        if (result?.success) {
+            log(ns, `SUCCESS: Upgraded Covenant sleeve ${sleeveToUpgrade} memory to 100 for ${formatMoney(cost)}.`, true, 'success');
+            lastScriptsCheck = 0;
+            return true;
+        }
+        log(ns, `WARNING: Failed to upgrade Covenant sleeve ${sleeveToUpgrade} memory: ${result?.message || "unknown error"}`, true, 'warning');
+        return false;
     }
 
     /** Get the source of the player's earnings by category.
@@ -859,6 +939,12 @@ export async function main(ns) {
     async function maybeInstallAugmentations(ns, player) {
         if (!(4 in unlockedSFs))  // Cannot automate augmentations or installs without singularity
             return setStatus(ns, `No singularity access, so you're on your own. You should manually work for factions and install augmentations!`);
+
+        if (resetInfo.currentNode == 10 && bn10SleevesIncomplete) {
+            setStatus(ns, `Not buying or installing augmentations because BN10 is complete and Covenant sleeves/memory are still missing. ` +
+                `Reserving ${formatMoney(bn10SleeveReserve)} for the next sleeve purchase.`);
+            return reservedPurchase = 0;
+        }
 
         // If we previously attempted to reserve money for an augmentation purchase order, do a fresh facman run to ensure it's still available
         if (reservedPurchase && installCountdown <= Date.now()) {
@@ -989,7 +1075,7 @@ export async function main(ns) {
                 }
                 log(ns, purchaseChangeLog, true);
             }
-            ns.write("reserve.txt", totalCost, "w"); // Should prevent other scripts from spending this money
+            writeReserveForTarget(ns, totalCost, cachedStocksValue); // Should prevent other scripts from spending money not already covered by stocks
         }
         // We must wait until the configured cooldown elapses before we install augs.
         if (installCountdown > Date.now()) {
@@ -1126,19 +1212,19 @@ export async function main(ns) {
      * @param {NS} ns
      * @param {Player} player */
     function manageReservedMoney(ns, player, stocksValue) {
-        if (reservedPurchase) return; // Do not mess with money reserved for installing augmentations
-        const currentReserve = Number(ns.read("reserve.txt") || 0);
+        if (reservedPurchase) return writeReserveForTarget(ns, reservedPurchase, stocksValue);
         if (reservingMoneyForDaedalus) // Reserve 100b to get the daedalus invite
-            return currentReserve == 100E9 ? true : ns.write("reserve.txt", 100E9, "w");
+            return writeReserveForTarget(ns, 100E9, stocksValue);
+        if (resetInfo.currentNode == 10 && bn10SleevesIncomplete && Number.isFinite(bn10SleeveReserve) && bn10SleeveReserve > 0) {
+            return writeReserveForTarget(ns, bn10SleeveReserve, stocksValue);
+        }
         // Otherwise, reserve money for stocks for a while, as it's our main source of income early in the BN
         // It also acts as a decent way to save up for augmentations
-        const minStockValue = 8E9; // At a minimum 8 of the 10 billion earned from the casino must be reserved for buying stock
-        // As we earn more money, reserve a percentage of it for further investing in stock. Decrease this as the BN progresses.
-        const minStockPercent = Math.max(0, 0.8 - 0.1 * getTimeInBitnode() / 3.6E6); // Reduce by 10% per hour in the BN
-        const reserveCap = 1E12; // As we start start to earn crazy money, we will hit the stock market cap, so cap the maximum reserve
-        // Dynamically update reserved cash based on how much money is already converted to stocks.
-        const reserve = Math.min(reserveCap, Math.max(0, player.money * minStockPercent, minStockValue - stocksValue));
-        return currentReserve == reserve ? true : ns.write("reserve.txt", reserve, "w"); // Reserve for stocks
+        const stockBootstrapReserve = 8E9; // Keep early stock bootstrap money only after we have actually built up enough cash.
+        const targetReserve = stocksValue > 0 || player.money >= stockBootstrapReserve ?
+            stockBootstrapReserve :
+            0;
+        return writeReserveForTarget(ns, targetReserve, stocksValue); // Reserve only the cash gap not already covered by stocks
         // NOTE: After several iterations, I decided that the above is actually best to keep in all scenarios:
         // - Casino.js ignores the reserve, so the above takes care of ensuring our casino seed money isn't spent
         // - In low-income situations, stockmaster will be our best source of income. We invoke it such that it ignores
@@ -1153,6 +1239,16 @@ export async function main(ns) {
         if(moneyReserved) ns.write("reserve.txt", 0, "w"); // Remove the casino reserve we would have placed
         return moneyReserved = false;
         */
+    }
+
+    /** Write the cash-only reserve needed for a target reserve after accounting for stock liquidation value.
+     * @param {NS} ns
+     * @param {number} targetReserve
+     * @param {number} stocksValue */
+    function writeReserveForTarget(ns, targetReserve, stocksValue = cachedStocksValue) {
+        const reserve = Math.max(0, (Number(targetReserve) || 0) - Math.max(0, Number(stocksValue) || 0));
+        const currentReserve = Number(ns.read("reserve.txt") || 0);
+        return currentReserve == reserve ? true : ns.write("reserve.txt", reserve, "w");
     }
 
     /** Logic to determine whether we should keep running, or shut down autopilot.js for some reason.

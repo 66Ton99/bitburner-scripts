@@ -31,6 +31,8 @@ const interval = 1000; // Update (tick) this often to check on sleeves and recom
 const rerollTime = 61000; // How often we re-roll for each sleeve's chance to be randomly placed on shock recovery
 const statusUpdateInterval = 10 * 60 * 1000; // Log sleeve status this often, even if their task hasn't changed
 const trainingReserveFile = '/Temp/sleeves-training-reserve.txt';
+const cityTravelCost = 200000;
+const bn8CashReserve = 25e6;
 const works = ['security', 'field', 'hacking']; // When doing faction work, we prioritize physical work since sleeves tend towards having those stats be highest
 const trainStats = ['strength', 'defense', 'dexterity', 'agility'];
 const trainSmarts = ['hacking', 'charisma'];
@@ -127,6 +129,14 @@ async function getResetInfo(ns) {
     return await getNsDataThroughFile(ns, 'ns.getResetInfo()');
 }
 
+function getEffectiveReserve(resetInfo, reserve) {
+    return resetInfo.currentNode == 8 ? Math.max(reserve || 0, bn8CashReserve) : reserve;
+}
+
+function canAffordSleeveSpend(playerInfo, reserve, spend = 0) {
+    return playerInfo.money - spend > reserve;
+}
+
 /** @param {NS} ns
  * @param {number} numSleeves
  * @returns {Promise<SleevePerson[]>} */
@@ -166,7 +176,8 @@ async function manageSleeveInfrastructure(ns, playerInfo, resetInfo, reserve, cu
     let spent = 0;
     let numSleeves = currentSleeveCount;
     let sleeves = sleeveInfo;
-    let availableMoney = playerInfo.money - reserve;
+    // BN10 reserve is meant to protect Covenant sleeve purchases from other scripts, not from sleeve.js itself.
+    let availableMoney = playerInfo.money - (resetInfo.currentNode == 10 ? 0 : reserve);
     const targetSleeveCount = Math.min(8, 6 + (ownedSourceFiles[10] || 0));
 
     while (numSleeves < targetSleeveCount) {
@@ -217,7 +228,9 @@ async function mainLoop(ns) {
     const playerWorkInfo = await getCurrentWorkInfo(ns);
     if (!playerInGang) playerInGang = !(2 in ownedSourceFiles) ? false : await getNsDataThroughFile(ns, 'ns.gang.inGang()');
     let globalReserve = Number(ns.read("reserve.txt") || 0);
-    const reserve = options['reserve'] ?? globalReserve;
+    const reserve = getEffectiveReserve(resetInfo, options['reserve'] ?? globalReserve);
+    const trainingReserve = getEffectiveReserve(resetInfo, Number(options['training-reserve'] ||
+        (promptedForTrainingBudget ? ns.read(trainingReserveFile) : undefined) || globalReserve));
     // Estimate the cost of sleeves training over the next time interval to see if (ignoring income) we would drop below our reserve.
     const costByNextLoop = interval / 1000 * task.filter(t => t.startsWith("train")).length * 12000; // TODO: Training cost/sec seems to be a bug. Should be 1/5 this ($2400/sec)
     // Get time in current bitnode (to cap how long we'll train sleeves)
@@ -226,8 +239,7 @@ async function mainLoop(ns) {
         // To avoid training forever when mults are crippling, stop training if we've been in the bitnode a certain amount of time
         (options['training-cap-seconds'] * 1000 > timeInBitnode) &&
         // Don't train if we have no money (unless player has given permission to train into debt)
-        (playerInfo.money - costByNextLoop) > (options['training-reserve'] ||
-            (promptedForTrainingBudget ? ns.read(trainingReserveFile) : undefined) || globalReserve);
+        (playerInfo.money - costByNextLoop) > trainingReserve;
     // If any sleeve is training at the gym, see if we can purchase a gym upgrade to help them
     if (canTrain && task.some(t => t?.startsWith("train")) && !options['disable-spending-hashes-for-gym-upgrades'])
         if (await getNsDataThroughFile(ns, 'ns.hacknet.spendHashes("Improve Gym Training")', '/Temp/spend-hashes-on-gym.txt'))
@@ -270,7 +282,7 @@ async function mainLoop(ns) {
 
         // Decide what we think the sleeve should be doing for the next little while
         let [designatedTask, command, args, statusUpdate] =
-            await pickSleeveTask(ns, playerInfo, playerWorkInfo, i, sleeve, canTrain);
+            await pickSleeveTask(ns, playerInfo, playerWorkInfo, resetInfo, i, sleeve, canTrain, trainingReserve);
 
         // After picking sleeve tasks, take a note of the sleeve's health at the end of the prior loop so we can detect failures
         [lastSleeveHp[i], lastSleeveShock[i]] = [sleeve.hp.current, sleeve.shock];
@@ -293,9 +305,10 @@ async function mainLoop(ns) {
  * @param {NS} ns
  * @param {Player} playerInfo
  * @param {{ type: "COMPANY"|"FACTION"|"CLASS"|"CRIME", cyclesWorked: number, crimeType: string, classType: string, location: string, companyName: string, factionName: string, factionWorkType: string }} playerWorkInfo
+ * @param {ResetInfo} resetInfo
  * @param {SleevePerson} sleeve
  * @returns {Promise<[string, string, any[], string]>} a 4-tuple of task name, command, args, and status message */
-async function pickSleeveTask(ns, playerInfo, playerWorkInfo, i, sleeve, canTrain) {
+async function pickSleeveTask(ns, playerInfo, playerWorkInfo, resetInfo, i, sleeve, canTrain, trainingReserve) {
     // Initialize sleeve dicts on first loop
     if (lastSleeveHp[i] === undefined) lastSleeveHp[i] = sleeve.hp.current;
     if (lastSleeveShock[i] === undefined) lastSleeveShock[i] = sleeve.shock;
@@ -326,9 +339,11 @@ async function pickSleeveTask(ns, playerInfo, playerWorkInfo, i, sleeve, canTrai
 
         // prioritize physical training
         if (untrainedStats.length > 0) {
-            if (playerInfo.money < 5E6 && !promptedForTrainingBudget)
+            if (resetInfo.currentNode != 8 && playerInfo.money < 5E6 && !promptedForTrainingBudget)
                 await promptForTrainingBudget(ns); // If we've never checked, see if we can train into debt.
             if (sleeve.city != ns.enums.CityName.Sector12) {
+                if (!canAffordSleeveSpend(playerInfo, trainingReserve, cityTravelCost))
+                    return shockRecoveryTask(sleeve, i, `BN8 cash reserve blocks travel for paid gym training`);
                 log(ns, `Moving Sleeve ${i} from ${sleeve.city} to Sector-12 so that they can study at Powerhouse Gym.`);
                 await getNsDataThroughFile(ns, 'ns.sleeve.travel(ns.args[0], ns.args[1])', null, [i, ns.enums.CityName.Sector12]);
             }
@@ -342,9 +357,11 @@ async function pickSleeveTask(ns, playerInfo, playerWorkInfo, i, sleeve, canTrai
             ];
             // if we're tough enough, flip over to studying to improve the mental stats
         } else if (untrainedSmarts.length > 0) {
-            if (playerInfo.money < 5E6 && !promptedForTrainingBudget)
+            if (resetInfo.currentNode != 8 && playerInfo.money < 5E6 && !promptedForTrainingBudget)
                 await promptForTrainingBudget(ns); // check we can go into training debt
             if (sleeve.city != ns.enums.CityName.Volhaven) {
+                if (!canAffordSleeveSpend(playerInfo, trainingReserve, cityTravelCost))
+                    return shockRecoveryTask(sleeve, i, `BN8 cash reserve blocks travel for paid studying`);
                 log(ns, `Moving Sleeve ${i} from ${sleeve.city} to Volhaven so that they can study at ZB Institute.`);
                 await getNsDataThroughFile(ns, 'ns.sleeve.travel(ns.args[0], ns.args[1])', null, [i, ns.enums.CityName.Volhaven]);
             }
