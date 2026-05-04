@@ -414,8 +414,9 @@ async function mainLoop(ns) {
         priorityFactions = priorityFactions.filter(f => f != "Silhouette");
 
     // Strategy 1: Tackle a consolidated list of desired faction order, interleaving simple factions and megacorporations
-    const factionWorkOrder = firstFactions.concat(priorityFactions.filter(f => // Remove factions from our initial "work order" if we've bought all desired augmentations.
-        !firstFactions.includes(f) && !skipFactions.includes(f) && !softCompletedFactions.includes(f) && canPursueFaction(player, f)));
+    const pinnedFirstFactions = options['crime-focus'] || skipFactions.includes("Sector-12") ? firstFactions : ["Sector-12"].concat(firstFactions.filter(f => f != "Sector-12"));
+    const factionWorkOrder = pinnedFirstFactions.concat(priorityFactions.filter(f => // Remove factions from our initial "work order" if we've bought all desired augmentations.
+        !pinnedFirstFactions.includes(f) && !skipFactions.includes(f) && !softCompletedFactions.includes(f) && canPursueFaction(player, f)));
     for (const faction of factionWorkOrder) {
         if (breakToMainLoop()) break; // Only continue on to the next faction if it isn't time for a high-level update.
         let earnedNewFactionInvite = false;
@@ -424,14 +425,14 @@ async function mainLoop(ns) {
         // If new work was done for a company or their faction, restart the main work loop to see if we've since unlocked a higher-priority faction in the list
         if (earnedNewFactionInvite || await workForSingleFaction(ns, faction)) {
             scope--; // De-increment scope so that effecitve scope doesn't increase on the next loop (i.e. it will be incremented back to what it is now)
-            break;
+            return;
         }
     }
     if (scope <= 1 || breakToMainLoop()) return;
 
     // Strategy 2: Grind XP with all priority factions that are joined or can be joined, until every single one has desired REP
-    for (const faction of factionWorkOrder)
-        if (!breakToMainLoop()) await workForSingleFaction(ns, faction);
+    if (await workForFirstActionableFaction(ns, factionWorkOrder, faction => workForSingleFaction(ns, faction)))
+        return;
     if (scope <= 2 || breakToMainLoop()) return;
 
     // Strategy 3: Work for any megacorporations not yet completed to earn their faction invites. Once joined, we don't lose these factions on reset.
@@ -454,30 +455,27 @@ async function mainLoop(ns) {
     let allFactionsWorkOrder = factionWorkOrder.filter(f => allIncompleteFactions.includes(f))
         .concat(allIncompleteFactions.filter(f => !factionWorkOrder.includes(f)));
     // Strategy 5: For *all factions in the game*, try to earn an invite and work for rep until we can afford the most-expensive *desired* aug (or unlock donations, whichever comes first)
-    for (const faction of allFactionsWorkOrder.filter(f => !softCompletedFactions.includes(f)))
-        if (!breakToMainLoop()) await workForSingleFaction(ns, faction);
+    if (await workForFirstActionableFaction(ns, allFactionsWorkOrder.filter(f => !softCompletedFactions.includes(f)), faction => workForSingleFaction(ns, faction)))
+        return;
     if (scope <= 5 || breakToMainLoop()) return;
 
     // Strategy 6: Revisit all factions until each has enough rep to unlock donations - so if we can't afford all augs this reset, at least we don't need to grind for rep on the next reset
     // For this, we reverse the order of non-priority factions (ones with augs costing the most-rep to least) since these will take the most time to re-grind rep for if we can't buy them this reset.
     let allFactionsWorkOrderReversed = factionWorkOrder.filter(f => allIncompleteFactions.includes(f))
         .concat(allIncompleteFactions.reverse().filter(f => !factionWorkOrder.includes(f)));
-    for (const faction of allFactionsWorkOrderReversed)
-        if (!breakToMainLoop()) // Only continue on to the next faction if it isn't time for a high-level update.
-            await workForSingleFaction(ns, faction, true); // ForceUnlockDonations = true
+    if (await workForFirstActionableFaction(ns, allFactionsWorkOrderReversed, faction => workForSingleFaction(ns, faction, true))) // ForceUnlockDonations = true
+        return;
     if (scope <= 6 || breakToMainLoop()) return;
 
     // Strategy 7: Next, revisit all factions and grind XP until we can afford the most expensive aug on this install, even if we are slated to unlock donations on the next reset
-    for (const faction of allFactionsWorkOrder)
-        if (!breakToMainLoop()) // Only continue on to the next faction if it isn't time for a high-level update.
-            await workForSingleFaction(ns, faction, true, true); // ForceBestAug = true
+    if (await workForFirstActionableFaction(ns, allFactionsWorkOrder, faction => workForSingleFaction(ns, faction, true, true))) // ForceBestAug = true
+        return;
     if (scope <= 7 || breakToMainLoop()) return;
 
     // Strategy 8: Everything up until now will skip factions that we've *already* unlocked donations with (can donate in the current install), since we can just throw money at them for aug reputation
     // But in some BNs, money might be hard to come by, so now we should proceed to grind reputation the old-fasioned way so we don't have to waste money on donations
-    for (const faction of allFactionsWorkOrder)
-        if (!breakToMainLoop()) // Only continue on to the next faction if it isn't time for a high-level update.
-            await workForSingleFaction(ns, faction, false, true, true); // ForceRep = true
+    if (await workForFirstActionableFaction(ns, allFactionsWorkOrder, faction => workForSingleFaction(ns, faction, false, true, true))) // ForceRep = true
+        return;
     if (scope <= 8 || breakToMainLoop()) return;
 
     // Strategy 9: Busy ourselves for a while longer, then loop to see if there anything more we can do for the above factions
@@ -505,6 +503,17 @@ async function mainLoop(ns) {
         await ns.sleep(30000);
     }
     if (scope <= 9) scope--; // Cap the 'scope' value from increasing perpetually when we're on our last strategy
+}
+
+async function workForFirstActionableFaction(ns, factionOrder, workFn) {
+    for (const faction of factionOrder) {
+        if (breakToMainLoop()) return false;
+        if (await workFn(faction)) {
+            scope--; // Keep the next loop at the same strategy level and restart from the top of the ordered list.
+            return true;
+        }
+    }
+    return false;
 }
 
 // Ram-dodging helper, runs a command for all items in a list and returns a dictionary.

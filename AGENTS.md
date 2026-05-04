@@ -64,7 +64,7 @@ Project-specific guidance for coding agents working in `bitburner-scripts`.
 - Do not stop or skip relaunching `stockmaster.js` just because current cash is enough for the next BN10 Covenant sleeve/memory purchase. Buy the sleeve/memory immediately or let `sleeve.js` buy it, then keep stockmaster trading.
 - If using `reserve.txt` to protect BN10 sleeve money, ensure `sleeve.js` itself can still spend that reserve on Covenant sleeve/memory purchases. The reserve is meant to block other spenders, not the intended purchase.
 
-## Bitburner DEV 3.0.0 Notes
+## Bitburner 3.0.0 Notes
 
 - `ns.format.time(...)` should be used instead of legacy `ns.ui.time(...)`.
 - Stock API naming changed: prefer `has4SDataTixApi()` instead of `has4SDataTIXAPI()`.
