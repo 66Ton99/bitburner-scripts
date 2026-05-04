@@ -2,7 +2,7 @@ import {
     log, getConfiguration, getFilePath, waitForProcessToComplete,
     runCommand, getNsDataThroughFile, formatMoney, getErrorInfo, tail
 } from './helpers.js'
-import { ensureInAevum, findCasinoSaveButton, navigateToCasino, openCasinoGame, saveCasinoGame } from './casino.js'
+import { ensureInAevum, findCasinoSaveButton, navigateToCasino, openCasinoGame, saveCasinoGame } from './casino-lib.js'
 
 const argsSchema = [
     ['game', 'blackjack'], // Dispatcher hint used by casino.js. Ignored by blackjack logic.

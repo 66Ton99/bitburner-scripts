@@ -918,6 +918,13 @@ export async function main(ns) {
         if (player.city != "Aevum" && player.money < 300000)
             return log_once(ns, `INFO: Waiting until we have ${formatMoney(300000)} to travel to Aevum and run casino.js`);
 
+        const casinoScript = getFilePath('casino.js');
+        const casinoGameScript = getFilePath('casino-roulette.js');
+        const casinoRam = Math.max(ns.getScriptRam(casinoScript, 'home'), ns.getScriptRam(casinoGameScript, 'home'));
+        if (casinoRam > homeRam)
+            return log_once(ns, `INFO: Waiting to run casino roulette until home RAM is upgraded. ` +
+                `${casinoGameScript} needs ${formatRam(casinoRam)}, but home only has ${formatRam(homeRam)}.`);
+
         // Run casino.js (and expect this script to get killed in the process)
         // Make sure "work-for-factions.js" is dead first, lest it steal focus and break the casino script before it has a chance to kill all scripts.
         await killScript(ns, 'work-for-factions.js');
