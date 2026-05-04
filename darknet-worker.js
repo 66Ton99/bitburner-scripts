@@ -33,15 +33,7 @@ const LARGE_PRIMES = [
 
 /** @param {NS} ns */
 export async function main(ns) {
-    const options = ns.flags([
-        ["origin", "home"],
-        ["interval", 15000],
-        ["max-attempts-per-host", 160],
-        ["disable-phishing", false],
-        ["verbose-terminal", false],
-        ["self-test", false],
-        ["help", false],
-    ]);
+    const options = parseOptions(ns.args);
     if (options.help) {
         ns.tprint(`Usage: run ${ns.getScriptName()} [--origin home] [--interval 15000] [--disable-phishing] [--verbose-terminal] [--self-test]`);
         return;
@@ -70,6 +62,34 @@ export async function main(ns) {
         }
         await ns.sleep(interval);
     }
+}
+
+function parseOptions(args) {
+    const options = {
+        origin: "home",
+        interval: 15000,
+        "max-attempts-per-host": 160,
+        "disable-phishing": false,
+        "verbose-terminal": false,
+        "self-test": false,
+        help: false,
+    };
+    const valueOptions = new Set(["origin", "interval", "max-attempts-per-host"]);
+    for (let i = 0; i < args.length; i++) {
+        const rawArg = args[i];
+        if (typeof rawArg !== "string" || !rawArg.startsWith("--")) continue;
+        const name = rawArg.slice(2);
+        if (!(name in options)) continue;
+        if (!valueOptions.has(name)) {
+            options[name] = true;
+            continue;
+        }
+        const next = args[i + 1];
+        if (next == null || typeof next === "string" && next.startsWith("--")) continue;
+        options[name] = next;
+        i++;
+    }
+    return options;
 }
 
 async function crawlNeighbors(ns, script, origin, interval, maxAttempts, verboseTerminal) {

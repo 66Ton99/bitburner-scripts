@@ -66,6 +66,8 @@ const factions = ["Illuminati", "Daedalus", "The Covenant", "ECorp", "MegaCorp",
     "Four Sigma", "KuaiGong International", "Fulcrum Secret Technologies", "BitRunners", "The Black Hand", "NiteSec", "Aevum", "Chongqing", "Ishima", "New Tokyo", "Sector-12",
     "Volhaven", "Speakers for the Dead", "The Dark Army", "The Syndicate", "Silhouette", "Tetrads", "Slum Snakes", "Netburners", "Tian Di Hui", "CyberSec", "Shadows of Anarchy"];
 const passiveInfiltrationFactions = ["Shadows of Anarchy"]; // Gains reputation passively from any infiltration, not via direct faction work/reward targeting.
+const shadowsOfAnarchy = "Shadows of Anarchy";
+const soaWksHarmonizer = "SoA - phyzical WKS harmonizer";
 const cannotWorkForFactions = ["Church of the Machine God", "Bladeburners"]
 // These factions should ideally be completed in this order
 const preferredEarlyFactionOrder = [
@@ -121,7 +123,7 @@ const silhouetteStatDeferralMargin = 100;
 
 let shouldFocus; // Whether we should focus on work or let it be backgrounded (based on whether "Neuroreceptor Management Implant" is owned, or "--no-focus" is specified)
 // And a bunch of globals because managing state and encapsulation is hard.
-let hasFocusPenalty, hasSimulacrum, favorToDonate, fulcrumHackReq, notifiedAboutDaedalus, playerInBladeburner, wasGrafting, currentBitnode;
+let hasFocusPenalty, hasSimulacrum, fulcrumHackReq, playerInBladeburner, wasGrafting, currentBitnode;
 let dictSourceFiles, dictFactionFavors, playerGang, mainLoopStart, scope, numJoinedFactions, lastTravel, crimeCount;
 let firstFactions, skipFactions, completedFactions, softCompletedFactions, mostExpensiveAugByFaction, mostExpensiveDesiredAugByFaction, mostExpensiveDesiredAugCostByFaction;
 let scriptPid = "?";
@@ -212,7 +214,7 @@ export async function main(ns) {
 
     // Reset globals whose value can persist between script restarts in weird situations
     lastTravel = crimeCount = currentBitnode = 0;
-    notifiedAboutDaedalus = playerInBladeburner = wasGrafting = false;
+    playerInBladeburner = wasGrafting = false;
     recentHospitalizedLocations = {};
     // Process configuration options
     firstFactions = (options['first'] || []).map(f => f.replaceAll('_', ' ')); // Factions that end up in this list will be prioritized and joined regardless of their augmentations available.
@@ -268,7 +270,6 @@ export async function main(ns) {
 
 /** @param {NS} ns */
 async function loadStartupData(ns) {
-    favorToDonate = await getNsDataThroughFile(ns, 'ns.getFavorToDonate()');
     const playerInfo = await getPlayerInfo(ns);
     const allKnownFactions = factions.concat(playerInfo.factions.filter(f => !factions.includes(f)));
     bitNodeMults = await tryGetBitNodeMultipliers(ns);
@@ -276,6 +277,8 @@ async function loadStartupData(ns) {
     // Get some faction and augmentation information to decide what remains to be purchased
     dictFactionFavors = await getNsDataThroughFile(ns, dictCommand('ns.singularity.getFactionFavor(o)'), '/Temp/getFactionFavors.txt', allKnownFactions);
     const dictFactionAugs = await getNsDataThroughFile(ns, dictCommand('ns.singularity.getAugmentationsFromFaction(o)'), '/Temp/getAugmentationsFromFactions.txt', allKnownFactions);
+    if (dictFactionAugs[shadowsOfAnarchy])
+        dictFactionAugs[shadowsOfAnarchy] = dictFactionAugs[shadowsOfAnarchy].filter(a => a == soaWksHarmonizer);
     const augmentationNames = [...new Set(Object.values(dictFactionAugs).flat())];
     const dictAugRepReqs = await getNsDataThroughFile(ns, dictCommand('ns.singularity.getAugmentationRepReq(o)'), '/Temp/getAugmentationRepReqs.txt', augmentationNames);
     const dictAugPrices = await getNsDataThroughFile(ns, dictCommand('ns.singularity.getAugmentationPrice(o)'), '/Temp/getAugmentationPrices.txt', augmentationNames);
@@ -456,26 +459,25 @@ async function mainLoop(ns) {
     // Preserve the faction work order we've decided on previously, and only use the above sort order for every other faction added on to the end
     let allFactionsWorkOrder = factionWorkOrder.filter(f => allIncompleteFactions.includes(f))
         .concat(allIncompleteFactions.filter(f => !factionWorkOrder.includes(f)));
-    // Strategy 5: For *all factions in the game*, try to earn an invite and work for rep until we can afford the most-expensive *desired* aug (or unlock donations, whichever comes first)
+    // Strategy 5: For *all factions in the game*, try to earn an invite and work for rep until we can afford the most-expensive *desired* aug.
     if (await workForFirstActionableFaction(ns, allFactionsWorkOrder.filter(f => !softCompletedFactions.includes(f)), faction => workForSingleFaction(ns, faction)))
         return;
     if (scope <= 5 || breakToMainLoop()) return;
 
-    // Strategy 6: Revisit all factions until each has enough rep to unlock donations - so if we can't afford all augs this reset, at least we don't need to grind for rep on the next reset
-    // For this, we reverse the order of non-priority factions (ones with augs costing the most-rep to least) since these will take the most time to re-grind rep for if we can't buy them this reset.
+    // Strategy 6: Revisit all factions until each has enough rep for its most expensive useful aug.
+    // For this, we reverse the order of non-priority factions (ones with augs costing the most-rep to least) since these take the most time to grind.
     let allFactionsWorkOrderReversed = factionWorkOrder.filter(f => allIncompleteFactions.includes(f))
         .concat(allIncompleteFactions.reverse().filter(f => !factionWorkOrder.includes(f)));
-    if (await workForFirstActionableFaction(ns, allFactionsWorkOrderReversed, faction => workForSingleFaction(ns, faction, true))) // ForceUnlockDonations = true
+    if (await workForFirstActionableFaction(ns, allFactionsWorkOrderReversed, faction => workForSingleFaction(ns, faction, false, true))) // ForceBestAug = true
         return;
     if (scope <= 6 || breakToMainLoop()) return;
 
-    // Strategy 7: Next, revisit all factions and grind XP until we can afford the most expensive aug on this install, even if we are slated to unlock donations on the next reset
+    // Strategy 7: Next, revisit all factions and grind XP until we can afford the most expensive aug on this install.
     if (await workForFirstActionableFaction(ns, allFactionsWorkOrder, faction => workForSingleFaction(ns, faction, true, true))) // ForceBestAug = true
         return;
     if (scope <= 7 || breakToMainLoop()) return;
 
-    // Strategy 8: Everything up until now will skip factions that we've *already* unlocked donations with (can donate in the current install), since we can just throw money at them for aug reputation
-    // But in some BNs, money might be hard to come by, so now we should proceed to grind reputation the old-fasioned way so we don't have to waste money on donations
+    // Strategy 8: Final rep pass with forceRep enabled so already-joined factions are not skipped by any earlier heuristic.
     if (await workForFirstActionableFaction(ns, allFactionsWorkOrder, faction => workForSingleFaction(ns, faction, false, true, true))) // ForceRep = true
         return;
     if (scope <= 8 || breakToMainLoop()) return;
@@ -656,7 +658,6 @@ async function earnFactionInvite(ns, factionName) {
     else if (deficientStats.length > 0) {
         ns.print(`${reasonPrefix} you have insufficient combat stats. Need: ${requirement} of each, Have ` +
             physicalStats.map(s => `${s.slice(0, 3)}: ${player.skills[s]}`).join(", "));
-        const em = requirement / options['training-stat-per-multi-threshold'];
         const needsKills = (requiredKillsByFaction[factionName] || 0) > player.numPeopleKilled;
         const needsKarma = (requiredKarmaByFaction[factionName] || 0) > currentNegativeKarma;
         const maxCombatGap = Math.max(...deficientStats.map(s => requirement - s.value));
@@ -664,21 +665,10 @@ async function earnFactionInvite(ns, factionName) {
         if (options['prioritize-invites'] && !needsKills && !needsKarma && maxCombatGap > deferCombatGap)
             return ns.print(`Deferring faction "${factionName}" invite because only combat training remains and the gap is still large ` +
                 `(${maxCombatGap} levels, threshold ${deferCombatGap}) while --prioritize-invites is enabled.`);
-        // Hack: Create a rough heuristic suggesting how much multi we need to train physical stats in a reasonable amount of time.
-        // TODO: Be smarter (time-based decision), and also consider whether training physical stats via GYM might be faster
-        if (!needsKills && !needsKarma && deficientStats.some(s => crimeHeuristics[s.stat] < em))
-            return ns.print("Some mults * exp_mults * bitnode mults appear to be too low to increase stats in a reasonable amount of time. " +
-                `You can control this with --training-stat-per-multi-threshold. Current sqrt(mult*exp_mult*bn_mult*bn_exp_mult) ` +
-                `should be ~${formatNumberShort(em, 2)}, have ` + deficientStats.map(s => s.stat).map(s => `${s.slice(0, 3)}: sqrt(` +
-                    `${formatNumberShort(player.mults[s])}*${formatNumberShort(player.mults[`${s}_exp`])}*` +
-                    `${formatNumberShort(bitNodeMults[`${title(s)}LevelMultiplier`])}*` +
-                    `${formatNumberShort(bitNodeMults.CrimeExpGain)})=${formatNumberShort(crimeHeuristics[s])}`).join(", "));
-        if (options['crime-focus'] || options['fast-crimes-only']) {
-            ns.print(`Using crimes to train combat stats for "${factionName}" because crime-focus is enabled.`);
-            doCrime = true;
-        } else if (!needsKills && !needsKarma) {
+        if (!needsKills && !needsKarma) {
             workedForInvite = await trainCombatStatsUpTo(ns, requirement, factionName);
         } else {
+            ns.print(`Using crimes only for kills/karma for "${factionName}"; combat stat gaps will be trained at the gym.`);
             doCrime = true;
         }
     }
@@ -689,11 +679,17 @@ async function earnFactionInvite(ns, factionName) {
         const currentCombatGap = combatRequirement ? Math.max(...["strength", "defense", "dexterity", "agility"]
             .map(stat => combatRequirement - player.skills[stat])) : 0;
         const deferCombatGap = Math.max(25, Math.floor(combatRequirement * 0.15));
-        const crimeCombatTarget = options['prioritize-invites'] && currentCombatGap > deferCombatGap ? 0 : combatRequirement;
-        if (combatRequirement && crimeCombatTarget == 0)
-            ns.print(`Using crimes only for kills/karma for "${factionName}" and deferring long combat grind ` +
+        const crimeCombatTarget = 0;
+        if (combatRequirement && currentCombatGap > 0 && options['prioritize-invites'] && currentCombatGap > deferCombatGap)
+            ns.print(`Using crimes only for kills/karma for "${factionName}" and deferring long combat gym training ` +
                 `(${currentCombatGap} levels, threshold ${deferCombatGap}) while --prioritize-invites is enabled.`);
         workedForInvite = await crimeForKillsKarmaStats(ns, requiredKillsByFaction[factionName] || 0, requiredKarmaByFaction[factionName] || 0, crimeCombatTarget);
+        if (workedForInvite && combatRequirement > 0) {
+            const updatedPlayer = await getPlayerInfo(ns);
+            const stillNeedsCombat = ["strength", "defense", "dexterity", "agility"].some(stat => updatedPlayer.skills[stat] < combatRequirement);
+            if (stillNeedsCombat && !(options['prioritize-invites'] && currentCombatGap > deferCombatGap))
+                workedForInvite = await trainCombatStatsUpTo(ns, combatRequirement, factionName);
+        }
     }
 
     // Study for hack levels if that's what's keeping us
@@ -906,6 +902,16 @@ async function studyForCharisma(ns, focus) {
 
 const uniByCity = Object.fromEntries([["Aevum", "Summit University"], ["Sector-12", "Rothman University"], ["Volhaven", "ZB Institute of Technology"]]);
 const bestGymByCity = Object.fromEntries([["Sector-12", "Powerhouse Gym"], ["Aevum", "Snap Fitness Gym"], ["Volhaven", "Millenium Fitness Gym"]]);
+const gymExpMultByGym = Object.fromEntries([["Powerhouse Gym", 10], ["Snap Fitness Gym", 5], ["Millenium Fitness Gym", 4]]);
+const combatStatOrder = ["strength", "defense", "dexterity", "agility"];
+const gymStatBySkill = { strength: "str", defense: "def", dexterity: "dex", agility: "agi" };
+const combatStatLabel = { strength: "Str", defense: "Def", dexterity: "Dex", agility: "Agi" };
+const combatLevelMultBySkill = {
+    strength: "StrengthLevelMultiplier",
+    defense: "DefenseLevelMultiplier",
+    dexterity: "DexterityLevelMultiplier",
+    agility: "AgilityLevelMultiplier",
+};
 
 /** @param {NS} ns */
 async function study(ns, focus, course, university = null) {
@@ -961,24 +967,75 @@ async function workOutAtGym(ns, focus, stat, gymName = "Powerhouse Gym") {
     return false;
 }
 
+function calculateExpForSkill(skill, mult = 1) {
+    const value = Math.exp((skill / mult + 200) / 32) - 534.6;
+    return Math.max(0, value);
+}
+
+function estimateGymStatTrainingMs(player, stat, requirement, gymName) {
+    if ((player.skills[stat] || 0) >= requirement) return 0;
+    const skillMult = (player.mults[stat] || 1) * (bitNodeMults[combatLevelMultBySkill[stat]] || 1);
+    const currentExp = player.exp?.[stat] ?? calculateExpForSkill(player.skills[stat] || 1, skillMult);
+    const requiredExp = calculateExpForSkill(requirement, skillMult);
+    const expGap = Math.max(0, requiredExp - currentExp);
+    const expRatePerSecond = (gymExpMultByGym[gymName] || 1) * (player.mults[`${stat}_exp`] || 1) * (bitNodeMults.ClassGymExpGain || 1);
+    return expRatePerSecond > 0 ? expGap / expRatePerSecond * 1000 : Number.POSITIVE_INFINITY;
+}
+
+function getCombatTrainingPlan(player, requirement, gymName) {
+    const stats = combatStatOrder
+        .filter(stat => (player.skills[stat] || 0) < requirement)
+        .map(stat => ({
+            stat,
+            gymStat: gymStatBySkill[stat],
+            current: player.skills[stat] || 0,
+            etaMs: estimateGymStatTrainingMs(player, stat, requirement, gymName),
+        }))
+        .sort((a, b) => b.etaMs - a.etaMs);
+    return {
+        stats,
+        sequentialEtaMs: stats.reduce((sum, plan) => sum + plan.etaMs, 0),
+        hypotheticalParallelEtaMs: Math.max(0, ...stats.map(plan => plan.etaMs)),
+    };
+}
+
+function chooseCombatTrainingGym(player, requirement, preferredCity = null) {
+    const preferredGym = preferredCity ? bestGymByCity[preferredCity] : null;
+    const candidateGyms = [...new Set([bestGymByCity[player.city], preferredGym, ...Object.values(bestGymByCity)].filter(Boolean))];
+    const affordableCandidates = candidateGyms.filter(gymName => {
+        const gymCity = Object.entries(bestGymByCity).find(([, gym]) => gym == gymName)?.[0];
+        const travelSpend = player.city == gymCity ? 0 : cityTravelCost;
+        const requiredMoney = isBn8() ?
+            Math.max(options['pay-for-studies-threshold'] + travelSpend, bn8CashReserve + travelSpend) :
+            options['pay-for-studies-threshold'] + travelSpend;
+        return player.money >= requiredMoney;
+    });
+    const candidates = affordableCandidates.length > 0 ? affordableCandidates : candidateGyms;
+    return candidates
+        .map(gymName => ({ gymName, etaMs: getCombatTrainingPlan(player, requirement, gymName).sequentialEtaMs }))
+        .sort((a, b) => a.etaMs - b.etaMs)[0]?.gymName || bestGymByCity[player.city] || "Powerhouse Gym";
+}
+
+function formatCombatTrainingPlan(plan) {
+    return plan.stats.map(s => `${combatStatLabel[s.stat]} ${s.current}->${formatDuration(s.etaMs)}`).join(", ");
+}
+
 /** @param {NS} ns */
 async function trainCombatStatsUpTo(ns, requirement, factionName = "unknown faction", preferredCity = null) {
-    const statOrder = ["strength", "defense", "dexterity", "agility"];
-    const gymStatBySkill = { strength: "str", defense: "def", dexterity: "dex", agility: "agi" };
     const initialPlayer = await getPlayerInfo(ns);
-    const gymName = bestGymByCity[initialPlayer.city] || bestGymByCity[preferredCity] || "Powerhouse Gym";
+    const gymName = chooseCombatTrainingGym(initialPlayer, requirement, preferredCity);
     const gymCity = Object.entries(bestGymByCity).find(([, gym]) => gym == gymName)?.[0] || "Sector-12";
     let lastStatusUpdateTime = 0;
     let statToTrain = null;
     while (!breakToMainLoop()) {
         let player = await getPlayerInfo(ns);
-        const deficientStats = statOrder.filter(stat => player.skills[stat] < requirement);
-        if (deficientStats.length == 0) {
+        const trainingPlan = getCombatTrainingPlan(player, requirement, gymName);
+        if (trainingPlan.stats.length == 0) {
             log(ns, `SUCCESS: Achieved ${requirement} in all combat stats for "${factionName}" while training at the gym.`, false, 'info');
             return true;
         }
         if (!statToTrain || player.skills[statToTrain] >= requirement)
-            statToTrain = deficientStats.sort((a, b) => player.skills[a] - player.skills[b])[0];
+            statToTrain = trainingPlan.stats[0].stat;
         const currentWork = await getCurrentWorkInfo(ns);
         const expectedGymStat = gymStatBySkill[statToTrain];
         const currentClassType = String(currentWork.classType || "").toLowerCase();
@@ -993,9 +1050,12 @@ async function trainCombatStatsUpTo(ns, requirement, factionName = "unknown fact
         }
         if ((Date.now() - lastStatusUpdateTime) > statusUpdateInterval) {
             lastStatusUpdateTime = Date.now();
-            log(ns, `Training combat stats at ${gymName} in ${gymCity} for "${factionName}" until all reach ${requirement}. ` +
+            const statPlan = trainingPlan.stats.find(plan => plan.stat == statToTrain);
+            log(ns, `Training ${combatStatLabel[statToTrain]} at ${gymName} in ${gymCity} for "${factionName}" until all combat stats reach ${requirement}. ` +
                 `Currently Str: ${player.skills.strength}, Def: ${player.skills.defense}, Dex: ${player.skills.dexterity}, Agi: ${player.skills.agility}. ` +
-                `Training ${statToTrain}.`, false, 'info');
+                `Gym can train only one combat stat at a time. Sequential ETA ${formatDuration(trainingPlan.sequentialEtaMs)}; ` +
+                `hypothetical all-at-once ETA ${formatDuration(trainingPlan.hypotheticalParallelEtaMs)} is not available via gymWorkout. ` +
+                `Current stat ETA ${formatDuration(statPlan?.etaMs || 0)}. By stat: ${formatCombatTrainingPlan(trainingPlan)}.`, false, 'info');
         }
         await ns.sleep(loopSleepInterval);
     }
@@ -1258,18 +1318,6 @@ async function getServerRequiredHackLevel(ns, serverName) {
     return await getNsDataThroughFile(ns, `ns.getServerRequiredHackingLevel(ns.args[0])`, null, [serverName]);
 }
 
-/** A special check for when we unlock donations with Daedalus, this is usually a good time to reset.
- * @param {NS} ns */
-async function daedalusSpecialCheck(ns, favorRepRequired, currentReputation) {
-    if (favorRepRequired == 0 || currentReputation < favorRepRequired) return false;
-    // If we would be unlocking donations, but actually, we're pretty close to just being able to afford TRP, no impetus to reset.
-    if (currentReputation >= 0.9 * 2.500e6 * bitNodeMults.AugmentationRepCost) return false;
-    log(ns, `INFO: You have enough reputation with Daedalus (have ${formatNumberShort(currentReputation)}) that you will ` +
-        `unlock donations (needed ${formatNumberShort(favorRepRequired)}) with them on your next reset.`, !notifiedAboutDaedalus, "info");
-    ns.write("/Temp/Daedalus-donation-rep-attained.txt", "True", "w"); // HACK: To notify autopilot that we can reset for rep now.
-    notifiedAboutDaedalus = true;
-}
-
 let lastInterruptionNotice = "";
 /** Checks whether the current work being perform qualifies as a valid interruption (true),
  *  or whether we should go back to what we were doing before we were interrupted (false).
@@ -1319,28 +1367,21 @@ async function isValidInterruption(ns, currentWork = null) {
 let lastFactionWorkStatus = "";
 let lastPassiveFactionStatus = "";
 let lastPassiveFactionStatusUpdate = 0;
-/** * Checks how much reputation we need with this faction to either buy all augmentations or get 150 favour, then works to that amount.
+/** * Checks how much reputation we need with this faction to buy useful augmentations, then works to that amount.
  * @param {NS} ns
  * @param {string} factionName The faction to work for
- * @param {boolean} forceUnlockDonations Set to true to keep grinding reputation until we would earn enough favour to unlock donations on our next reset.
- *                                       If left as the default (false) we will grind rep either until we unlock donations, or can afford the most expensive desired aug, whichever is lower.
+ * @param {boolean} forceThroughInvitePriority Continue even when --prioritize-invites would normally defer faction work.
  * @param {boolean} forceBestAug Set to true to a) ignore "desired" stats and just work towards the most expensive (rep) agumentation,
- *                                          and b) ignore the rep required to unlock donations and keep going until we can buy all augmentations
- *                               Note: The exception is if donations are already unlocked, then you can already buy all augmentations (by buying rep first), so this does nothing.
- * @param {boolean|number} forceRep Set to true to force working for reputation even if we have unlocked donations and could just buy reputation.
+ *                                          and b) keep going until we can buy all augmentations.
+ * @param {boolean|number} forceRep Set to true to force working for reputation despite earlier completion heuristics.
  *                               Hack: If set to a number, we will work until that reputation amount regardless of augmentation reputation requirements.
  * */
-export async function workForSingleFaction(ns, factionName, forceUnlockDonations = false, forceBestAug = false, forceRep = false) {
+export async function workForSingleFaction(ns, factionName, forceThroughInvitePriority = false, forceBestAug = false, forceRep = false) {
     if (passiveInfiltrationFactions.includes(factionName))
         return await handlePassiveInfiltrationFaction(ns, factionName);
-    const repToFavour = (rep) => Math.ceil(25500 * 1.02 ** (rep - 1) - 25000);
     let highestRepAug = forceBestAug ? mostExpensiveAugByFaction[factionName] : mostExpensiveDesiredAugByFaction[factionName];
     let startingFavor = dictFactionFavors[factionName] || 0; // How much favour do we already have with this faction?
-    let favorRepRequired = Math.max(0, repToFavour(favorToDonate) - repToFavour(startingFavor));
-    // Determine when to stop grinding faction rep (usually ~467,000 to get 150 favour) Set this lower if there are no augs requiring that much REP
-    let factionRepRequired = Math.min(highestRepAug, favorRepRequired); // By default, stop at whichever comes first
-    if (forceUnlockDonations) // If forced, ensure we earn enough reputation to unlock donations on our next reset
-        factionRepRequired = Math.max(factionRepRequired, favorRepRequired)
+    let factionRepRequired = highestRepAug;
     if (forceBestAug)// If forced, ensure we earn enough rep to buy the highest rep augmentation
         factionRepRequired = Math.max(factionRepRequired, highestRepAug);
     if (forceRep !== true && forceRep > 0) // If forceRep is a number (not just a flag 'true'), ensure we earn the specified rep amount
@@ -1354,32 +1395,19 @@ export async function workForSingleFaction(ns, factionName, forceUnlockDonations
         return false;
     if (!inviteStatus)
         return ns.print(`We are not yet part of faction "${factionName}". Skipping working for faction...`);
-    // If we have already unlocked donations via favour, we can just buy the rep needed to unlock augmentations
-    // (earning money is typically faster than earning reputation), so we'll skip trying to earn further reputation
-    if (!forceRep && startingFavor >= favorToDonate)
-        return ns.print(`Donations already unlocked for "${factionName}". You should buy access to augs. Skipping working for faction...`);
-    // Hack: Even in "forceUnlockDonations" mode, don't ever bother unlocking donations for factions whose most expensive augmentation is <20% of the donation rep required
-    if (!forceRep && forceUnlockDonations && mostExpensiveAugByFaction[factionName] < 0.2 * factionRepRequired) {
-        ns.print(`The last "${factionName}" aug is only ${mostExpensiveAugByFaction[factionName].toLocaleString('en')} rep, ` +
-            `not worth grinding ${favorRepRequired.toLocaleString('en')} rep to unlock donations.`);
-        forceUnlockDonations = false;
-        factionRepRequired = highestRepAug = mostExpensiveAugByFaction[factionName];
-    }
-
     let currentReputation = await getFactionReputation(ns, factionName);
     // If the best faction aug is within 10% of our current rep, grind all the way to it so we can get it immediately, regardless of our current rep target
     if (forceBestAug || highestRepAug <= 1.1 * Math.max(currentReputation, factionRepRequired))
         factionRepRequired = Math.max(highestRepAug, factionRepRequired);
-    if (factionName == "Daedalus") await daedalusSpecialCheck(ns, favorRepRequired, currentReputation);
     if (currentReputation >= factionRepRequired)
         return ns.print(`Faction "${factionName}" required rep of ${Math.round(factionRepRequired).toLocaleString('en')} has already been attained ` +
             `(Current rep: ${Math.round(currentReputation).toLocaleString('en')}). Skipping working for faction...`)
 
-    ns.print(`Faction "${factionName}" Highest Aug Req: ${highestRepAug?.toLocaleString('en')}, Current Favor (` +
-        `${startingFavor?.toFixed(2)}/${favorToDonate?.toFixed(2)}) Req: ${Math.round(favorRepRequired).toLocaleString('en')}`);
+    ns.print(`Faction "${factionName}" Highest Aug Req: ${highestRepAug?.toLocaleString('en')}, Current Favor ` +
+        `${startingFavor?.toFixed(2)}, Target Rep: ${Math.round(factionRepRequired).toLocaleString('en')}`);
     if (options['invites-only'])
         return ns.print(`--invites-only Skipping working for faction...`);
-    if (options['prioritize-invites'] && !forceUnlockDonations && !forceBestAug && !forceRep)
+    if (options['prioritize-invites'] && !forceThroughInvitePriority && !forceBestAug && !forceRep)
         return ns.print(`--prioritize-invites Skipping working for faction for now...`);
     let lastStatusUpdateTime = 0;
     let lastSelectedInfiltrationTarget = "";
@@ -1468,7 +1496,6 @@ export async function workForSingleFaction(ns, factionName, forceUnlockDonations
     if (currentReputation >= factionRepRequired)
         ns.print(`Attained ${Math.round(currentReputation).toLocaleString('en')} rep with "${factionName}" ` +
             `(needed ${factionRepRequired.toLocaleString('en')}).`);
-    if (factionName == "Daedalus") await daedalusSpecialCheck(ns, favorRepRequired, currentReputation);
     return currentReputation >= factionRepRequired;
 }
 

@@ -36,6 +36,8 @@ Project-specific guidance for coding agents working in `bitburner-scripts`.
 
 - `NeuroFlux Governor` must not be treated as a normal target augmentation for faction progression calculations.
 - `NeuroFlux Governor` is a low-priority cash sink. Do not let it compete with concrete strategic goals such as BN10 Covenant sleeves/memory, The Red Pill, or other progression blockers.
+- Do not use faction donations as an automation shortcut for augmentation reputation. `faction-manager.js` should purchase only augmentations whose reputation is already earned; `work-for-factions.js` should use infiltration/work to close reputation gaps.
+- For `Shadows of Anarchy`, only treat `SoA - phyzical WKS harmonizer` as a target augmentation. Ignore the other SoA mini-game augmentations for progression and purchasing.
 - Be careful with anything that feeds:
   - `mostExpensiveAugByFaction`
   - `mostExpensiveDesiredAugByFaction`
@@ -50,13 +52,23 @@ Project-specific guidance for coding agents working in `bitburner-scripts`.
 
 - Default automation should avoid company-work grinding unless intentionally enabled.
 - Avoid arbitrary crime fallback behavior with no concrete goal.
+- Do not use crimes as generic combat-stat training when a faction invite needs specific strength/defense/dexterity/agility thresholds. Use crimes only for kills/karma, then train deficient combat stats directly at the gym.
+- Before gym combat training, estimate per-stat ETA from current exp/multipliers and choose the fastest practical gym/stat. Do not imply gym training can raise all combat stats at once; `gymWorkout` only supports one of `str`, `def`, `dex`, or `agi`.
 - `autopilot.js` may launch corporation automation only when corporations are actually available: current BN3 or SF3.3+. Keep the launcher lightweight; do not import `corporation.js` from `run-corporation.js`.
 - Keep `casino.js` as a lightweight dispatcher. Shared casino runtime helpers belong outside it, and autopilot RAM checks should target the selected casino game script, not just the dispatcher.
 - Do not reference `ns.singularity.*` directly from shared casino helpers; pass optional callbacks from scripts that can afford singularity, otherwise use UI clicks to avoid high no-SF4 RAM costs.
 - Keep grafting automation conservative and isolated in `graft-manager.js`. `autopilot.js` may launch it, but should not choose graft targets inline. In BN8, grafting must preserve the Daedalus cash floor and focus on stock/cash acceleration via hacking speed/grow/chance, not broad augmentation collection or pure hack XP.
+- In BN8, frequent installs are desirable because each reset can rerun casino and restart stock growth from a stronger baseline. Prefer buying all currently affordable non-NeuroFlux augmentations as a batch, then installing immediately, instead of waiting for large augmentation thresholds.
+- In BN8, purchase augmentations cheap-first. Do not let the normal value/priority ordering create a huge unaffordable batch; the purchase planner should build the affordable prefix in actual purchase order with augmentation price multipliers included.
+- In BN8, do not buy new `NeuroFlux Governor` levels as part of the frequent-install path, but if NeuroFlux levels were already purchased and are awaiting install, install them rather than idling.
+- In BN8, already-purchased awaiting augmentations should override Daedalus-invite waiting heuristics. Leaving purchased augmentations uninstalled creates a price penalty and slows the cash-first loop.
+- Do not use global `reserve.txt` to hold cash in BN8; it slows stock/casino-driven progress. Keep only targeted safety checks that prevent going negative on paid actions.
+- In BN8, `autopilot.js` should keep `/Temp/affordable-augs.txt` fresh before install decisions; stale faction-manager output can incorrectly fall back to normal augmentation thresholds.
+- In BN8, do not kill the live `stockmaster.js` trader when liquidating unless explicitly requested. Preserving pre-4S tick history is critical; prefer `stockmaster.js --liquidate` with keep-trader behavior, or `--liquidate --kill-trader` only when a full reset is intentional.
 - Do not trigger installs purely because many augmentations are awaiting install if there is no money for additional purchases and more non-NeuroFlux augmentations remain.
 - `autopilot.js` timed `xp-mode` is not useful once hack level is already high; avoid reintroducing aggressive XP-mode relaunching at high hack.
 - Keep Bitburner 3.0 Darknet orchestration in `Tasks/darknet-manager.js`. `autopilot.js` should only keep the manager running, and Darknet scripts should avoid `tprint` in normal automation mode so they do not spam the main terminal.
+- Darknet worker scripts can be copied and relaunched across remote darknet hosts with imperfect args. Parse worker args defensively; do not let a missing value for propagation metadata such as `--origin` crash the worker at startup.
 - `Netburners` should be skipped in the default early-game autopilot flow while hacknet is intentionally deferred.
 - If re-enabling `Netburners`, do it only in a late-game autopilot path that also enables actual hacknet progression; do not merely remove the skip and leave hacknet disabled.
 - Company-work grinding, including the `Silhouette`/CEO path, should stay disabled in the default early-game autopilot flow.

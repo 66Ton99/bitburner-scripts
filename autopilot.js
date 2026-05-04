@@ -109,6 +109,7 @@ export async function main(ns) {
     let daemonStartTime = 0; // The time we personally launched daemon.
     let installCountdown = 0; // Start of a countdown before we install augmentations.
     let installCountdownResets = 0; // Number of times we've reset the countdown because our affordable augs has increased
+    let lastFactionManagerRefresh = 0; // Last time autopilot refreshed faction-manager output itself
     let bnCompletionSuppressed = false; // Flag if we've detected that we've won the BN, but are suppressing a restart
     let sleevesMaxedOut = false; // Flag used only when the player is replaying BN 10 with all sleeves but has suppressed auto-destroying the BN, to allow continued auto-installs
     let bn10SleevesIncomplete = false; // Flag used after BN10 is complete to preserve cash for Covenant sleeve purchases
@@ -365,13 +366,14 @@ export async function main(ns) {
             }
             reservingMoneyForDaedalus = true; // Flag to pause all spending (set reserve.txt) until we've gotten the Daedalus invite
             if (player.money < moneyReq) { // Only liquidate stocks if we don't have enough cash lying around.
-                disableStockmasterForDaedalus = true; // Flag to keep stockmaster offline until we've gotten a daedalus invite
+                if (resetInfo.currentNode != 8)
+                    disableStockmasterForDaedalus = true; // Flag to keep stockmaster offline until we've gotten a daedalus invite
                 log(ns, "INFO: Temporarily liquidating stocks to earn an invite to Daedalus...", true, 'info');
                 launchScriptHelper(ns, 'stockmaster.js', ['--liquidate']);
             } // else if we don't liquidate stocks, and our money dips below 100E9 again, we can always do it on the next loop
         } else if (resetInfo.currentNode == 8) {
-            // In BN8, there is nothing worth spending money on when we've met all other Daedalus requirements except the $100b money.
-            // We should immediately set the reserve and wait until we have enough wealth to liquidate stocks and get the invite.
+            // In BN8, wait for the $100b Daedalus money requirement without writing a global reserve.
+            // Stocks are the money engine here, so reserve.txt must stay clear and stockmaster must keep trading.
             reservingMoneyForDaedalus = true;
         } // Cancel the reserve if our money drops below the threshold before getting an invite (due to other scripts not respecting the reserve?)
         else if (reservingMoneyForDaedalus && totalWorth < moneyReq * 0.999 /* slight buffer to let cash recover */) {
@@ -999,6 +1001,7 @@ export async function main(ns) {
     /** Retrieves the last faction manager output file, parses, and provides type-hints for it.
      * @returns {{ installed_augs: string[], installed_count: number, installed_count_nf: number, installed_count_ex_nf: number,
      *             owned_augs: string[], owned_count: number, owned_count_nf: number, owned_count_ex_nf: number,
+     *             purchased_augs: string[], purchased_count: number, purchased_count_nf: number, purchased_count_ex_nf: number,
      *             awaiting_install_augs: string[], awaiting_install_count: number, awaiting_install_count_nf: number, awaiting_install_count_ex_nf: number,
      *             affordable_augs: string[], affordable_count: number, affordable_count_nf: number, affordable_count_ex_nf: number,
      *             total_rep_cost: number, total_aug_cost: number, unowned_count: number }} */
@@ -1020,11 +1023,22 @@ export async function main(ns) {
             return reservedPurchase = 0;
         }
 
+        const bn8FrequentInstall = resetInfo.currentNode == 8;
+
+        if (bn8FrequentInstall && (lastFactionManagerRefresh < resetInfo.lastAugReset || lastFactionManagerRefresh < Date.now() - 30 * 1000)) {
+            ns.write(factionManagerOutputFile, "", "w");
+            lastFactionManagerRefresh = Date.now();
+            const pid = launchScriptHelper(ns, 'faction-manager.js', ['--neuroflux-disabled']);
+            if (pid) {
+                await waitForProcessToComplete(ns, pid, true);
+            }
+        }
+
         // If we previously attempted to reserve money for an augmentation purchase order, do a fresh facman run to ensure it's still available
         if (reservedPurchase && installCountdown <= Date.now()) {
             log(ns, "INFO: Manually running faction-manager.js --purchase to lock in the reserved augmentation purchase.");
             ns.write(factionManagerOutputFile, "", "w"); // Reset the output file to ensure it isn't stale
-            const pid = launchScriptHelper(ns, 'faction-manager.js', ['--purchase']);
+            const pid = launchScriptHelper(ns, 'faction-manager.js', bn8FrequentInstall ? ['--purchase', '--neuroflux-disabled'] : ['--purchase']);
             await waitForProcessToComplete(ns, pid, true); // Wait for the script to shut down (and output to be generated)
         }
 
@@ -1042,8 +1056,8 @@ export async function main(ns) {
         // Reduce the augmentations required to reset over time, except in cetain situations. This is because in most situations,
         // pefoming an ascention in a slow-going BN will let us lock in bonuses that will speed up overall pogression.
         let reducedAugReq = Math.floor(options['reduced-aug-requirement-per-hour'] * getTimeInAug() / 3.6E6);
-        // In our first BN9 augmentation and in BN8, use this mechanic to actually *increase* aug count requirements.
-        if (inFirstBn9Aug || resetInfo.currentNode == 8) // In BN8, no reset bonuses are possible, and we'd lose our stock progress
+        // In our first BN9 augmentation, use this mechanic to actually *increase* aug count requirements.
+        if (inFirstBn9Aug)
             reducedAugReq = -2; // In our first BN9 augmentation, delay resetting as we'd lose our boosted hacknet server
         // Collect additional information about how many augmentations we need before it's worth resetting, based on the current configuration
         const sf11Level = dictOwnedSourceFiles[11] ?? 0; // SF11 makes augs scale cheaper, so for each level, require +1 augs
@@ -1051,17 +1065,29 @@ export async function main(ns) {
         const augsNeededInclNf = Math.max(1, options['install-at-aug-plus-nf-count'] + sf11Level - reducedAugReq);
 
         // Get a count of pending augmentations (augs we plan to buy, plus any we've bought but not yet installed)
-        const pendingAugCount = facman.affordable_count_ex_nf + facman.awaiting_install_count_ex_nf; // Excludes neuroflux levels
+        const awaitingInstallNonNfCount = Math.max(facman.awaiting_install_count_ex_nf || 0,
+            (facman.purchased_count_ex_nf || 0) - (facman.installed_count_ex_nf || 0));
+        const pendingAugCount = facman.affordable_count_ex_nf + awaitingInstallNonNfCount; // Excludes neuroflux levels
         const pendingNfCount = facman.affordable_count_nf + facman.awaiting_install_count_nf; // Only neuroflux levels
         const pendingAugInclNfCount = pendingAugCount + pendingNfCount; // Includes neuroflux levels
         // Create lists of augmentations already bought vs still affordable to buy. Group all NF levels into one entry per category.
         const strNF = "NeuroFlux Governor"
         let awaitingAugs = facman.awaiting_install_augs.filter(aug => aug != strNF);
+        if (awaitingAugs.length == 0 && awaitingInstallNonNfCount > 0)
+            awaitingAugs.push(`${awaitingInstallNonNfCount} non-NeuroFlux augmentations`);
         let affordableAugs = facman.affordable_augs.filter(aug => aug != strNF);
         if (facman.awaiting_install_count_nf > 0)
             awaitingAugs.push(`${strNF} (x${facman.awaiting_install_count_nf})`)
         if (facman.affordable_count_nf > 0)
             affordableAugs.push(`${strNF} (x${facman.affordable_count_nf})`)
+
+        if (bn8FrequentInstall && facman.affordable_count_ex_nf > 0) {
+            log(ns, `INFO: BN8 frequent-install mode: purchasing ${facman.affordable_count_ex_nf} affordable non-NeuroFlux augmentations before installing.`);
+            ns.write(factionManagerOutputFile, "", "w");
+            const pid = launchScriptHelper(ns, 'faction-manager.js', ['--purchase', '--neuroflux-disabled']);
+            await waitForProcessToComplete(ns, pid, true);
+            return reservedPurchase = 0;
+        }
 
         // Determine whether we can afford enough augmentations to merit a reset
         let totalCost = facman.total_rep_cost + facman.total_aug_cost;
@@ -1075,18 +1101,10 @@ export async function main(ns) {
         let resetStatus = `Reserving ${formatMoney(totalCost)} to install ${augSummary}`
         let shouldReset = options['install-for-augs'].some(a => facman.affordable_augs.includes(a)) ||
             pendingAugCount >= augsNeeded || pendingAugInclNfCount >= augsNeededInclNf;
-
-        // If we are in Daedalus, and we do not yet have enough favour to unlock rep donations with Daedalus,
-        // but we DO have enough rep to earn that favor on our next restart, trigger an install immediately (need at least 1 aug)
-        // (doesn't apply in BN8, since we can immediately donate to all factions)
-        if (
-            player.factions.includes("Daedalus") &&
-            bitNodeMults.FavorToDonateToFaction !== 0 &&
-            ns.read("/Temp/Daedalus-donation-rep-attained.txt")
-        ) {
+        if (bn8FrequentInstall && facman.awaiting_install_count > 0 && facman.affordable_count_ex_nf == 0) {
             shouldReset = true;
-            resetStatus = `We have enough reputation with Daedalus to unlock donations on our next reset.\n${resetStatus}`;
-            if (totalCost == 0) totalCost = 1; // Hack, logic below expects some non-zero reserve in preparation for ascending.
+            resetStatus = `BN8 frequent-install mode: installing already-purchased augmentations immediately after buying the current non-NeuroFlux batch.\n${resetStatus}`;
+            options['install-countdown'] = 0;
         }
 
         // Heuristic: if we can afford 4 or more augs in the first ~20 minutes, it's usually worth doing a "quick install"
@@ -1094,10 +1112,8 @@ export async function main(ns) {
         //     doing an few immediate installs to purchase upgrades, then reset for more free cash.
         // When in a gang, require a more augs and don't countdown as quickly, since each reset reduces gang member ascention multipliers
         const quickInstallThreshold = playerInGang ? 6 : 4;
-        if (!inFirstBn9Aug && (
-            (getTimeInAug() < 20 * 60 * 1000 && pendingAugInclNfCount >= quickInstallThreshold) ||
-            // Heuristic: In BN8, reinstall repeatedly for the first 10 minutes to purchase every little thing we can with our flat 10B casino winnings
-            (resetInfo.currentNode == 8 && getTimeInBitnode() < 10 * 60 * 1000))) {
+        if (!inFirstBn9Aug && !bn8FrequentInstall &&
+            getTimeInAug() < 20 * 60 * 1000 && pendingAugInclNfCount >= quickInstallThreshold) {
             shouldReset = true;
             resetStatus = `We haven't been in this reset for long. We can do a quick reset immediately for a quick stat boost.\n${resetStatus}`;
             if (options['install-countdown'] > 30 * 1000 && !playerInGang)
@@ -1108,13 +1124,19 @@ export async function main(ns) {
         if (!shouldReset && (facman.affordable_count_ex_nf + facman.affordable_count_nf) > 0) {
             log(ns, `INFO: Purchasing currently affordable augmentations now rather than waiting for the install threshold.`);
             ns.write(factionManagerOutputFile, "", "w");
-            const pid = launchScriptHelper(ns, 'faction-manager.js', ['--purchase']);
+            const pid = launchScriptHelper(ns, 'faction-manager.js', bn8FrequentInstall ? ['--purchase', '--neuroflux-disabled'] : ['--purchase']);
             await waitForProcessToComplete(ns, pid, true);
             return reservedPurchase = 0;
         }
 
         // If not ready to reset, set a status with our progress and return
         if (!shouldReset) {
+            if (bn8FrequentInstall) {
+                setStatus(ns, `BN8 frequent-install mode is waiting for any affordable or purchased non-NeuroFlux augmentation. ` +
+                    `Ready now: ${augSummary}` + augDetailLines.join("") +
+                    ` (\`run faction-manager.js --neuroflux-disabled\` for details)`, augSummary);
+                return reservedPurchase = 0;
+            }
             setStatus(ns, `Currently at ${formatDuration(getTimeInAug())} since last aug. ` +
                 `Waiting for ${augsNeeded} new augs (or ${augsNeededInclNf} including NeuroFlux levels) before installing.` +
                 `\nReady now: ${augSummary}` + augDetailLines.join("") +
@@ -1130,11 +1152,11 @@ export async function main(ns) {
         if (reservedPurchase < totalCost) {
             // A countdown is displayed to give the user a heads up, and give us time to potentially earn money for more augmentations
             if (reservedPurchase == 0)
-                installCountdown = Date.now() + options['install-countdown'];
+                installCountdown = Date.now() + (bn8FrequentInstall ? 0 : options['install-countdown']);
             else { // If we were already reserving for a purchase and the number went up, log a notice of the timer being reset.
                 let purchaseChangeLog = `INFO: The augmentation purchase we can afford has increased from ${formatMoney(reservedPurchase)} to ${formatMoney(totalCost)}.`
                 // First, check if we're ready to install TRP - if so, don't delay the install for any additional augmentations.
-                if (!augsToInstall.includes(augTRP)) {
+                if (!facman.affordable_augs.includes(augTRP) && !facman.awaiting_install_augs.includes(augTRP)) {
                     // Otherwise, each time we can afford more augs, reset the install delay timer to take advantage of "momentum"
                     // and potentially purchase many more augmentations in this reset. To avoid delaying an install indefinitely,
                     // we reduce the additional time we're willing to wait a little bit each time this happens.
@@ -1149,7 +1171,8 @@ export async function main(ns) {
                 }
                 log(ns, purchaseChangeLog, true);
             }
-            writeReserveForTarget(ns, totalCost, cachedStocksValue); // Should prevent other scripts from spending money not already covered by stocks
+            if (!bn8FrequentInstall)
+                writeReserveForTarget(ns, totalCost, cachedStocksValue); // Should prevent other scripts from spending money not already covered by stocks
         }
         // We must wait until the configured cooldown elapses before we install augs.
         if (installCountdown > Date.now()) {
@@ -1197,10 +1220,13 @@ export async function main(ns) {
             return true;
         const remainingNonNfAugs = Math.max(0, (facmanOutput.unpurchased_count || 0) - 1);
         const affordableNowCount = (facmanOutput.affordable_count_ex_nf || 0) + (facmanOutput.affordable_count_nf || 0);
-        const awaitingNonNfCount = facmanOutput.awaiting_install_count_ex_nf || 0;
+        const awaitingNonNfCount = Math.max(facmanOutput.awaiting_install_count_ex_nf || 0,
+            (facmanOutput.purchased_count_ex_nf || 0) - (facmanOutput.installed_count_ex_nf || 0));
         const awaitingInclNfCount = facmanOutput.awaiting_install_count || 0;
         const alreadyMeetsInstallThreshold = awaitingNonNfCount >= augsNeeded || awaitingInclNfCount >= augsNeededInclNf;
-        if (!alreadyMeetsInstallThreshold && awaitingInclNfCount > 0 && affordableNowCount == 0 && remainingNonNfAugs > 0) {
+        if (resetInfo.currentNode == 8 && awaitingInclNfCount > 0)
+            return false;
+        if (resetInfo.currentNode != 8 && !alreadyMeetsInstallThreshold && awaitingInclNfCount > 0 && affordableNowCount == 0 && remainingNonNfAugs > 0) {
             setStatus(ns, `Not installing yet because only ${awaitingInclNfCount} augmentations are waiting to install, ` +
                 `that is still below the current install threshold (${augsNeeded} excluding NeuroFlux / ${augsNeededInclNf} including NeuroFlux), ` +
                 `and we cannot afford any additional purchases right now while ${remainingNonNfAugs} non-NeuroFlux augmentations remain.`);
@@ -1208,7 +1234,7 @@ export async function main(ns) {
         }
         // Are we close to being able to afford 4S TIX data?
         if (!have4STixApi) have4STixApi = await getNsDataThroughFile(ns, `ns.stock.has4SDataTixApi()`);
-        if (!options['disable-wait-for-4s'] && !have4STixApi) {
+        if (resetInfo.currentNode != 8 && !options['disable-wait-for-4s'] && !have4STixApi) {
             if (!have4SData) have4SData = await getNsDataThroughFile(ns, `ns.stock.has4SData()`);
             const totalWorth = player.money + await getStocksValue(ns);
             const totalCost = 25E9 * bitNodeMults.FourSigmaMarketDataApiCost +
@@ -1225,8 +1251,8 @@ export async function main(ns) {
         }
         if (resetInfo.currentNode == 8) { // Many special rules for this special Bitnode
             if (player.factions.includes("Daedalus")) { // If we've already joined Daedalus
-                // In BN8, large sums of money are hard to accumulate, so if we've made it into Daedalus, but can't purchase TRP rep yet,
-                // remain in the BN until we have enough rep and/or money to buy TRP (Reminder: in BN8, donations are immediately unlocked for all factions)    
+                // In BN8, large sums of money are hard to accumulate, so if we've made it into Daedalus, but can't purchase TRP yet,
+                // remain in the BN until we have enough rep and money to buy TRP.
                 if (!installedAugmentations.includes(augTRP) && !facmanOutput.affordable_augs.includes(augTRP) && !facmanOutput.awaiting_install_augs.includes(augTRP)) {
                     setStatus(ns, `We're in Daedalus, so we won't install until we can afford to purchase "${augTRP}".`);
                     return true;
@@ -1236,15 +1262,6 @@ export async function main(ns) {
                 setStatus(ns, `Not installing because we're in BN8 and we have enough augs and ` + (player.skills.hacking < 2500 ? 'nearly ' : '')
                     + 'enough hack level to get invited to Daedalus once we hit $100b.');
                 return true;
-            } else if (getTimeInAug() > 4 * 60 * 60 * 1000) { // 4 hours = 4hrs/min * 60mins/sec * 60secs/ms * 1000ms
-                // If we've been in BN8 for more than 4 hours, we shouldn't reset unless we're making significant progress towards unlocking Daedalus.
-                // because it takes so long to build up money, and nothing we install will accellerate our earnings in the next augmentation.
-                const augsReadyToInstall = facmanOutput.awaiting_install_count_ex_nf + facmanOutput.affordable_count_ex_nf;
-                if (augsReadyToInstall < 10) { // Heuristic: 10 augs per install means max 3 installs before we meet the Daedalus aug requirement
-                    setStatus(ns, `Not installing because we've in BN8 for more than 4 hours (~${Math.round(getTimeInAug() / 1000 / 60 / 60)}h) and aren't in Daedalus yet, ` +
-                        `so our threshold is at least 10 new augs installed to merit resetting (currently at ${augsReadyToInstall}).`);
-                    return true;
-                }
             }
         }
         // If we're reserving money because we're close to getting an invite to Daedalus don't reset.
@@ -1260,7 +1277,6 @@ export async function main(ns) {
         }
 
         // TODO: Bladeburner black-op in progress
-        // TODO: Close to the rep needed for unlocking donations with a new faction?
         return false;
     }
 
@@ -1286,6 +1302,8 @@ export async function main(ns) {
      * @param {NS} ns
      * @param {Player} player */
     function manageReservedMoney(ns, player, stocksValue) {
+        if (resetInfo.currentNode == 8)
+            return writeReserveForTarget(ns, 0, 0);
         if (reservedPurchase) return writeReserveForTarget(ns, reservedPurchase, stocksValue);
         if (reservingMoneyForDaedalus) // Reserve 100b to get the daedalus invite
             return writeReserveForTarget(ns, 100E9, stocksValue);

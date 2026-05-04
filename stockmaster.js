@@ -31,11 +31,15 @@ let lastTick = 0;
 let sleepInterval = 1000;
 let resetInfo = (/**@returns{ResetInfo}*/() => undefined)(); // Information about the current bitnode
 let bitNodeMults = (/**@returns{BitNodeMultipliers}*/() => undefined)();
+const liquidationPauseFile = "/Temp/stockmaster-liquidation-pause.txt";
 
 let options;
 const argsSchema = [
     ['l', false], // Stop any other running stockmaster.js instances and sell all stocks
-    ['liquidate', false], // Long-form alias for the above flag.
+    ['liquidate', false], // Sell all stocks. In BN8, keeps the live trader alive unless --kill-trader is set.
+    ['keep-trader', false], // Liquidate positions without killing an existing trading instance, preserving pre-4S history.
+    ['kill-trader', false], // Force --liquidate to kill an existing trading instance, even where keep-trader would be preferred.
+    ['liquidation-pause-ms', 10000], // When keeping the trader alive, pause new purchases this long after liquidation.
     ['mock', false], // If set to true, will "mock" buy/sell but not actually buy/sell anything
     ['noisy', false], // If set to true, tprints and announces each time stocks are bought/sold
     ['disable-shorts', false], // If set to true, will not short any stocks. Will be set depending on having SF8.2 by default.
@@ -77,9 +81,17 @@ export async function main(ns) {
     const hasTixApiAccess = await getNsDataThroughFile(ns, 'ns.stock.hasTixApiAccess()');
     if (runOptions.l || runOptions.liquidate) {
         if (!hasTixApiAccess) return log(ns, 'ERROR: Cannot liquidate stocks because we do not have Tix Api Access', true, 'error');
-        log(ns, 'INFO: Killing any other stockmaster processes...', false, 'info');
-        await runCommand(ns, `ns.ps().filter(proc => proc.filename == '${ns.getScriptName()}' && !proc.args.includes('-l') && !proc.args.includes('--liquidate'))` +
-            `.forEach(proc => ns.kill(proc.pid))`, '/Temp/kill-stockmarket-scripts.js');
+        const currentResetInfo = await getNsDataThroughFile(ns, 'ns.getResetInfo()');
+        const keepTrader = runOptions['keep-trader'] || (runOptions.liquidate && !runOptions.l && !runOptions['kill-trader'] && currentResetInfo.currentNode == 8);
+        if (keepTrader) {
+            const pauseUntil = Date.now() + Math.max(0, Number(runOptions['liquidation-pause-ms']) || 0);
+            await ns.write(liquidationPauseFile, String(pauseUntil), 'w');
+            log(ns, `INFO: Keeping existing stockmaster trader alive and pausing new purchases for ${formatDuration(pauseUntil - Date.now())}.`, false, 'info');
+        } else {
+            log(ns, 'INFO: Killing any other stockmaster processes...', false, 'info');
+            await runCommand(ns, `ns.ps().filter(proc => proc.filename == '${ns.getScriptName()}' && !proc.args.includes('-l') && !proc.args.includes('--liquidate'))` +
+                `.forEach(proc => ns.kill(proc.pid))`, '/Temp/kill-stockmarket-scripts.js');
+        }
         log(ns, 'INFO: Checking for and liquidating any stocks...', false, 'info');
         await liquidate(ns); // Sell all stocks
         return;
@@ -188,6 +200,12 @@ export async function main(ns) {
                 }
             }
             if (sales > 0) continue; // If we sold anything, loop immediately (no need to sleep) and refresh stats immediately before making purchasing decisions.
+            const liquidationPauseUntil = Number(ns.read(liquidationPauseFile) || 0);
+            if (Date.now() < liquidationPauseUntil) {
+                log(ns, `Pausing new stock purchases for ${formatDuration(liquidationPauseUntil - Date.now())} after liquidation...`);
+                await ns.sleep(Math.min(sleepInterval, liquidationPauseUntil - Date.now()));
+                continue;
+            }
 
             // If we haven't gone above a certain liquidity threshold, don't attempt to buy more stock
             // Avoids death-by-a-thousand-commissions before we get super-rich, stocks are capped, and this is no longer an issue
