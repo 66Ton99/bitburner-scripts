@@ -30,6 +30,7 @@ Project-specific guidance for coding agents working in `bitburner-scripts`.
 - Prefer a local infiltration target that can finish the remaining faction reputation in one run over unnecessary travel to a slightly better remote target.
 - Use `Departure from ...` and `Arrived from ...` wording for travel logs to avoid duplicate-looking messages.
 - Remove dead infiltration helper code from `work-for-factions.js` when that logic has been moved into `infiltration-runner.js`; do not keep parallel stale implementations.
+- Keep `Shadows of Anarchy` immediately after `Sector-12` in the default faction queue so it is joined early, but never target it directly for faction work or infiltration rewards. It gains reputation passively from successful infiltration done for other targets.
 
 ## Reputation / Augmentation Rules
 
@@ -54,6 +55,7 @@ Project-specific guidance for coding agents working in `bitburner-scripts`.
 - Do not reference `ns.singularity.*` directly from shared casino helpers; pass optional callbacks from scripts that can afford singularity, otherwise use UI clicks to avoid high no-SF4 RAM costs.
 - Do not trigger installs purely because many augmentations are awaiting install if there is no money for additional purchases and more non-NeuroFlux augmentations remain.
 - `autopilot.js` timed `xp-mode` is not useful once hack level is already high; avoid reintroducing aggressive XP-mode relaunching at high hack.
+- Keep Bitburner 3.0 Darknet orchestration in `Tasks/darknet-manager.js`. `autopilot.js` should only keep the manager running, and Darknet scripts should avoid `tprint` in normal automation mode so they do not spam the main terminal.
 - `Netburners` should be skipped in the default early-game autopilot flow while hacknet is intentionally deferred.
 - If re-enabling `Netburners`, do it only in a late-game autopilot path that also enables actual hacknet progression; do not merely remove the skip and leave hacknet disabled.
 - Company-work grinding, including the `Silhouette`/CEO path, should stay disabled in the default early-game autopilot flow.

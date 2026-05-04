@@ -64,11 +64,13 @@ const jobs = [ // Job stat requirements for a company with a base stat modifier 
 ]
 const factions = ["Illuminati", "Daedalus", "The Covenant", "ECorp", "MegaCorp", "Bachman & Associates", "Blade Industries", "NWO", "Clarke Incorporated", "OmniTek Incorporated",
     "Four Sigma", "KuaiGong International", "Fulcrum Secret Technologies", "BitRunners", "The Black Hand", "NiteSec", "Aevum", "Chongqing", "Ishima", "New Tokyo", "Sector-12",
-    "Volhaven", "Speakers for the Dead", "The Dark Army", "The Syndicate", "Silhouette", "Tetrads", "Slum Snakes", "Netburners", "Tian Di Hui", "CyberSec"];
-const cannotWorkForFactions = ["Church of the Machine God", "Bladeburners", "Shadows of Anarchy"]
+    "Volhaven", "Speakers for the Dead", "The Dark Army", "The Syndicate", "Silhouette", "Tetrads", "Slum Snakes", "Netburners", "Tian Di Hui", "CyberSec", "Shadows of Anarchy"];
+const passiveInfiltrationFactions = ["Shadows of Anarchy"]; // Gains reputation passively from any infiltration, not via direct faction work/reward targeting.
+const cannotWorkForFactions = ["Church of the Machine God", "Bladeburners"]
 // These factions should ideally be completed in this order
 const preferredEarlyFactionOrder = [
     "Sector-12", // CashRoot Starter Kit is a cheap unique early aug and worth forcing before other city factions
+    "Shadows of Anarchy", // Join early, then let normal infiltration for other factions/money passively raise its reputation
     "Netburners", // Improve hash income, which is useful or critical for almost all BNs
     "Tian Di Hui", "Aevum", // These give all the company_rep and faction_rep bonuses early game
     "Daedalus", // Once we have all faction_rep boosting augs, there's no reason not to work towards Daedalus as soon as it's available/feasible so we can buy Red Pill
@@ -479,7 +481,8 @@ async function mainLoop(ns) {
     if (scope <= 8 || breakToMainLoop()) return;
 
     // Strategy 9: Busy ourselves for a while longer, then loop to see if there anything more we can do for the above factions
-    let factionsWeCanWorkFor = joinedFactions.filter(f => !options.skip.includes(f) && !cannotWorkForFactions.includes(f) && f != playerGang);
+    let factionsWeCanWorkFor = joinedFactions.filter(f => !options.skip.includes(f) && !cannotWorkForFactions.includes(f) &&
+        !passiveInfiltrationFactions.includes(f) && f != playerGang);
     let foundWork = false;
     const factionsNeedingMoreRep = factionsWeCanWorkFor
         .filter(f => (mostExpensiveAugByFaction[f] || -1) > 0)
@@ -1314,6 +1317,8 @@ async function isValidInterruption(ns, currentWork = null) {
 }
 
 let lastFactionWorkStatus = "";
+let lastPassiveFactionStatus = "";
+let lastPassiveFactionStatusUpdate = 0;
 /** * Checks how much reputation we need with this faction to either buy all augmentations or get 150 favour, then works to that amount.
  * @param {NS} ns
  * @param {string} factionName The faction to work for
@@ -1326,6 +1331,8 @@ let lastFactionWorkStatus = "";
  *                               Hack: If set to a number, we will work until that reputation amount regardless of augmentation reputation requirements.
  * */
 export async function workForSingleFaction(ns, factionName, forceUnlockDonations = false, forceBestAug = false, forceRep = false) {
+    if (passiveInfiltrationFactions.includes(factionName))
+        return await handlePassiveInfiltrationFaction(ns, factionName);
     const repToFavour = (rep) => Math.ceil(25500 * 1.02 ** (rep - 1) - 25000);
     let highestRepAug = forceBestAug ? mostExpensiveAugByFaction[factionName] : mostExpensiveDesiredAugByFaction[factionName];
     let startingFavor = dictFactionFavors[factionName] || 0; // How much favour do we already have with this faction?
@@ -1463,6 +1470,32 @@ export async function workForSingleFaction(ns, factionName, forceUnlockDonations
             `(needed ${factionRepRequired.toLocaleString('en')}).`);
     if (factionName == "Daedalus") await daedalusSpecialCheck(ns, favorRepRequired, currentReputation);
     return currentReputation >= factionRepRequired;
+}
+
+/** Special-case factions whose reputation cannot be targeted directly.
+ * Shadows of Anarchy gains reputation from successful infiltration itself, regardless of the selected reward target. */
+async function handlePassiveInfiltrationFaction(ns, factionName) {
+    const player = await getPlayerInfo(ns);
+    const printPassiveStatus = status => {
+        if (lastPassiveFactionStatus != status || (Date.now() - lastPassiveFactionStatusUpdate) > statusUpdateInterval) {
+            lastPassiveFactionStatus = status;
+            lastPassiveFactionStatusUpdate = Date.now();
+            ns.print(status);
+        }
+    };
+    if (player.factions.includes(factionName)) {
+        const currentReputation = await getFactionReputation(ns, factionName);
+        const highestRepAug = mostExpensiveAugByFaction[factionName] ?? -1;
+        if (highestRepAug > 0 && currentReputation < highestRepAug)
+            printPassiveStatus(`Faction "${factionName}" is passive. It gains reputation from any successful infiltration; continuing with the normal queue ` +
+                `instead of targeting it directly (${Math.round(currentReputation).toLocaleString('en')}/${Math.round(highestRepAug).toLocaleString('en')} rep).`);
+        return false;
+    }
+    const invitations = await checkFactionInvites(ns);
+    if (invitations.includes(factionName))
+        return await tryJoinFaction(ns, factionName);
+    printPassiveStatus(`Faction "${factionName}" is second in priority, but it cannot be worked directly. Waiting for its invitation while normal infiltration progresses.`);
+    return false;
 }
 
 /** Pick the best currently-feasible infiltration target by trade rep. */

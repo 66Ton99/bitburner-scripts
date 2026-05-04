@@ -23,6 +23,7 @@ const argsSchema = [ // The set of all command line arguments
     ['disable-rush-gangs', false], // Set to true to disable focusing work-for-faction on Karma until gangs are unlocked
     ['disable-casino', false], // Set to true to disable running the casino.js script automatically
     ['disable-corporation', false], // Set to true to disable running corporation automation when BN3/SF3.3 makes it available
+    ['disable-darknet', false], // Set to true to disable running Bitburner 3.0 darknet automation
     ['spend-hashes-on-server-hacking-threshold', 0.1], // Threshold for how good hacking multipliers must be to merit spending hashes for boosting hack income. Set to a large number to disable this entirely.
     ['on-completion-script', null], // Spawn this script when we defeat the bitnode
     ['on-completion-script-args', []], // Optional args to pass to the script when we defeat the bitnode
@@ -128,7 +129,7 @@ export async function main(ns) {
 
         log(ns, "INFO: Auto-pilot engaged...", true, 'info');
         // The game does not allow boolean flags to be turned "off" via command line, only on. Since this gets saved, notify the user about how they can turn it off.
-        const flagsSet = ['disable-auto-destroy-bn', 'disable-bladeburner', 'disable-wait-for-4s', 'disable-rush-gangs', 'disable-corporation'].filter(f => options[f]);
+        const flagsSet = ['disable-auto-destroy-bn', 'disable-bladeburner', 'disable-wait-for-4s', 'disable-rush-gangs', 'disable-corporation', 'disable-darknet'].filter(f => options[f]);
         for (const flag of flagsSet)
             log(ns, `WARNING: You have previously enabled the flag "--${flag}". Because of the way this script saves its run settings, the ` +
                 `only way to now turn this back off will be to manually edit or delete the file ${ns.getScriptName()}.config.txt`, true);
@@ -597,6 +598,8 @@ export async function main(ns) {
                     `Needs ${formatRam(corporationLauncherRam)}, free ${formatRam(homeFreeRam)} / max ${formatRam(homeRam)}.`);
         }
 
+        await maybeLaunchDarknetAutomation(ns, findScript);
+
         // Spend hacknet hashes on our boosting best hack-income server once established
         let existingSpendHashesProc = findScript('spend-hacknet-hashes.js', s => s.args.includes("--spend-on-server"))
         if ((9 in unlockedSFs) && getTimeInAug() >= options['time-before-boosting-best-hack-server']
@@ -800,6 +803,26 @@ export async function main(ns) {
             // NOTE: Default work-for-factions behaviour is to spend hashes on coding contracts, which suits us fine
             launchScriptHelper(ns, 'work-for-factions.js', rushGang ? rushGangsArgs : workForFactionsArgs);
         }
+    }
+
+    /** Launch Darknet automation once Bitburner 3.0 DarkscapeNavigator access is available.
+     * @param {NS} ns
+     * @param {(baseScriptName: string, filter?: (value: ProcessInfo, index: number, array: ProcessInfo[]) => unknown) => ProcessInfo} findScript */
+    async function maybeLaunchDarknetAutomation(ns, findScript) {
+        if (options['disable-darknet']) return;
+        if (!ns.fileExists('Tasks/darknet-manager.js', 'home')) return;
+        if (findScript('Tasks/darknet-manager.js')) return;
+
+        const darknetArgs = [];
+        if (options['no-tail-windows']) darknetArgs.push('--no-tail-windows');
+        const darknetLauncher = getFilePath('Tasks/darknet-manager.js');
+        const darknetLauncherRam = ns.getScriptRam(darknetLauncher, 'home');
+        const homeFreeRam = homeRam - await getNsDataThroughFile(ns, `ns.getServerUsedRam(ns.args[0])`, null, ["home"]);
+        if (darknetLauncherRam <= homeFreeRam)
+            launchScriptHelper(ns, 'Tasks/darknet-manager.js', darknetArgs);
+        else
+            log_once(ns, `INFO: Waiting to launch darknet automation until home has enough free RAM for Tasks/darknet-manager.js. ` +
+                `Needs ${formatRam(darknetLauncherRam)}, free ${formatRam(homeFreeRam)} / max ${formatRam(homeRam)}.`);
     }
 
     /** Buy exactly one missing BN10 Covenant sleeve infrastructure item when cash is already available.
