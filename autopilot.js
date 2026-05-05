@@ -548,6 +548,8 @@ export async function main(ns) {
 
         const stockmasterLiquidating = findScript('stockmaster.js', s => s.args.includes("--liquidate") || s.args.includes("-l"));
         const stockmasterTrading = findScript('stockmaster.js', s => !s.args.includes("--liquidate") && !s.args.includes("-l"));
+        if ((2 in unlockedSFs) && !playerInGang)
+            playerInGang = await getNsDataThroughFile(ns, 'ns.gang.inGang()');
         if (bn10SleevesIncomplete && bn10SleeveReserve > 0 && cachedStocksValue > 0 && player.money < bn10SleeveReserve &&
             player.money + cachedStocksValue >= bn10SleeveReserve && !stockmasterLiquidating) {
             log(ns, `INFO: Liquidating stocks because BN10 Covenant sleeve/memory purchase is affordable by net worth, but not cash.`);
@@ -559,9 +561,11 @@ export async function main(ns) {
 
         // Launch stock-master in a way that emphasizes it as our main source of income early-on
         if (!stockmasterLiquidating && !disableStockmasterForDaedalus && homeRam >= 32) {
-            const stockCashFraction = bn10SleevesIncomplete ? 0.001 : 0.1;
+            const stockCashFraction = (resetInfo.currentNode == 8 || bn10SleevesIncomplete) ? 0.001 : 0.1;
+            const stockBuyFraction = (resetInfo.currentNode == 8 || bn10SleevesIncomplete) ? 0.001 : 0.4;
             const stockmasterArgs = [
                 "--fracH", stockCashFraction, // Fraction of wealth to keep as cash
+                "--fracB", stockBuyFraction, // Start buying once cash rises above this fraction of corpus
                 "--reserve", 0, // Stockmaster is allowed to invest; autopilot liquidates when a BN10 sleeve purchase becomes affordable
             ];
             const getArgValue = (args, flag, fallback = null) => {
@@ -570,9 +574,10 @@ export async function main(ns) {
             };
             const stockmasterNeedsRestart = stockmasterTrading &&
                 (Number(getArgValue(stockmasterTrading.args, "--fracH", Number.NaN)) != stockCashFraction ||
-                    Number(getArgValue(stockmasterTrading.args, "--reserve", Number.NaN)) != stockmasterArgs[3]);
+                    Number(getArgValue(stockmasterTrading.args, "--fracB", Number.NaN)) != stockBuyFraction ||
+                    Number(getArgValue(stockmasterTrading.args, "--reserve", Number.NaN)) != 0);
             if (stockmasterNeedsRestart) {
-                log(ns, `INFO: Restarting stockmaster.js with reserve ${formatMoney(stockmasterArgs[3])} for BN10 Covenant sleeves/memory.`);
+                log(ns, `INFO: Restarting stockmaster.js with fracH=${stockCashFraction}, fracB=${stockBuyFraction}, reserve ${formatMoney(0)}.`);
                 await killScript(ns, 'stockmaster.js', runningScripts, stockmasterTrading);
                 launchScriptHelper(ns, 'stockmaster.js', stockmasterArgs);
             } else if (!stockmasterTrading)
@@ -795,9 +800,12 @@ export async function main(ns) {
             if (wrongWork) await killScript(ns, 'work-for-factions.js', null, wrongWork);
 
             // Start gangs immediately (even though daemon would eventually start it) since we want any income they provide right away after an ascend
-            // TODO: Consider monitoring gangs territory progress and increasing their budget / decreasing their reserve to help kick-start them
-            if (playerInGang && !findScript('gangs.js'))
-                launchScriptHelper(ns, 'gangs.js');
+            if (playerInGang && !findScript('gangs.js')) {
+                const gangArgs = resetInfo.currentNode == 8 ?
+                    ["--money-focus", "--reserve", 0, "--equipment-budget", 0, "--augmentations-budget", 0] :
+                    [];
+                launchScriptHelper(ns, 'gangs.js', gangArgs);
+            }
         }
 
         // Launch work-for-factions if it isn't already running (rules for maybe killing unproductive instances are above)

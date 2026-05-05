@@ -1,6 +1,6 @@
 import {
     instanceCount, getConfiguration, getNsDataThroughFile, getFilePath, getActiveSourceFiles, tryGetBitNodeMultipliers,
-    formatDuration, formatMoney, formatNumberShort, disableLogs, log, getErrorInfo, tail, devConsole, getStocksValue
+    formatDuration, formatMoney, formatNumberShort, disableLogs, log, getErrorInfo, tail, devConsole, getStocksValue, waitForProcessToComplete
 } from './helpers.js'
 
 let options;
@@ -129,6 +129,7 @@ let firstFactions, skipFactions, completedFactions, softCompletedFactions, mostE
 let scriptPid = "?";
 let recentHospitalizedLocations = {};
 let recentFactionInviteDeferrals = {};
+let moneyGateStatus = null;
 let bitNodeMults = (/**@returns{BitNodeMultipliers}*/() => undefined)(); // Trick to get strong typing in mono
 let netburnersEligibility = { nodes: 0, levels: 0, ram: 0, cores: 0, ready: false };
 let lastMoneyFallbackStatus = "";
@@ -159,6 +160,13 @@ function deferFactionInvite(ns, factionName, message, cooldownMs = 5 * 60 * 1000
         ns.print(message);
     }
     return "deferred";
+}
+
+function recordMoneyGateStatus(factionName, requirement, cash, stockValue) {
+    const netWorth = cash + stockValue;
+    const missing = Math.max(0, requirement - netWorth);
+    if (!moneyGateStatus || missing < moneyGateStatus.missing)
+        moneyGateStatus = { factionName, requirement, cash, stockValue, netWorth, missing };
 }
 
 function isCompanyInviteFaction(factionName) {
@@ -399,6 +407,7 @@ async function mainLoop(ns) {
         return;
     }
     await refreshNetburnersEligibility(ns);
+    moneyGateStatus = null;
 
     // Remove Fulcrum from our "EarlyFactionOrder" if hack level is insufficient to backdoor their server
     let priorityFactions = options['crime-focus'] ? preferredCrimeFactionOrder.slice() : preferredEarlyFactionOrder.slice();
@@ -503,6 +512,10 @@ async function mainLoop(ns) {
     if (!foundWork) { // If our hands are tied, wait and re-check later rather than farming money with no explicit target.
         if (allIncompleteFactions.length == 0 && factionsNeedingMoreRep.length == 0)
             ns.print(`INFO: Nothing to do. All relevant factions are already complete or intentionally skipped. Sleeping for 30 seconds.`);
+        else if (moneyGateStatus)
+            ns.print(`INFO: Waiting for cash/stock growth for money-gated faction invites. Closest: "${moneyGateStatus.factionName}" needs ` +
+                `${formatMoney(moneyGateStatus.requirement)}; cash ${formatMoney(moneyGateStatus.cash)}, stock ${formatMoney(moneyGateStatus.stockValue)}, ` +
+                `missing net worth ${formatMoney(moneyGateStatus.missing)}. Sleeping for 30 seconds.`);
         else
             ns.print(`INFO: Nothing to do. Sleeping for 30 seconds to see if magically we join a faction`);
         await ns.sleep(30000);
@@ -738,10 +751,25 @@ async function earnFactionInvite(ns, factionName) {
     }
     if (breakToMainLoop()) return false;
 
-    // Skip factions whose remaining requirement is money. Earning money is primarily the responsibility of other scripts.
-    // TODO: It might be reasonable to request a temporary stock liquidation if this would get us over the edge.
-    if ((requirement = requiredMoneyByFaction[factionName]) && player.money < requirement)
-        return ns.print(`${reasonPrefix} you have insufficient money. Need: ${formatMoney(requirement)}, Have: ${formatMoney(player.money)}`);
+    if ((requirement = requiredMoneyByFaction[factionName]) && player.money < requirement) {
+        const stockValue = await getStocksValue(ns);
+        const netWorth = player.money + stockValue;
+        if (isBn8() && netWorth >= requirement * 1.001) {
+            const pid = ns.run(getFilePath('stockmaster.js'), 1, '--liquidate');
+            if (!pid)
+                return ns.print(`${reasonPrefix} you have insufficient cash and failed to launch stock liquidation. ` +
+                    `Need: ${formatMoney(requirement)}, Cash: ${formatMoney(player.money)}, Stock: ${formatMoney(stockValue)}.`);
+            ns.print(`Liquidating ${formatMoney(stockValue)} in stocks to meet "${factionName}" money requirement. ` +
+                `Need: ${formatMoney(requirement)}, Cash: ${formatMoney(player.money)}, Net worth: ${formatMoney(netWorth)}.`);
+            await waitForProcessToComplete(ns, pid);
+            player = await getPlayerInfo(ns);
+        }
+        if (player.money < requirement)
+            recordMoneyGateStatus(factionName, requirement, player.money, stockValue);
+        if (player.money < requirement)
+            return deferFactionInvite(ns, factionName, `${reasonPrefix} you have insufficient money. Need: ${formatMoney(requirement)}, ` +
+                `Cash: ${formatMoney(player.money)}, Stock: ${formatMoney(stockValue)}, Missing net worth: ${formatMoney(Math.max(0, requirement - netWorth))}.`, 60 * 1000);
+    }
 
     // If travelling can help us join a faction - we can do that too
     player = await getPlayerInfo(ns);

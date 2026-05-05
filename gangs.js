@@ -436,14 +436,24 @@ async function tryUpgradeMembers(ns, dictMembers) {
     const playerData = await getNsDataThroughFile(ns, 'ns.getPlayer()');
     const homeMoney = playerData.money - (options['reserve'] != null ? options['reserve'] : Number(ns.read("reserve.txt") || 0));
     const maxBudget = 0.99; // Note: To avoid rounding issues and micro-spend race-conditions, only allow budgeting up to 99% of money per tick
-    let budget = Math.min(maxBudget, (options['equipment-budget'] || defaultMaxSpendPerTickTransientEquipment)) * homeMoney;
-    let augBudget = Math.min(maxBudget, (options['augmentations-budget'] || defaultMaxSpendPerTickPermanentEquipment)) * homeMoney;
+    const explicitEquipmentBudget = options['equipment-budget'] != null;
+    const explicitAugmentationBudget = options['augmentations-budget'] != null;
+    let budget = Math.min(maxBudget, explicitEquipmentBudget ? options['equipment-budget'] : defaultMaxSpendPerTickTransientEquipment) * homeMoney;
+    let augBudget = Math.min(maxBudget, explicitAugmentationBudget ? options['augmentations-budget'] : defaultMaxSpendPerTickPermanentEquipment) * homeMoney;
     // Hack: Default aug budget is cut by 1/100 in a few situations (TODO: Add more, like when BitnodeMults are such that gang income is severely nerfed)
     if (!is4sBought)
         is4sBought = await getNsDataThroughFile(ns, `ns.stock.has4SDataTixApi()`);
     if (!is4sBought || resetInfo.currentNode === 8) {
-        budget /= 100;
-        augBudget /= 100;
+        if (explicitEquipmentBudget && explicitAugmentationBudget) {
+            // Explicit budgets are assumed to come from the caller's BN strategy. Keep the conservative fallback only for defaults.
+        } else if (explicitEquipmentBudget) {
+            augBudget /= 100;
+        } else if (explicitAugmentationBudget) {
+            budget /= 100;
+        } else {
+            budget /= 100;
+            augBudget /= 100;
+        }
     }
     // Find out what outstanding equipment can be bought within our budget
     for (const equip of equipments) {

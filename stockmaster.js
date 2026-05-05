@@ -504,26 +504,35 @@ async function doBuy(ns, stk, sharesToBuy) {
 /** @param {NS} ns
  * Sell our current position in this stock. */
 async function doSellAll(ns, stk) {
-    let long = stk.sharesLong > 0;
-    if (long && stk.sharesShort > 0) // Detect any issues here - we should always sell one before buying the other.
-        log(ns, `ERROR: Somehow ended up both ${stk.sharesShort} short and ${stk.sharesLong} long on ${stk.sym}`, true, 'error');
+    if (stk.sharesLong > 0 && stk.sharesShort > 0)
+        log(ns, `WARNING: Found both ${stk.sharesShort} short and ${stk.sharesLong} long on ${stk.sym}. Closing both positions.`, true, 'warning');
+    let revenue = 0;
+    if (stk.sharesLong > 0)
+        revenue += await doSellPosition(ns, stk, true);
+    if (stk.sharesShort > 0)
+        revenue += await doSellPosition(ns, stk, false);
+    return revenue;
+}
+
+/** @param {NS} ns */
+async function doSellPosition(ns, stk, long) {
     let expectedPrice = long ? stk.bid_price : stk.ask_price; // Depends on whether we will be selling a long or short position
     let sharesSold = long ? stk.sharesLong : stk.sharesShort;
     let price = mock ? expectedPrice : await transactStock(ns, stk.sym, sharesSold, long ? 'sellStock' : 'sellShort');
-    const profit = (long ? stk.sharesLong * (price - stk.boughtPrice) : stk.sharesShort * (stk.boughtPriceShort - price)) - 2 * commission;
-    log(ns, `${profit > 0 ? 'SUCCESS' : 'WARNING'}: Sold all ${formatNumberShort(sharesSold, 3, 3).padStart(5)} ${stk.sym.padEnd(5)} ${long ? ' long' : 'short'} positions ` +
-        `@ ${formatMoney(price).padStart(9)} for a ` + (profit > 0 ? `PROFIT of ${formatMoney(profit).padStart(9)}` : ` LOSS  of ${formatMoney(-profit).padStart(9)}`) + ` after ${stk.ticksHeld} ticks`,
-        noisy, noisy ? (profit > 0 ? 'success' : 'error') : undefined);
     if (price == 0) {
         log(ns, `ERROR: Failed to sell ${sharesSold} ${stk.sym} ${long ? 'shares' : 'shorts'} @ ${formatMoney(expectedPrice)} - 0 was returned.`, true, 'error');
         return 0;
     } else if (price != expectedPrice) {
         log(ns, `WARNING: Sold ${stk.sym} ${long ? 'shares' : 'shorts'} @ ${formatMoney(price)} but expected ${formatMoney(expectedPrice)} (spread: ${formatMoney(stk.spread)})`, false, 'warning');
-        price = expectedPrice; // Known Bitburner bug for now, sellSort returns "price" instead of "ask_price". Correct this so running profit calcs are correct.
+        price = expectedPrice; // Known Bitburner bug for now, sellShort returns "price" instead of "ask_price". Correct this so running profit calcs are correct.
     }
+    const profit = (long ? sharesSold * (price - stk.boughtPrice) : sharesSold * (stk.boughtPriceShort - price)) - 2 * commission;
+    log(ns, `${profit > 0 ? 'SUCCESS' : 'WARNING'}: Sold all ${formatNumberShort(sharesSold, 3, 3).padStart(5)} ${stk.sym.padEnd(5)} ${long ? ' long' : 'short'} positions ` +
+        `@ ${formatMoney(price).padStart(9)} for a ` + (profit > 0 ? `PROFIT of ${formatMoney(profit).padStart(9)}` : ` LOSS  of ${formatMoney(-profit).padStart(9)}`) + ` after ${stk.ticksHeld} ticks`,
+        noisy, noisy ? (profit > 0 ? 'success' : 'error') : undefined);
     if (long) stk.sharesLong -= sharesSold; else stk.sharesShort -= sharesSold; // Maintained for mock mode, otherwise, redundant (overwritten at next refresh)
     totalProfit += profit;
-    return price * sharesSold - commission; // Return the amount of money recieved from the transaction
+    return (long ? price : 2 * stk.boughtPriceShort - price) * sharesSold - commission; // Return the amount of money recieved from the transaction
 }
 
 let formatBP = fraction => formatNumberShort(fraction * 100 * 100, 3, 2) + " BP";

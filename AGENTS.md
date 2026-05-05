@@ -52,6 +52,8 @@ Project-specific guidance for coding agents working in `bitburner-scripts`.
 
 - Default automation should avoid company-work grinding unless intentionally enabled.
 - Avoid arbitrary crime fallback behavior with no concrete goal.
+- In BN8, for money-gated faction invites, consider liquidatable stock value before declaring the invite impossible. If cash plus stock value satisfies the requirement, liquidate stocks and retry the invite path. Do not apply this broadly to other BNs without a concrete reason.
+- When money-gated faction invites are blocked, throttle repeated per-faction logs and emit a concise waiting status with cash, stock value, and the closest missing net-worth gap.
 - Do not use crimes as generic combat-stat training when a faction invite needs specific strength/defense/dexterity/agility thresholds. Use crimes only for kills/karma, then train deficient combat stats directly at the gym.
 - Before gym combat training, estimate per-stat ETA from current exp/multipliers and choose the fastest practical gym/stat. Do not imply gym training can raise all combat stats at once; `gymWorkout` only supports one of `str`, `def`, `dex`, or `agi`.
 - `autopilot.js` may launch corporation automation only when corporations are actually available: current BN3 or SF3.3+. Keep the launcher lightweight; do not import `corporation.js` from `run-corporation.js`.
@@ -63,8 +65,11 @@ Project-specific guidance for coding agents working in `bitburner-scripts`.
 - In BN8, do not buy new `NeuroFlux Governor` levels as part of the frequent-install path, but if NeuroFlux levels were already purchased and are awaiting install, install them rather than idling.
 - In BN8, already-purchased awaiting augmentations should override Daedalus-invite waiting heuristics. Leaving purchased augmentations uninstalled creates a price penalty and slows the cash-first loop.
 - Do not use global `reserve.txt` to hold cash in BN8; it slows stock/casino-driven progress. Keep only targeted safety checks that prevent going negative on paid actions.
+- In BN8, when waiting on money-gated faction invites or other cash-first blockers, keep stockmaster aggressive. Use a very low cash fraction and buy trigger so idle cash is invested instead of sitting below the default `--fracB` threshold.
+- In BN8, gang income is hard-capped by `GangSoftcap = 0`, so do not spend cash on gang upgrades for money. If a gang is active, run it as a no-budget money-focus background trickle and keep cash prioritized for stocks/casino/Daedalus.
 - In BN8, `autopilot.js` should keep `/Temp/affordable-augs.txt` fresh before install decisions; stale faction-manager output can incorrectly fall back to normal augmentation thresholds.
 - In BN8, do not kill the live `stockmaster.js` trader when liquidating unless explicitly requested. Preserving pre-4S tick history is critical; prefer `stockmaster.js --liquidate` with keep-trader behavior, or `--liquidate --kill-trader` only when a full reset is intentional.
+- If `stockmaster.js` detects an impossible mixed long/short position on the same symbol, close both positions and recover instead of only logging an error and leaving one side open.
 - Do not trigger installs purely because many augmentations are awaiting install if there is no money for additional purchases and more non-NeuroFlux augmentations remain.
 - `autopilot.js` timed `xp-mode` is not useful once hack level is already high; avoid reintroducing aggressive XP-mode relaunching at high hack.
 - Keep Bitburner 3.0 Darknet orchestration in `Tasks/darknet-manager.js`. `autopilot.js` should only keep the manager running, and Darknet scripts should avoid `tprint` in normal automation mode so they do not spam the main terminal.
