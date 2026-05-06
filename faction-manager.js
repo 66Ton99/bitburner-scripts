@@ -173,10 +173,15 @@ export async function main(ns) {
     installedAugmentations = (/**@returns {string[]}*/() => null)() ??
         await getNsDataThroughFile(ns, 'ns.singularity.getOwnedAugmentations()', '/Temp/player-augs-installed.txt');
     numAugsAwaitingInstall = ownedAugmentations.length - installedAugmentations.length;
-    if (options['neuroflux-disabled']) omitAugs.push(strNF);
-    else if (await shouldDisableNeuroFluxForBn10Sleeves(ns, ownedSourceFiles)) {
+    if (bitNode == 8) {
         options['neuroflux-disabled'] = true;
-        omitAugs.push(strNF);
+        if (!omitAugs.includes(strNF)) omitAugs.push(strNF);
+        log(ns, `INFO: Disabling ${strNF} purchases in BN8.`, printToTerminal);
+    } else if (options['neuroflux-disabled']) {
+        if (!omitAugs.includes(strNF)) omitAugs.push(strNF);
+    } else if (await shouldDisableNeuroFluxForBn10Sleeves(ns, ownedSourceFiles)) {
+        options['neuroflux-disabled'] = true;
+        if (!omitAugs.includes(strNF)) omitAugs.push(strNF);
         log(ns, `INFO: Disabling ${strNF} purchases because BN10 Covenant sleeves/memory are not complete yet.`, printToTerminal);
     }
     simulatedOwnedAugmentations = ignorePlayerData ? [] : ownedAugmentations.filter(a => a != strNF);
@@ -723,7 +728,10 @@ async function managePurchaseableAugs(ns, outputRows, accessibleAugs) {
     playerData = await getPlayerInfo(ns);
     const budget = Math.max(0, playerData.money + stockValue - getReservedCash());
     if (shouldOnlyBuyTrpInBn8()) {
+        const trp = augmentationData[augTRP];
         accessibleAugs = accessibleAugs.filter(aug => aug.name == augTRP);
+        if (accessibleAugs.length == 0 && trp?.getFromJoined() != null && trp.canAfford())
+            accessibleAugs = [trp];
         outputRows.push(`INFO: BN8 Red Pill mode: preserving cash and reset progress. Only ${augTRP} will be considered for purchase.`);
     }
     let totalRepCost, totalAugCost, dropped, restart;
@@ -859,11 +867,17 @@ async function managePurchaseableAugs(ns, outputRows, accessibleAugs) {
 /** @param {NS} ns
  * Purchase the desired augmentations */
 async function purchaseDesiredAugs(ns) {
-    let totalRepCost = Object.values(purchaseFactionRepCosts).reduce((t, r) => t + r, 0);
-    let totalAugCost = getTotalCost(purchaseableAugs);
+    if (bitNode == 8 && purchaseableAugs.some(aug => aug.name == strNF)) {
+        purchaseableAugs = purchaseableAugs.filter(aug => aug.name != strNF);
+        log(ns, `INFO: Removed ${strNF} from the purchase order because BN8 must not buy it.`, printToTerminal);
+    }
+    let [purchaseCosts, totalRepCost, totalAugCost] = computeCosts(purchaseableAugs);
+    purchaseFactionRepCosts = purchaseCosts;
+    if (purchaseableAugs.length == 0)
+        return log(ns, `INFO: Cannot afford to buy any augmentations at this time.`, printToTerminal)
     // Refresh player data to get an accurate read of current money
     playerData = await getPlayerInfo(ns);
-    if (stockValue > 0) {
+    if (stockValue > 0 && totalAugCost + totalRepCost > 0) {
         const pid = ns.run(getFilePath('stockmaster.js'), 1, '--liquidate');
         if (!pid)
             return log(ns, `ERROR: Could not launch stockmaster.js --liquidate while holding stocks worth ${formatMoney(stockValue)}.`, printToTerminal, 'error');
@@ -891,7 +905,7 @@ async function purchaseDesiredAugs(ns) {
         [purchaseFactionRepCosts, totalRepCost, totalAugCost] = computeCosts(purchaseableAugs);
         spendableMoney = Math.max(0, playerData.money - getReservedCash());
     }
-    if (purchaseableAugs.length == 0 || totalAugCost + totalRepCost <= 0)
+    if (purchaseableAugs.length == 0)
         return log(ns, `INFO: Cannot afford to buy any augmentations at this time.`, printToTerminal)
     if (totalAugCost + totalRepCost > spendableMoney && totalAugCost + totalRepCost > spendableMoney * 1.1) // If we're way off affording this, something is probably wrong
         return log(ns, `ERROR: Purchase order total cost (${getCostString(totalAugCost, totalRepCost)})` +
