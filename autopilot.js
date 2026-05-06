@@ -1088,15 +1088,6 @@ export async function main(ns) {
             awaitingAugs.push(`${strNF} (x${facman.awaiting_install_count_nf})`)
         if (facman.affordable_count_nf > 0)
             affordableAugs.push(`${strNF} (x${facman.affordable_count_nf})`)
-
-        if (bn8FrequentInstall && facman.affordable_count_ex_nf > 0) {
-            log(ns, `INFO: BN8 frequent-install mode: purchasing ${facman.affordable_count_ex_nf} affordable non-NeuroFlux augmentations before installing.`);
-            ns.write(factionManagerOutputFile, "", "w");
-            const pid = launchScriptHelper(ns, 'faction-manager.js', ['--purchase', '--neuroflux-disabled']);
-            await waitForProcessToComplete(ns, pid, true);
-            return reservedPurchase = 0;
-        }
-
         // Determine whether we can afford enough augmentations to merit a reset
         let totalCost = facman.total_rep_cost + facman.total_aug_cost;
         const augSummary = `${pendingAugCount} of ${facman.unpurchased_count - 1} remaining augmentations` + // Unowned - 1 because we can always buy more Neuroflux
@@ -1106,13 +1097,34 @@ export async function main(ns) {
             augDetailLines.push(`\n  Awaiting install: [\"${awaitingAugs.join("\", \"")}\"]`);
         if (affordableAugs.length > 0)
             augDetailLines.push(`\n  Affordable now: [\"${affordableAugs.join("\", \"")}\"]`);
+        const bn8TrpReady = facman.affordable_augs.includes(augTRP) || facman.awaiting_install_augs.includes(augTRP);
+        const bn8DaedalusReady = player.factions.includes("Daedalus") ||
+            (playerInstalledAugCount >= bitNodeMults.DaedalusAugsRequirement && player.skills.hacking >= (2500 * 0.9));
+        const bn8RedPillMode = bn8FrequentInstall && !installedAugmentations.includes(augTRP) && (bn8DaedalusReady || bn8TrpReady);
+
+        if (bn8FrequentInstall && facman.affordable_count_ex_nf > 0 && (!bn8RedPillMode || facman.affordable_augs.includes(augTRP))) {
+            log(ns, `INFO: BN8 frequent-install mode: purchasing ${facman.affordable_count_ex_nf} affordable non-NeuroFlux augmentations before installing.`);
+            ns.write(factionManagerOutputFile, "", "w");
+            const pid = launchScriptHelper(ns, 'faction-manager.js', ['--purchase', '--neuroflux-disabled']);
+            await waitForProcessToComplete(ns, pid, true);
+            return reservedPurchase = 0;
+        } else if (bn8RedPillMode && facman.affordable_count_ex_nf > 0 && !facman.affordable_augs.includes(augTRP)) {
+            setStatus(ns, `BN8 Red Pill mode: not buying ${facman.affordable_count_ex_nf} non-TRP augmentation(s). ` +
+                `Preserving this reset and cash for Daedalus and "${augTRP}". Ready now: ${augSummary}` + augDetailLines.join(""));
+            return reservedPurchase = 0;
+        }
         let resetStatus = `Reserving ${formatMoney(totalCost)} to install ${augSummary}`
         let shouldReset = options['install-for-augs'].some(a => facman.affordable_augs.includes(a)) ||
             pendingAugCount >= augsNeeded || pendingAugInclNfCount >= augsNeededInclNf;
-        if (bn8FrequentInstall && facman.awaiting_install_count > 0 && facman.affordable_count_ex_nf == 0) {
+        if (bn8FrequentInstall && facman.awaiting_install_count > 0 && facman.affordable_count_ex_nf == 0 && (!bn8RedPillMode || bn8TrpReady)) {
             shouldReset = true;
             resetStatus = `BN8 frequent-install mode: installing already-purchased augmentations immediately after buying the current non-NeuroFlux batch.\n${resetStatus}`;
             options['install-countdown'] = 0;
+        } else if (bn8RedPillMode && facman.awaiting_install_count > 0 && !bn8TrpReady) {
+            shouldReset = false;
+            setStatus(ns, `BN8 Red Pill mode: not installing already-purchased non-TRP augmentation(s). ` +
+                `Preserving this reset for Daedalus and "${augTRP}". Ready now: ${augSummary}` + augDetailLines.join(""));
+            return reservedPurchase = 0;
         }
 
         // Heuristic: if we can afford 4 or more augs in the first ~20 minutes, it's usually worth doing a "quick install"
@@ -1129,6 +1141,12 @@ export async function main(ns) {
         }
 
         // If not ready to reset, but we can already afford some augmentations, buy them now and keep waiting for install timing later.
+        if (!shouldReset && bn8RedPillMode && !facman.affordable_augs.includes(augTRP)) {
+            setStatus(ns, `BN8 Red Pill mode is preserving this reset and cash until "${augTRP}" is affordable or awaiting install. ` +
+                `Ready now: ${augSummary}` + augDetailLines.join("") +
+                ` (\`run faction-manager.js --neuroflux-disabled\` for details)`, augSummary);
+            return reservedPurchase = 0;
+        }
         if (!shouldReset && (facman.affordable_count_ex_nf + facman.affordable_count_nf) > 0) {
             log(ns, `INFO: Purchasing currently affordable augmentations now rather than waiting for the install threshold.`);
             ns.write(factionManagerOutputFile, "", "w");
@@ -1140,7 +1158,7 @@ export async function main(ns) {
         // If not ready to reset, set a status with our progress and return
         if (!shouldReset) {
             if (bn8FrequentInstall) {
-                setStatus(ns, `BN8 frequent-install mode is waiting for any affordable or purchased non-NeuroFlux augmentation. ` +
+                setStatus(ns, `BN8 frequent-install mode is waiting for an affordable or purchased non-NeuroFlux augmentation. ` +
                     `Ready now: ${augSummary}` + augDetailLines.join("") +
                     ` (\`run faction-manager.js --neuroflux-disabled\` for details)`, augSummary);
                 return reservedPurchase = 0;
@@ -1232,6 +1250,13 @@ export async function main(ns) {
             (facmanOutput.purchased_count_ex_nf || 0) - (facmanOutput.installed_count_ex_nf || 0));
         const awaitingInclNfCount = facmanOutput.awaiting_install_count || 0;
         const alreadyMeetsInstallThreshold = awaitingNonNfCount >= augsNeeded || awaitingInclNfCount >= augsNeededInclNf;
+        const bn8DelayForRedPill = player.factions.includes("Daedalus") ||
+            (playerInstalledAugCount >= bitNodeMults.DaedalusAugsRequirement && player.skills.hacking >= (2500 * 0.9));
+        if (resetInfo.currentNode == 8 && !installedAugmentations.includes(augTRP) && bn8DelayForRedPill &&
+            !facmanOutput.affordable_augs.includes(augTRP) && !facmanOutput.awaiting_install_augs.includes(augTRP)) {
+            setStatus(ns, `BN8 Red Pill mode: not installing until "${augTRP}" is affordable or awaiting install.`);
+            return true;
+        }
         if (resetInfo.currentNode == 8 && awaitingInclNfCount > 0)
             return false;
         if (resetInfo.currentNode != 8 && !alreadyMeetsInstallThreshold && awaitingInclNfCount > 0 && affordableNowCount == 0 && remainingNonNfAugs > 0) {

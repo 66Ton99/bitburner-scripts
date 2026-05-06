@@ -130,6 +130,8 @@ let scriptPid = "?";
 let recentHospitalizedLocations = {};
 let recentFactionInviteDeferrals = {};
 let moneyGateStatus = null;
+let lastMoneyGateStatus = "";
+let lastMoneyGateStatusUpdate = 0;
 let bitNodeMults = (/**@returns{BitNodeMultipliers}*/() => undefined)(); // Trick to get strong typing in mono
 let netburnersEligibility = { nodes: 0, levels: 0, ram: 0, cores: 0, ready: false };
 let lastMoneyFallbackStatus = "";
@@ -165,8 +167,27 @@ function deferFactionInvite(ns, factionName, message, cooldownMs = 5 * 60 * 1000
 function recordMoneyGateStatus(factionName, requirement, cash, stockValue) {
     const netWorth = cash + stockValue;
     const missing = Math.max(0, requirement - netWorth);
+    if (isBn8() && moneyGateStatus?.factionName == "Daedalus" && factionName != "Daedalus")
+        return;
+    if (isBn8() && factionName == "Daedalus")
+        return moneyGateStatus = { factionName, requirement, cash, stockValue, netWorth, missing };
     if (!moneyGateStatus || missing < moneyGateStatus.missing)
         moneyGateStatus = { factionName, requirement, cash, stockValue, netWorth, missing };
+}
+
+function printMoneyGateStatus(ns) {
+    const statusPrefix = isBn8() && moneyGateStatus.factionName == "Daedalus" ?
+        `INFO: BN8 Daedalus/TRP cash push is waiting for net-worth growth.` :
+        `INFO: Waiting for cash/stock growth for money-gated faction invites.`;
+    const targetLabel = isBn8() && moneyGateStatus.factionName == "Daedalus" ? "Target" : "Closest";
+    const status = `${statusPrefix} ${targetLabel}: "${moneyGateStatus.factionName}" needs ${formatMoney(moneyGateStatus.requirement)}; ` +
+        `cash ${formatMoney(moneyGateStatus.cash)}, stock ${formatMoney(moneyGateStatus.stockValue)}, ` +
+        `missing net worth ${formatMoney(moneyGateStatus.missing)}.`;
+    if (status == lastMoneyGateStatus && Date.now() - lastMoneyGateStatusUpdate < 5 * statusUpdateInterval)
+        return;
+    lastMoneyGateStatus = status;
+    lastMoneyGateStatusUpdate = Date.now();
+    ns.print(`${status} Sleeping for 30 seconds.`);
 }
 
 function isCompanyInviteFaction(factionName) {
@@ -513,9 +534,7 @@ async function mainLoop(ns) {
         if (allIncompleteFactions.length == 0 && factionsNeedingMoreRep.length == 0)
             ns.print(`INFO: Nothing to do. All relevant factions are already complete or intentionally skipped. Sleeping for 30 seconds.`);
         else if (moneyGateStatus)
-            ns.print(`INFO: Waiting for cash/stock growth for money-gated faction invites. Closest: "${moneyGateStatus.factionName}" needs ` +
-                `${formatMoney(moneyGateStatus.requirement)}; cash ${formatMoney(moneyGateStatus.cash)}, stock ${formatMoney(moneyGateStatus.stockValue)}, ` +
-                `missing net worth ${formatMoney(moneyGateStatus.missing)}. Sleeping for 30 seconds.`);
+            printMoneyGateStatus(ns);
         else
             ns.print(`INFO: Nothing to do. Sleeping for 30 seconds to see if magically we join a faction`);
         await ns.sleep(30000);
@@ -766,6 +785,8 @@ async function earnFactionInvite(ns, factionName) {
         }
         if (player.money < requirement)
             recordMoneyGateStatus(factionName, requirement, player.money, stockValue);
+        if (player.money < requirement && isBn8())
+            return "deferred";
         if (player.money < requirement)
             return deferFactionInvite(ns, factionName, `${reasonPrefix} you have insufficient money. Need: ${formatMoney(requirement)}, ` +
                 `Cash: ${formatMoney(player.money)}, Stock: ${formatMoney(stockValue)}, Missing net worth: ${formatMoney(Math.max(0, requirement - netWorth))}.`, 60 * 1000);

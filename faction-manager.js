@@ -18,6 +18,7 @@ const output_file = "/Temp/affordable-augs.txt"; // Temp file produced for autop
 const staneksGift = "Stanek's Gift - Genesis";
 const shadowsOfAnarchy = "Shadows of Anarchy";
 const soaWksHarmonizer = "SoA - phyzical WKS harmonizer";
+const augTRP = "The Red Pill";
 // Factors used in calculations
 const nfCountMult = 1.14; // Factors that control how NeuroFlux prices scale
 let augCountMult = 1.9; // The multiplier for the cost increase of augmentations (changes based on SF11 level)
@@ -25,7 +26,7 @@ let augCountMult = 1.9; // The multiplier for the cost increase of augmentations
 let playerData = (/**@returns{Player}*/() => null)(), bitNode = 0, gangFaction = "";
 let numAugsAwaitingInstall = 0, nfLevelPurchased = 0, startingPlayerMoney = 0, stockValue = 0; // If the player holds stocks, their liquidation value will be determined
 let factionNames = [""], joinedFactions = [""], desiredAugs = [""], desiredStatsFilters = [""], purchaseFactionRepCosts = [];
-let ownedAugmentations = [""], simulatedOwnedAugmentations = [""], allAugStats = [""], priorityAugs = [""];
+let ownedAugmentations = [""], installedAugmentations = [""], simulatedOwnedAugmentations = [""], allAugStats = [""], priorityAugs = [""];
 let effectiveSourceFiles = (/**@returns {{[bitNode: number]: number}}*/() => ({}))();
 let factionData = (/**@returns {{[factionName: string]: FactionData}}*/() => ({}))();
 let augmentationData = (/**@returns {{[augmentationName: string]: AugmentationData}}*/() => ({}))();
@@ -36,6 +37,13 @@ let _ns; // Used to avoid passing ns to functions that don't need it except for 
 
 function getReservedCash() {
     return bitNode == 8 ? 0 : Number(_ns?.read("reserve.txt") || 0);
+}
+
+function shouldOnlyBuyTrpInBn8() {
+    if (bitNode != 8 || ownedAugmentations.includes(augTRP)) return false;
+    return playerData.factions.includes("Daedalus") ||
+        (installedAugmentations.filter(aug => aug != strNF).length >= bitNodeMults.DaedalusAugsRequirement &&
+            playerData.skills.hacking >= (2500 * 0.9));
 }
 
 /** @param {NS} ns @param {{[bitNode: number]: number}} ownedSourceFiles */
@@ -120,7 +128,7 @@ export async function main(ns) {
     // Ensure all globals are reset before we proceed with the script, in case we've done things out of order
     augCountMult = playerData = gangFaction = nfLevelPurchased = startingPlayerMoney = stockValue = null;
     factionNames = [], joinedFactions = [], desiredAugs = [], desiredStatsFilters = [], purchaseFactionRepCosts = [];
-    ownedAugmentations = [], simulatedOwnedAugmentations = [], effectiveSourceFiles = {}, allAugStats = [], priorityAugs = [], purchaseableAugs = [];
+    ownedAugmentations = [], installedAugmentations = [], simulatedOwnedAugmentations = [], effectiveSourceFiles = {}, allAugStats = [], priorityAugs = [], purchaseableAugs = [];
     factionData = {}, augmentationData = {}, bitNodeMults = {};
 
     printToTerminal = (options.v || options.verbose === true || options.verbose === null) && !options['join-only'];
@@ -162,7 +170,7 @@ export async function main(ns) {
     log(ns, 'In factions: ' + joinedFactions);
     // Get owned augmentations (whether they've been installed or not). Ignore strNF because you can always buy more.
     ownedAugmentations = await getNsDataThroughFile(ns, 'ns.singularity.getOwnedAugmentations(true)', '/Temp/player-augs-purchased.txt');
-    const installedAugmentations = (/**@returns {string[]}*/() => null)() ??
+    installedAugmentations = (/**@returns {string[]}*/() => null)() ??
         await getNsDataThroughFile(ns, 'ns.singularity.getOwnedAugmentations()', '/Temp/player-augs-installed.txt');
     numAugsAwaitingInstall = ownedAugmentations.length - installedAugmentations.length;
     if (options['neuroflux-disabled']) omitAugs.push(strNF);
@@ -714,6 +722,10 @@ async function managePurchaseableAugs(ns, outputRows, accessibleAugs) {
     // Refresh player data to get an accurate read of current money
     playerData = await getPlayerInfo(ns);
     const budget = Math.max(0, playerData.money + stockValue - getReservedCash());
+    if (shouldOnlyBuyTrpInBn8()) {
+        accessibleAugs = accessibleAugs.filter(aug => aug.name == augTRP);
+        outputRows.push(`INFO: BN8 Red Pill mode: preserving cash and reset progress. Only ${augTRP} will be considered for purchase.`);
+    }
     let totalRepCost, totalAugCost, dropped, restart;
     // We will make every effort to keep "priority" augs in the purchase order, but start dropping them if we find we cannot afford them all
     const inaccessiblePriorityAugs = priorityAugs.filter(name => {
