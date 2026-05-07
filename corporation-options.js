@@ -14,4 +14,5 @@ export const argsSchema = [
     ['price-discovery-only', false], // Don't do any auto-buying, just try to keep the sale price balanced as high as possible. (Emulating TA2 as best we can)
     ['first', 'Agriculture'], // What should we use for our first division? Agriculture works well, but others should be fine too.
     ['second', 'Real Estate'], // What should we prefer for our second division? If we can't afford it, we'll buy what we can afford instead.
+    ['no-tail-windows', false], // Suppress tail windows when launched by daemon.js default no-tail orchestration.
 ];

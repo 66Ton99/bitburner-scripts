@@ -67,9 +67,10 @@ export async function main(ns) {
     const gameScript = game === 'blackjack' ? 'casino-blackjack.js' :
         game === 'roulette' ? 'casino-roulette.js' : null;
     if (gameScript) {
-        const pid = ns.run(gameScript, 1, ...filterArgsForGame(game, ns.args));
-        if (!pid)
-            ns.tprint(`ERROR: Failed to launch ${gameScript} from casino.js.`);
+        ns.spawn(gameScript, {
+            threads: 1,
+            spawnDelay: 100,
+        }, ...filterArgsForGame(game, ns.args));
         return;
     }
 

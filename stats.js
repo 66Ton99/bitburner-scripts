@@ -315,8 +315,8 @@ async function getHudData(ns, bitNode, dictSourceFiles, options) {
         // Bitburner bug: Trace amounts of share power sometimes left over after we stop sharing
         if (sharePower > 1.0001) {
             val.push(true, formatNumberShort(sharePower, 3, 2),
-                "Uses RAM to boost faction reputation gain rate while working for factions (tapers off at ~1.65) " +
-                "\nRun `daemon.js` with the `--no-share` flag to disable.");
+                "Uses RAM to boost faction reputation gain rate while working for factions (tapers off at ~1.65). " +
+                "Current daemon/hack orchestration does not schedule share work.");
         } else val.push(false)
         hudData.push(val)
     }

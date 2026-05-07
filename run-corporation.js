@@ -24,7 +24,8 @@ export async function main(ns) {
 				await ns.scp(scriptName, hostname);
 				await ns.scp(scriptDependencies, hostname);
 				let pid = ns.exec(scriptName, hostname, 1, ...ns.args);
-				ns.ui.openTail(pid);
+				if (!ns.args.includes("--no-tail-windows"))
+					ns.ui.openTail(pid);
 				ns.exit();
 			}
 		}

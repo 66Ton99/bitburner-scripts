@@ -7,6 +7,8 @@ const argsSchema = [
     ['install-augmentations', false], // By default, augs will only be purchased. Set this flag to install (a.k.a reset)
     /* OR */['reset', false], // An alias for the above flag, does the same thing.
     ['allow-soft-reset', false], // If set to true, allows ascend.js to invoke a **soft** reset (installs no augs) when no augs are affordable. This is useful e.g. when ascending rapidly to grind hacknet hash upgrades.
+    ['spend-all-before-install', false], // Before installing, spend all practical cash on permanent purchases/upgrades instead of preserving a RAM budget cushion.
+    ['cashroot-only', false], // Limit the final augmentation purchase pass to CashRoot Starter Kit.
     ['skip-staneks-gift', false], // By default, we get stanek's gift before our first install (except in BN8). If set to true, skip this step.
     /* Deprecated */['bypass-stanek-warning', false], // (Obsoleted by the above option) Used to warn you if you were installing augs without accepting stanek's gift
     // Spawn this script after installing augmentations (Note: Args not supported by the game)
@@ -16,6 +18,9 @@ const argsSchema = [
     ['prioritize-home-ram', false], // If set to true, will spend as much money as possible on upgrading home RAM before buying augmentations
     /* Deprecated */['prioritize-augmentations', true], // (Legacy flag, now ignored - left for backwards compatibility)
 ];
+
+const ascendVersion = "2026-05-06-cashroot-only.1";
+const augCashRoot = "CashRoot Starter Kit";
 
 export function autocomplete(data, args) {
     data.flags(argsSchema);
@@ -30,6 +35,7 @@ export function autocomplete(data, args) {
 export async function main(ns) {
     const options = getConfiguration(ns, argsSchema);
     if (!options) return; // Invalid options, or ran in --help mode.
+    log(ns, `INFO: ascend.js version ${ascendVersion}`, true, 'info');
     let dictSourceFiles = await getActiveSourceFiles(ns); // Find out what source files the user has unlocked
     if (!(4 in dictSourceFiles))
         return log(ns, "ERROR: You cannot automate installing augmentations until you have unlocked singularity access (SF4).", true, 'error');
@@ -72,7 +78,8 @@ export async function main(ns) {
     // STEP 2: Buy Home RAM Upgrades (more important than squeezing in a few extra augs)
     const spendOnHomeRam = async () => {
         log(ns, 'Try Upgrade Home RAM...', true, 'info');
-        pid = ns.run(getFilePath('Tasks/ram-manager.js'), 1, '--reserve', '0', '--budget', '0.8');
+        pid = ns.run(getFilePath('Tasks/ram-manager.js'), 1, '--reserve', '0', '--budget',
+            options['spend-all-before-install'] ? '1' : '0.8');
         await waitForProcessToComplete(ns, pid, true); // Wait for the script to shut down, indicating it has bought all it can.
     };
     if (options['prioritize-home-ram']) await spendOnHomeRam();
@@ -101,11 +108,15 @@ export async function main(ns) {
 
     // STEP 4: Buy as many desired augmentations as possible
     log(ns, 'Purchasing augmentations...', true, 'info');
-    const facmanArgs = ['--purchase', '-v'];
+    if (options['cashroot-only']) {
+        log(ns, `INFO: CashRoot-only mode: limiting faction-manager purchase pass to "${augCashRoot}".`, true, 'info');
+    }
     if (options['skip-staneks-gift']) {
         log(ns, 'INFO: Sending the --ignore-stanek argument to faction-manager.js')
-        facmanArgs.push('--ignore-stanek');
     }
+    const facmanArgs = ['--purchase', '-v'];
+    if (options['cashroot-only']) facmanArgs.push('--purchase-mode', 'cashroot-only');
+    if (options['skip-staneks-gift']) facmanArgs.push('--ignore-stanek');
     pid = ns.run(getFilePath('faction-manager.js'), 1, ...facmanArgs);
     await waitForProcessToComplete(ns, pid, true); // Wait for the script to shut down, indicating it is done.
 
@@ -184,9 +195,17 @@ export async function main(ns) {
 
     // STEP 4 REDUX: If somehow we have money left over and can afford some junk augs that weren't on our desired list, grab them too
     log(ns, 'Seeing if we can afford any other augmentations...', true, 'info');
-    facmanArgs.push('--stat-desired', '_'); // Means buy any aug with any stats
-    pid = ns.run(getFilePath('faction-manager.js'), 1, ...facmanArgs);
+    const finalFacmanArgs = [...facmanArgs];
+    if (!options['cashroot-only']) finalFacmanArgs.push('--purchase-mode', 'any');
+    pid = ns.run(getFilePath('faction-manager.js'), 1, ...finalFacmanArgs);
     await waitForProcessToComplete(ns, pid, true); // Wait for the script to shut down, indicating it is done.
+
+    if (options['spend-all-before-install']) {
+        log(ns, 'Spend-all mode: making one final pass over home RAM and cores before installing...', true, 'info');
+        await spendOnHomeRam();
+        pid = await runCommand(ns, `while(ns.singularity.upgradeHomeCores()); { await ns.sleep(10); }`, '/Temp/upgrade-home-cores-final.js');
+        await waitForProcessToComplete(ns, pid, true);
+    }
 
     // Clean up our temp folder - it's good to do this once in a while to reduce the save footprint
     // As well as to ensure that data written out on this bitnode don't confuse scripts in the next one.

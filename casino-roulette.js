@@ -1,4 +1,4 @@
-import { getFilePath, getNsDataThroughFile, getConfiguration, log, getErrorInfo, runCommand, tail, waitForProcessToComplete } from './helpers.js';
+import { getConfiguration, log, getErrorInfo, tail } from './helpers.js';
 import { checkForKickedOut, ensureInAevum, findCasinoSaveButton, navigateToCasino, openCasinoGame, saveCasinoGame } from './casino-lib.js';
 
 const chipGraphic = "data:image/svg+xml;base64,PD94bWwgdmVyc2lvbj0iMS4wIiBzdGFuZGFsb25lPSJubyI/PjwhLS0gR2VuZXJhdG9yOiBHcmF2aXQuaW8gLS0+PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHhtbG5zOnhsaW5rPSJodHRwOi8vd3d3LnczLm9yZy8xOTk5L3hsaW5rIiBzdHlsZT0iaXNvbGF0aW9uOmlzb2xhdGUiIHZpZXdCb3g9IjAgMCAzMDMuODI3IDMwMy44MjciIHdpZHRoPSIzMDMuODI3IiBoZWlnaHQ9IjMwMy44MjciPjxkZWZzPjxjbGlwUGF0aCBpZD0iX2NsaXBQYXRoX1F3ZDVKdFNJOWxpRXpSUGlLdGRBTElySmJFY1pNend4Ij48cmVjdCB3aWR0aD0iMzAzLjgyNyIgaGVpZ2h0PSIzMDMuODI3Ii8+PC9jbGlwUGF0aD48L2RlZnM+PGcgY2xpcC1wYXRoPSJ1cmwoI19jbGlwUGF0aF9Rd2Q1SnRTSTlsaUV6UlBpS3RkQUxJckpiRWNaTXp3eCkiPjxjbGlwUGF0aCBpZD0iX2NsaXBQYXRoX0J2c1FWeDczdVI5ejE3UmtRODZLNHBtMFEyQ3JRTUt0Ij48cmVjdCB4PSI3LjI0MSIgeT0iNy4yNDEiIHdpZHRoPSIyODkuMzQ1IiBoZWlnaHQ9IjI4OS4zNDUiIHRyYW5zZm9ybT0ibWF0cml4KDEsMCwwLDEsMCwwKSIgZmlsbD0icmdiKDI1NSwyNTUsMjU1KSIvPjwvY2xpcFBhdGg+PGcgY2xpcC1wYXRoPSJ1cmwoI19jbGlwUGF0aF9CdnNRVng3M3VSOXoxN1JrUTg2SzRwbTBRMkNyUU1LdCkiPjxnIGlkPSJHcm91cCI+PHBhdGggZD0iIE0gNDUuNDE0IDE1MS4yNDEgQyA0NS40MTQgOTIuNDYyIDkzLjEzNSA0NC43NDEgMTUxLjkxNCA0NC43NDEgQyAyMTAuNjkzIDQ0Ljc0MSAyNTguNDE0IDkyLjQ2MiAyNTguNDE0IDE1MS4yNDEgQyAyNTguNDE0IDIxMC4wMiAyMTAuNjkzIDI1Ny43NDEgMTUxLjkxNCAyNTcuNzQxIEMgOTMuMTM1IDI1Ny43NDEgNDUuNDE0IDIxMC4wMiA0NS40MTQgMTUxLjI0MSBaICIgZmlsbD0icmdiKDgsMTA4LDgpIi8+PHBhdGggZD0iIE0gMTUxLjI0MSAyNTguNDE0IEMgOTIuNDYyIDI1OC40MTQgNDQuNzQxIDIxMC42OTMgNDQuNzQxIDE1MS45MTQgQyA0NC43NDEgOTMuMTM1IDkyLjQ2MiA0NS40MTQgMTUxLjI0MSA0NS40MTQgQyAyMTAuMDIgNDUuNDE0IDI1Ny43NDEgOTMuMTM1IDI1Ny43NDEgMTUxLjkxNCBDIDI1Ny43NDEgMjEwLjY5MyAyMTAuMDIgMjU4LjQxNCAxNTEuMjQxIDI1OC40MTQgWiAiIGZpbGw9InJnYig4LDEwOCw4KSIvPjxwYXRoIGQ9IiBNIDIyNi43NDUgMjI3LjY5NiBDIDE4NS4xODIgMjY5LjI1OSAxMTcuNjk0IDI2OS4yNTkgNzYuMTMxIDIyNy42OTYgQyAzNC41NjggMTg2LjEzMyAzNC41NjggMTE4LjY0NSA3Ni4xMzEgNzcuMDgyIEMgMTE3LjY5NCAzNS41MTkgMTg1LjE4MiAzNS41MTkgMjI2Ljc0NSA3Ny4wODIgQyAyNjguMzA4IDExOC42NDUgMjY4LjMwOCAxODYuMTMzIDIyNi43NDUgMjI3LjY5NiBaICIgZmlsbD0icmdiKDgsMTA4LDgpIi8+PHBhdGggZD0iIE0gMjI3LjIyMSAyMjcuNjk2IEMgMTg1LjY1OCAyNjkuMjU5IDExOC4xNyAyNjkuMjU5IDc2LjYwNyAyMjcuNjk2IEMgMzUuMDQ0IDE4Ni4xMzMgMzUuMDQ0IDExOC42NDUgNzYuNjA3IDc3LjA4MiBDIDExOC4xNyAzNS41MTkgMTg1LjY1OCAzNS41MTkgMjI3LjIyMSA3Ny4wODIgQyAyNjguNzg0IDExOC42NDUgMjY4Ljc4NCAxODYuMTMzIDIyNy4yMjEgMjI3LjY5NiBaICIgZmlsbD0icmdiKDgsMTA4LDgpIi8+PHBhdGggZD0iIE0gMTg0LjkyMyA3LjI0MSBMIDExOC45MDQgNy4yNDEgTCAxMTguOTA0IDY1LjQ2OSBMIDE1MS4xNCA4NC45MzIgTCAxODQuOTIzIDY1LjQ2OSBMIDE4NC45MjMgNy4yNDEgWiAiIGZpbGwtcnVsZT0iZXZlbm9kZCIgZmlsbD0icmdiKDIzLDgzLDIzKSIvPjxwYXRoIGQ9IiBNIDcuMjQxIDExOC45MDQgTCA3LjI0MSAxODQuOTIzIEwgNjUuNDY5IDE4NC45MjMgTCA4NC45MzIgMTUyLjY4NyBMIDY1LjQ2OSAxMTguOTA0IEwgNy4yNDEgMTE4LjkwNCBaICIgZmlsbC1ydWxlPSJldmVub2RkIiBmaWxsPSJyZ2IoMjMsODMsMjMpIi8+PHBhdGggZD0iIE0gMjYuMjczIDIzMC44NzEgTCA3Mi45NTYgMjc3LjU1NCBMIDExNC4xMjkgMjM2LjM4MSBMIDEwNS4wOTcgMTk5LjgyNCBMIDY3LjQ0NyAxODkuNjk4IEwgMjYuMjczIDIzMC44NzEgWiAiIGZpbGwtcnVsZT0iZXZlbm9kZCIgZmlsbD0icmdiKDIzLDgzLDIzKSIvPjxwYXRoIGQ9IiBNIDcyLjk1NiAyNi4yNzMgTCAyNi4yNzMgNzIuOTU2IEwgNjcuNDQ3IDExNC4xMjkgTCAxMDQuMDAzIDEwNS4wOTcgTCAxMTQuMTI5IDY3LjQ0NyBMIDcyLjk1NiAyNi4yNzMgWiAiIGZpbGwtcnVsZT0iZXZlbm9kZCIgZmlsbD0icmdiKDIzLDgzLDIzKSIvPjxwYXRoIGQ9IiBNIDExOC45MDQgMjk2LjU4NiBMIDE4NC45MjMgMjk2LjU4NiBMIDE4NC45MjMgMjM4LjM1OCBMIDE1Mi42ODcgMjE4Ljg5NiBMIDExOC45MDQgMjM4LjM1OCBMIDExOC45MDQgMjk2LjU4NiBaICIgZmlsbC1ydWxlPSJldmVub2RkIiBmaWxsPSJyZ2IoMjMsODMsMjMpIi8+PHBhdGggZD0iIE0gMjk2LjU4NiAxODQuOTIzIEwgMjk2LjU4NiAxMTguOTA0IEwgMjM4LjM1OCAxMTguOTA0IEwgMjE4Ljg5NiAxNTEuMTQgTCAyMzguMzU4IDE4NC45MjMgTCAyOTYuNTg2IDE4NC45MjMgWiAiIGZpbGwtcnVsZT0iZXZlbm9kZCIgZmlsbD0icmdiKDIzLDgzLDIzKSIvPjxwYXRoIGQ9IiBNIDI3Ny41NTQgNzIuOTU2IEwgMjMwLjg3MSAyNi4yNzMgTCAxODkuNjk4IDY3LjQ0NyBMIDE5OC43MyAxMDQuMDAzIEwgMjM2LjM4MSAxMTQuMTI5IEwgMjc3LjU1NCA3Mi45NTYgWiAiIGZpbGwtcnVsZT0iZXZlbm9kZCIgZmlsbD0icmdiKDIzLDgzLDIzKSIvPjxwYXRoIGQ9IiBNIDIzMC44NzEgMjc3LjU1NCBMIDI3Ny41NTQgMjMwLjg3MSBMIDIzNi4zODEgMTg5LjY5OCBMIDE5OS44MjQgMTk4LjczIEwgMTg5LjY5OCAyMzYuMzgxIEwgMjMwLjg3MSAyNzcuNTU0IFogIiBmaWxsLXJ1bGU9ImV2ZW5vZGQiIGZpbGw9InJnYigyMyw4MywyMykiLz48L2c+PC9nPjxwYXRoIGQ9IiBNIDE1MS45MTMgMCBDIDIzNS43NTYgMCAzMDMuODI3IDY4LjA3MSAzMDMuODI3IDE1MS45MTMgQyAzMDMuODI3IDIzNS43NTYgMjM1Ljc1NiAzMDMuODI3IDE1MS45MTMgMzAzLjgyNyBDIDY4LjA3MSAzMDMuODI3IDAgMjM1Ljc1NiAwIDE1MS45MTMgQyAwIDY4LjA3MSA2OC4wNzEgMCAxNTEuOTEzIDAgWiAgTSAxNTEuOTEzIDEyLjMyOSBDIDIyNy45NDkgMTIuMzI5IDI4OS42ODUgNzQuODc2IDI4OS42ODUgMTUxLjkxMyBDIDI4OS42ODUgMjI4Ljk1NiAyMjcuOTQ5IDI5MS40OTggMTUxLjkxMyAyOTEuNTA0IEMgNzUuODc3IDI5MS41MDQgMTQuMTQyIDIyOC45NTYgMTQuMTQyIDE1MS45MTMgQyAxNC4xNDIgNzQuODc2IDc1Ljg3NyAxMi4zMjkgMTUxLjkxMyAxMi4zMjkgWiAgTSAxNTEuOTEzIDIxLjU2MyBDIDIyMy44NTQgMjEuNTYzIDI4Mi4yNjMgNzkuOTczIDI4Mi4yNjMgMTUxLjkxMyBDIDI4Mi4yNjMgMjIzLjg1NCAyMjMuODU0IDI4Mi4yNjMgMTUxLjkxMyAyODIuMjYzIEMgNzkuOTczIDI4Mi4yNjMgMjEuNTYzIDIyMy44NTQgMjEuNTYzIDE1MS45MTMgQyAyMS41NjMgNzkuOTczIDc5Ljk3MyAyMS41NjMgMTUxLjkxMyAyMS41NjMgWiAiIGZpbGwtcnVsZT0iZXZlbm9kZCIgZmlsbD0icmdiKDgsMTA4LDgpIi8+PHBhdGggZD0iIE0gMTUxLjkxMyAzNS42OTUgQyAyMTYuMDU1IDM1LjY5NSAyNjguMTMyIDg3Ljc3MSAyNjguMTMyIDE1MS45MTMgQyAyNjguMTMyIDIxNi4wNTUgMjE2LjA1NSAyNjguMTMyIDE1MS45MTMgMjY4LjEzMiBDIDg3Ljc3MSAyNjguMTMyIDM1LjY5NSAyMTYuMDU1IDM1LjY5NSAxNTEuOTEzIEMgMzUuNjk1IDg3Ljc3MSA4Ny43NzEgMzUuNjk1IDE1MS45MTMgMzUuNjk1IFogIE0gMTUxLjkxMyA0NS4xMjcgQyAyMTAuMDgzIDQ1LjEyNyAyNTcuMzEzIDkyLjk3OCAyNTcuMzEzIDE1MS45MTMgQyAyNTcuMzEzIDIxMC44NTQgMjEwLjA4MyAyNTguNyAxNTEuOTEzIDI1OC43MDUgQyA5My43NDMgMjU4LjcwNSA0Ni41MTQgMjEwLjg1NCA0Ni41MTQgMTUxLjkxMyBDIDQ2LjUxNCA5Mi45NzggOTMuNzQzIDQ1LjEyNyAxNTEuOTEzIDQ1LjEyNyBaICBNIDE1MS45MTMgNTIuMTkyIEMgMjA2Ljk1IDUyLjE5MiAyNTEuNjM1IDk2Ljg3NyAyNTEuNjM1IDE1MS45MTMgQyAyNTEuNjM1IDIwNi45NSAyMDYuOTUgMjUxLjYzNSAxNTEuOTEzIDI1MS42MzUgQyA5Ni44NzcgMjUxLjYzNSA1Mi4xOTIgMjA2Ljk1IDUyLjE5MiAxNTEuOTEzIEMgNTIuMTkyIDk2Ljg3NyA5Ni44NzcgNTIuMTkyIDE1MS45MTMgNTIuMTkyIFogIiBmaWxsLXJ1bGU9ImV2ZW5vZGQiIGZpbGw9InJnYigwLDAsMCkiLz48L2c+PC9zdmc+";
@@ -365,7 +365,6 @@ async function startAutoRoulette(ns) {
   const clickElement = async (button) => await click(ns, button);
   if (options['kill-all-scripts'] && ns.ls("home", "Temp/").length > 0) {
     await killAllOtherScripts(ns, !options['no-deleting-remote-files']);
-    await waitForProcessToComplete(ns, ns.run(getFilePath('cleanup.js')));
   }
   if (hasReachedCasinoLimit(ns))
     return await onCompletion(ns, false);
@@ -475,13 +474,24 @@ async function onCompletion(ns, kickedOutAfterPlaying = true) {
     log(ns, "SUCCESS: We've been kicked out of roulette.", true);
   else
     log(ns, "INFO: We appear to have been previously kicked out of roulette. Continuing without playing...", true);
+  dismissFactionInvitationModal(ns);
   const completionScript = options['on-completion-script'];
   if (!completionScript) return;
   const completionArgs = options['on-completion-script-args'];
-  if (ns.run(completionScript, 1, ...completionArgs))
-    log(ns, `INFO: casino-roulette.js shutting down and launching ${completionScript}...`, false, 'info');
-  else
-    log(ns, `WARNING: casino-roulette.js shutting down, but failed to launch ${completionScript}...`, false, 'warning');
+  log(ns, `INFO: casino-roulette.js shutting down and spawning ${completionScript}...`, false, 'info');
+  ns.spawn(completionScript, {
+    threads: 1,
+    spawnDelay: 100,
+  }, ...completionArgs);
+}
+
+function dismissFactionInvitationModal(ns) {
+  const button = Array.from(doc.querySelectorAll("button"))
+    .find(btn => btn.textContent?.trim() == "Decide later");
+  if (!button) return false;
+  button.click();
+  log(ns, "INFO: Dismissed faction invitation modal before casino completion handoff.", false, 'info');
+  return true;
 }
 
 async function reloadGame(ns) {
@@ -505,24 +515,30 @@ async function reloadGame(ns) {
 }
 
 async function killAllOtherScripts(ns, removeRemoteFiles) {
-  let pid = await runCommand(ns, `ns.ps().filter(s => s.filename != ns.args[0]).forEach(s => ns.kill(s.pid));`,
-    '/Temp/kill-everything-but.js', [ns.getScriptName()]);
-  await waitForProcessToComplete(ns, pid);
+  for (const script of ns.ps().filter(s => s.filename != ns.getScriptName()))
+    ns.kill(script.pid);
   log(ns, `INFO: Killed other scripts running on home...`, true);
 
-  const allServers = await getNsDataThroughFile(ns, 'scanAllServers(ns)');
-  const serversExceptHome = allServers.filter(s => s != "home");
-  pid = await runCommand(ns, 'ns.args.forEach(host => ns.killall(host))',
-    '/Temp/kill-all-scripts-on-servers.js', serversExceptHome);
-  await waitForProcessToComplete(ns, pid);
+  const serversExceptHome = scanAllServers(ns).filter(s => s != "home");
+  for (const host of serversExceptHome)
+    ns.killall(host);
   log(ns, 'INFO: Killed all scripts running on other hosts...', true);
 
-  if (removeRemoteFiles) {
-    pid = await runCommand(ns, 'ns.args.forEach(host => ns.ls(host).forEach(file => ns.rm(file, host)))',
-      '/Temp/delete-files-on-servers.js', serversExceptHome);
-    await waitForProcessToComplete(ns, pid);
-    log(ns, 'INFO: Removed all files on other hosts...', true);
+  if (removeRemoteFiles)
+    log(ns, 'INFO: Skipping remote file cleanup in low-RAM roulette handoff mode.', true);
+}
+
+function scanAllServers(ns) {
+  const discovered = new Set(["home"]);
+  const queue = ["home"];
+  for (const host of queue) {
+    for (const next of ns.scan(host)) {
+      if (discovered.has(next)) continue;
+      discovered.add(next);
+      queue.push(next);
+    }
   }
+  return [...discovered];
 }
 
 async function click(ns, button) {

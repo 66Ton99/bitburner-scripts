@@ -16,19 +16,13 @@ export async function main(ns) {
     const options = getConfiguration(ns, argsSchema);
     if (!options) return; // Invalid options, or ran in --help mode.
     const reserve = (options['reserve'] != null ? options['reserve'] : Number(ns.read("reserve.txt") || 0));
-    const money = await getNsDataThroughFile(ns, `ns.getServerMoneyAvailable(ns.args[0])`, null, ["home"]);
+    const money = ns.getServerMoneyAvailable("home");
     let spendable = Math.min(money - reserve, money * options.budget);
     if (isNaN(spendable))
         return log(ns, `ERROR: One of the arguments could not be parsed as a number: ${JSON.stringify(options)}`, true, 'error');
     // Quickly buy as many upgrades as we can within the budget
     do {
-        let cost;
-        try {
-            cost = await getNsDataThroughFile(ns, `ns.singularity.getUpgradeHomeRamCost()`);
-        } catch (error) {
-            return log(ns, `INFO: Cannot evaluate home RAM upgrade cost right now (${String(error)}). ` +
-                `This usually means there is not enough free RAM to run the temporary singularity helper script.`, true, 'info');
-        }
+        const cost = await getNsDataThroughFile(ns, `ns.singularity.getUpgradeHomeRamCost()`);
         let currentRam = await getNsDataThroughFile(ns, `ns.getServerMaxRam(ns.args[0])`, null, ["home"]);
         if (cost >= Number.MAX_VALUE || currentRam == max_ram)
             return log(ns, `INFO: We're at max home RAM (${formatRam(currentRam)})`);

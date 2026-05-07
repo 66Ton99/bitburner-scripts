@@ -18,6 +18,9 @@ const state = {
 	// Details/state of the current mini game.
 	// Is reset after every game.
 	game: {},
+
+	// Suppress dev-console status logs when automation starts this helper with --quiet.
+	quiet: false,
 };
 
 // Speed of game actions, in milliseconds. Default 22
@@ -468,12 +471,15 @@ const infiltrationGames = [
 
 /** @param {NS} ns **/
 export async function main(ns) {
+	ns.ramOverride(1.6);
 	const args = ns.flags([
 		["start", false],
 		["stop", false],
 		["status", false],
 		["quiet", false],
+		["debug", false],
 	]);
+	state.quiet = args.quiet && !args.debug;
 
 	function print(msg) {
 		if (!args.quiet) {
@@ -655,7 +661,8 @@ function waitForStart() {
 	state.started = true;
 	wrapEventListeners();
 
-	console.log("Start automatic infiltration of", state.company);
+	if (!state.quiet)
+		console.log("Start automatic infiltration of", state.company);
 	btnStart.click();
 }
 
@@ -676,7 +683,8 @@ function playGame() {
 	const bodyText = doc.body?.innerText || "";
 
 	if (bodyText.includes("Infiltration was cancelled because you were hospitalized")) {
-		console.error("Infiltration failed: hospitalized during", state.company || "unknown target");
+		if (!state.quiet)
+			console.error("Infiltration failed: hospitalized during", state.company || "unknown target");
 		endInfiltration();
 		return;
 	}
@@ -718,7 +726,8 @@ function playGame() {
 
 		game.play(screen);
 	} else {
-		console.error("Unknown game:", title);
+		if (!state.quiet)
+			console.error("Unknown game:", title);
 	}
 }
 
