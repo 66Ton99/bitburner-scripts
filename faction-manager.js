@@ -65,12 +65,9 @@ async function shouldDisableNeuroFluxForBn10Sleeves(ns, ownedSourceFiles) {
 let options = null; // A copy of the options used at construction time
 const argsSchema = [ // The set of all command line arguments
     ['all', false], // Display all factions (spoilers), not just accessible factions
-    ['a', false], // Flag-style alias for --all.
     ['hide-locked-factions', false], // Don't show factions that we don't currently have access to
     ['verbose', null], // Print the terminal as well as the script logs. If left null, this defaults to true in code now, but can be disabled with an explicit `--verbose false`
-    ['v', false], // (Kept for backwards compatilily) this was an alias flag for setting --verbose to true when it previously defaulted to false.
     ['ignore-player-data', false], // Display stats for all factions and augs, despite what we already have (kind of a "mock" mode)
-    ['i', false], // Flag alias for --ignore-player-data
     ['ignore-faction', []], // Factions to omit from all data, stats, and calcs, (e.g.) if you do not want to purchase augs from them, or do not want to see them because they are impractical to join at this time
     ['after-faction', []], // Pretend we were to buy all augs offered by these factions. Show us only what remains.
     ['force-join', null], // Always join these factions if we have an invite (useful to force join a gang faction)
@@ -90,7 +87,6 @@ const argsSchema = [ // The set of all command line arguments
     ['sort', null], // What stat is the table of total faction stats sorted by. Defaults to your first --stat-desired
     ['hide-stat', []], // Stats to exclude from the final table (partial matching works)
     ['unique', false], // When displaying cumulative stats by faction, only include augs not given by a faction further up the list
-    ['u', false], // Flag alias for --unique
 ];
 
 // For convenience, these lists provide command-line <tab> auto-complete values
@@ -146,7 +142,7 @@ function applyPurchaseMode(ns, runOptions) {
     return false;
 }
 
-// Flags -a for all factions, -v to print to terminal
+// Use --all to include all factions and --verbose false to suppress terminal output.
 /** @param {NS} ns **/
 export async function main(ns) {
     ns.disableLog('disableLog');
@@ -162,8 +158,8 @@ export async function main(ns) {
     ownedAugmentations = [], installedAugmentations = [], simulatedOwnedAugmentations = [], effectiveSourceFiles = {}, allAugStats = [], priorityAugs = [], purchaseableAugs = [];
     factionData = {}, augmentationData = {}, bitNodeMults = {};
 
-    printToTerminal = (options.v || options.verbose === true || options.verbose === null) && !options['join-only'];
-    ignorePlayerData = options.i || options['ignore-player-data'];
+    printToTerminal = (options.verbose === true || options.verbose === null) && !options['join-only'];
+    ignorePlayerData = options['ignore-player-data'];
     const afterFactions = options['after-faction'].map(f => f.replaceAll("_", " "));
     const omitAugs = options['omit-aug'].map(f => f.replaceAll("_", " "));
     // Set up augs which should take priority (in our purchase budget) over all others
@@ -268,7 +264,7 @@ export async function main(ns) {
     let hideSummaryStats = options['hide-stat'];
     if (hideSummaryStats.length == 0) hideSummaryStats = default_hidden_stats;
     const sort = unshorten(options.sort || desiredStatsFilters[0]);
-    displayFactionSummary(ns, sort, options.u || options.unique, afterFactions, hideSummaryStats);
+    displayFactionSummary(ns, sort, options.unique, afterFactions, hideSummaryStats);
 
     // Determine the current bitnode multipliers
     bitNodeMults = await tryGetBitNodeMultipliers(ns);
@@ -386,7 +382,7 @@ async function updateFactionData(ns, factionsToOmit) {
     // Add in factions the user hasn't seen. All factions by default, or a small subset of easy-access factions if --hide-locked-factions is set
     factionNames.push(...(options['hide-locked-factions'] ? easyAccessFactions : allFactions).filter(f => !factionNames.includes(f)));
     // Unless "all factions" is requested, omit factions that are in no way accessible on this reset
-    if (!(options.a || options.all)) {
+    if (!options.all) {
         if (!(13 in effectiveSourceFiles)) factionsToOmit.push("Church of the Machine God");
         if (!(6 in effectiveSourceFiles || 7 in effectiveSourceFiles)) factionsToOmit.push("Bladeburners");
     }
@@ -462,7 +458,7 @@ async function updateAugmentationData(ns) {
         aug, dictAugRepReqs[aug], dictAugPrices[aug], dictAugStats[aug], dictAugPrereqs[aug]
     )]));
     /** Helper function which will propagate the "desired" (priority) status to any dependencies of desired augs.
-     * Note when --all-factions mode is not enabled, it's possible some prereqs will be missing from our list
+     * Note when --all mode is not enabled, it's possible some prereqs will be missing from our list
      * @param {AugmentationData} aug */
     function propagateDesired(aug) {
         if (!aug.desired || !aug.prereqs) return;

@@ -148,7 +148,7 @@ async function getHudData(ns, bitNode, dictSourceFiles, options) {
                 const spendHashesScript = getFilePath('spend-hacknet-hashes.js');
                 const liquidatingHashes = await (/**@returns{Promise<ProcessInfo[]>}*/async () =>
                     await getNsDataThroughFile(ns,
-                        `ns.ps('home').filter(p => p.filename == ns.args[0] && (p.args.includes('--liquidate') || p.args.includes('-l')))`,
+                        `ns.ps('home').filter(p => p.filename == ns.args[0] && p.args.includes('--liquidate'))`,
                         '/Temp/hash-liquidation-scripts.txt', [spendHashesScript])
                 )();
                 if (liquidatingHashes.length > 0)

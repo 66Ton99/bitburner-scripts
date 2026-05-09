@@ -13,8 +13,7 @@ import {
 let options;
 const argsSchema = [
     // Behaviour-changing flags
-    ['x', false], // Focus on a strategy that produces the most hack EXP rather than money
-    ['xp-only', false], // Same as above
+    ['xp-only', false], // Focus on a strategy that produces the most hack EXP rather than money
     ['initial-study-time', 10], // Seconds. Set to 0 to not do any studying at startup. By default, if early in an augmentation, will start with a little study to boost hack XP
     ['initial-hack-xp-time', 10], // Seconds. Set to 0 to not do any hack-xp grinding at startup. By default, if early in an augmentation, will start with a little study to boost hack XP
 
@@ -37,12 +36,9 @@ const argsSchema = [
     // Debugging flags
     ['silent-misfires', false], // Instruct remote scripts not to alert when they misfire
     ['no-tail-windows', false], // Set to true to prevent the default behaviour of opening a tail window for certain launched scripts. (Doesn't affect scripts that open their own tail windows)
-    ['h', false], // Do nothing but hack, no prepping (drains servers to 0 money, if you want to do that for some reason)
-    ['hack-only', false], // Same as above
-    ['v', false], // Detailed logs about batch scheduling / tuning
-    ['verbose', false], // Same as above
-    ['o', false], // Good for debugging, run the main targettomg loop once then stop, with some extra logs
-    ['run-once', false], // Same as above
+    ['hack-only', false], // Do nothing but hack, no prepping (drains servers to 0 money, if you want to do that for some reason)
+    ['verbose', false], // Detailed logs about batch scheduling / tuning
+    ['run-once', false], // Good for debugging, run the main targeting loop once then stop, with some extra logs
 ];
 
 export function autocomplete(data, args) {
@@ -101,10 +97,10 @@ export async function main(ns) {
     let toolsByShortName = (/**@returns{{[id: string]: Tool;}}*/() => undefined)(); // Dictionary of tools keyed by tool short name
 
     // Command line Flags
-    let hackOnly = false; // "-h" command line arg - don't grow or shrink, just hack (a.k.a. scrapping mode)
-    let xpOnly = false; // "-x" command line arg - focus on a strategy that produces the most hack EXP rather than money
-    let verbose = false; // "-v" command line arg - Detailed logs about batch scheduling / tuning
-    let runOnce = false; // "-o" command line arg - Good for debugging, run the main targettomg loop once then stop
+    let hackOnly = false; // --hack-only command line arg - don't grow or shrink, just hack (a.k.a. scrapping mode)
+    let xpOnly = false; // --xp-only command line arg - focus on a strategy that produces the most hack EXP rather than money
+    let verbose = false; // --verbose command line arg - Detailed logs about batch scheduling / tuning
+    let runOnce = false; // --run-once command line arg - Good for debugging, run the main targeting loop once then stop
     let loopingMode = false;
     let recoveryThreadPadding = 1; // How many multiples to increase the weaken/grow threads to recovery from misfires automatically (useful when RAM is abundant and timings are tight)
 
@@ -239,10 +235,10 @@ export async function main(ns) {
 
         // Process configuration
         options = runOptions;
-        hackOnly = options.h || options['hack-only'];
-        xpOnly = options.x || options['xp-only'];
-        verbose = options.v || options['verbose'];
-        runOnce = options.o || options['run-once'];
+        hackOnly = options['hack-only'];
+        xpOnly = options['xp-only'];
+        verbose = options['verbose'];
+        runOnce = options['run-once'];
         loopingMode = options['looping-mode'];
         recoveryThreadPadding = options['recovery-thread-padding'];
         cycleTimingDelay = options['cycle-timing-delay'];
@@ -251,11 +247,11 @@ export async function main(ns) {
         homeReservedRam = options['reserved-ram']
         maxTargets = options['initial-max-targets'] ?? 0;
 
-        // Log which flaggs are active
-        if (hackOnly) log(ns, '-h - Hack-Only mode activated!');
-        if (xpOnly) log(ns, '-x - Hack XP Grinding mode activated!');
-        if (verbose) log(ns, '-v - Verbose logging activated!');
-        if (runOnce) log(ns, '-o - Run-once mode activated!');
+        // Log which flags are active
+        if (hackOnly) log(ns, '--hack-only - Hack-Only mode activated!');
+        if (xpOnly) log(ns, '--xp-only - Hack XP Grinding mode activated!');
+        if (verbose) log(ns, '--verbose - Verbose logging activated!');
+        if (runOnce) log(ns, '--run-once - Run-once mode activated!');
         if (loopingMode) {
             log(ns, '--looping-mode - scheduled remote tasks will loop themselves');
             // cycleTimingDelay = 0;

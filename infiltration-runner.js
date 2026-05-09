@@ -7,6 +7,7 @@ const argsSchema = [
     ['result-file', '/Temp/infiltration-runner-result.txt'],
     ['on-completion-script', ''],
     ['on-completion-script-args', ''],
+    ['location-ready', false],
     ['debug', false],
 ];
 
@@ -64,7 +65,7 @@ async function runInfiltrationAttempt(ns, options) {
 
     if (!await goToCity(ns, options.city, options['allow-travel']))
         return { success: false, reason: 'travel-failed' };
-    if (!await goToLocation(ns, options.company))
+    if (!options['location-ready'] && !await goToLocation(ns, options.company))
         return { success: false, reason: 'go-to-location-failed' };
 
     const startTs = Date.now();
@@ -81,7 +82,6 @@ async function runInfiltrationAttempt(ns, options) {
         clearInfiltrationActiveLock(ns);
         return { success: false, reason: 'start-failed' };
     }
-
     while (true) {
         const state = await getInfiltrationUiState(ns);
         if (state == "running") {
@@ -100,6 +100,8 @@ async function runInfiltrationAttempt(ns, options) {
             log(ns, clicked ?
                 `SUCCESS: Claimed infiltration reward from ${options.company} for ${options.cash ? 'cash' : `faction rep with "${options.faction}"`}.` :
                 `WARNING: Failed to claim infiltration reward from ${options.company} for ${options.cash ? 'cash' : `faction rep with "${options.faction}"`}.`);
+            if (!clicked)
+                devConsoleStatus(`reward-click-failed ${options.company} -> ${options.cash ? 'cash' : options.faction}`, 'error');
             return { success: clicked, reason: clicked ? 'success' : 'reward-click-failed' };
         }
         if (state == "hospitalized") {
@@ -272,13 +274,43 @@ async function travelToCityByUi(ns, cityName) {
 }
 
 async function goToLocation(ns, locationName) {
+    if (isOnLocationPage(locationName)) return true;
     const cityMenu = await waitForElementByXPath(ns, "//div[(@role = 'button') and (contains(., 'City'))]", 3000);
     if (!clickElement(cityMenu)) return false;
     await ns.sleep(50);
 
-    const locationButton = await waitForElementByXPath(ns, `//span[@aria-label = ${xpathString(locationName)}]`, 3000);
-    if (!clickElement(locationButton)) return false;
+    const locationButton = await waitForLocationElement(ns, locationName, 3000);
+    if (!locationButton) return false;
+    const clickable = locationButton.closest?.("button,[role='button']") || locationButton;
+    if (!clickElement(clickable)) return false;
     return true;
+}
+
+function isOnLocationPage(locationName) {
+    const doc = getDocument();
+    const titleMatches = Array.from(doc.querySelectorAll("h4"))
+        .some(element => getText(element) == locationName);
+    const canInfiltrate = Array.from(doc.querySelectorAll("button"))
+        .some(button => getText(button).includes("Infiltrate Company"));
+    return titleMatches && canInfiltrate;
+}
+
+async function waitForLocationElement(ns, locationName, timeout = 3000) {
+    const start = Date.now();
+    while (Date.now() - start < timeout) {
+        const element = findLocationElement(locationName);
+        if (element) return element;
+        await ns.sleep(50);
+    }
+    return null;
+}
+
+function findLocationElement(locationName) {
+    const doc = getDocument();
+    const exactAria = findElementByXPath(`//span[@aria-label = ${xpathString(locationName)}]`);
+    if (exactAria) return exactAria;
+    return Array.from(doc.querySelectorAll("button,[role='button'],span,p"))
+        .find(element => getText(element) == locationName || element.getAttribute?.("aria-label") == locationName);
 }
 
 function xpathString(value) {
@@ -319,6 +351,18 @@ async function ensureInfiltrationAutomationStopped(ns) {
 function debugConsole(options, message) {
     if (options.debug)
         console.log(`[infiltration-runner] ${message}`);
+}
+
+function devConsoleStatus(message, method = 'log') {
+    try {
+        const wnd = getWindow();
+        const widthGap = Math.abs((wnd.outerWidth || 0) - (wnd.innerWidth || 0));
+        const heightGap = Math.abs((wnd.outerHeight || 0) - (wnd.innerHeight || 0));
+        if (widthGap <= 160 && heightGap <= 160) return;
+        const fn = console?.[method];
+        if (typeof fn === "function") fn(`[infiltration] ${message}`);
+        else console.log(`[infiltration] ${message}`);
+    } catch { }
 }
 
 async function clickInfiltrateCompanyButton(ns, options) {

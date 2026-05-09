@@ -3,8 +3,7 @@ import { log as log_helper, getConfiguration, disableLogs, formatMoney, formatDu
 const sellForMoney = 'Sell for Money';
 
 const argsSchema = [
-    ['l', false], // Spend hashes as soon as we can afford any --spend-on purchase item. Otherwise, only spends when nearing capacity.
-    ['liquidate', false], // Long-form of above flag
+    ['liquidate', false], // Spend hashes as soon as we can afford any --spend-on purchase item. Otherwise, only spends when nearing capacity.
     ['interval', 50], // (milliseonds) Interval at which the program wakes up to spends hashes
     ['spend-on', [sellForMoney]], // One or more actions to spend hashes on.
     ['spend-on-server', null], // The server to boost, for spend options that take a server argument: 'Reduce Minimum Security' and 'Increase Maximum Money'
@@ -36,7 +35,7 @@ export function autocomplete(data, args) {
 export async function main(ns) {
     const options = getConfiguration(ns, argsSchema);
     if (!options) return; // Invalid options, or ran in --help mode.
-    const liquidate = options.l || options.liquidate;
+    const liquidate = options.liquidate;
     const interval = options.interval;
     const toBuy = options['spend-on'].map(s => s.replaceAll("_", " "));
     const spendOnServer = options['spend-on-server']?.replaceAll("_", " ") ?? undefined;
@@ -52,7 +51,7 @@ export async function main(ns) {
 
     disableLogs(ns, ['sleep', 'getServerMoneyAvailable']);
     ns.print(`Starting spend-hacknet-hashes.js... Will check in every ${formatDuration(interval)}`);
-    ns.print(liquidate ? `-l --liquidate mode active! Will spend all hashes as soon as possible.` :
+    ns.print(liquidate ? `--liquidate mode active! Will spend all hashes as soon as possible.` :
         `Saving up hashes, only spending hashes when near capacity to avoid wasting them.`);
 
     // Set up a helper to log but limit how often we generate a toast notification when making many purchases in a short time

@@ -69,6 +69,16 @@ Useful options:
 - `--new-file <file>` adds extra files to the scanned upload set.
 - `--extension <ext>` controls which local file extensions are included.
 - `--omit-folder <path>` skips folders such as `Temp/`.
+- `--devtools-port <port>` connects to a Chrome DevTools Protocol endpoint for script-free game control after upload.
+- `--terminal-command <cmd>` runs a Bitburner terminal command through DevTools after upload; repeat it to run multiple commands.
+
+Bitburner's Remote API is file-only. `local-sync-server.js` can upload and read files through Remote API, but terminal execution requires a separate Chrome DevTools Protocol endpoint. After closing any existing Bitburner instance, launch the Steam/Electron game with a remote debugging port, for example:
+
+- `"/Users/ton/Library/Application Support/Steam/steamapps/common/Bitburner/bitburner.app/Contents/MacOS/bitburner" --remote-debugging-port=9222`
+
+Then sync and run a terminal command without spending in-game RAM:
+
+- `node local-sync-server.js --source-root /path/to/bitburner-scripts --devtools-port 9222 --terminal-command "run autopilot.js"`
 
 ## Infiltration Notes
 

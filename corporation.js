@@ -177,10 +177,10 @@ export function autocomplete(data, _) {
 export async function main(ns) {
     // Pull in any information we only need at startup.
     options = ns.flags(argsSchema);
-    verbose = options.v || options.verbose;
+    verbose = options.verbose;
     dictSourceFiles = await getActiveSourceFiles(ns);
     const currentNode = ns.getResetInfo().currentNode;
-    let runOnce = options.o || options.once;
+    let runOnce = options.once;
     let shouldManage = !options['price-discovery-only'];
 
     // If we haven't unlocked corporations, just give up now.

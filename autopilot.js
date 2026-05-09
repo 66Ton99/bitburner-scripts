@@ -4,7 +4,7 @@ import {
     formatMoney, formatDuration, formatRam, getErrorInfo, tail, jsonReplacer, scanAllServers
 } from './helpers.js'
 
-const autopilotVersion = "2026-05-07-daemon-owned-background-launches.1";
+const autopilotVersion = "2026-05-09-bn3-before-bn8.1";
 const stockValueHelperRam = 3.6;
 const ownedAugmentationsHelperRam = 6.6;
 const earlyBootstrapHelperRam = 12;
@@ -86,6 +86,14 @@ const argsSchema = [ // The set of all command line arguments
     ['xp-mode-interval-minutes', 55], // Every time this many minutes has elapsed, toggle daemon.js to runing in --xp-only mode, which prioritizes earning hack-exp rather than money
     ['xp-mode-duration-minutes', 5], // The number of minutes to keep daemon.js in --xp-only mode before switching back to normal money-earning mode.
     ['no-tail-windows', false], // Set to true to prevent the default behaviour of opening a tail window for certain launched scripts. (Doesn't affect scripts that open their own tail windows)
+    ['tail-x', 1075], // Default autopilot.js tail window x position, captured from the current live layout.
+    ['tail-y', 0], // Default autopilot.js tail window y position, captured from the current live layout.
+    ['tail-width', 1444], // Default autopilot.js tail window width, captured from the current live layout.
+    ['tail-height', 377], // Default autopilot.js tail window height, captured from the current live layout.
+    ['work-tail-x', -1], // Optional x position for the work-for-factions.js tail window.
+    ['work-tail-y', -1], // Optional y position for the work-for-factions.js tail window.
+    ['work-tail-width', -1], // Optional width for the work-for-factions.js tail window.
+    ['work-tail-height', -1], // Optional height for the work-for-factions.js tail window.
 ];
 
 export function autocomplete(data, args) {
@@ -100,7 +108,7 @@ export function autocomplete(data, args) {
  * global shared memory surviving between multiple invocations of this script.
  * @param {NS} ns **/
 export async function main(ns) {
-    ns.ramOverride(7.8);
+    ns.ramOverride(4.2);
     ns.disableLog('disableLog');
     for (const logName of ['scan', 'getServerMaxRam', 'getServerUsedRam', 'getServerMoneyAvailable', 'ps', 'sleep'])
         ns.disableLog(logName);
@@ -118,6 +126,7 @@ export async function main(ns) {
 
         // 2nd Priority: More new features, from Harder BNs. Things will slow down for a while, but the new features should pay in dividends for all future BNs
         10.1, // Hard.   Unlock Sleeves (which tremendously speed along gangs outside of BN2) and grafting (can speed up slow rep-gain BNs).
+        3.3,  // Hard.   Unlock full corporation APIs before BN8 and before relying on corporation automation outside BN3.
         8.2,  // Hard.   8.1 immediately unlocks stocks, 8.2 doubles stock earning rate with shorts. Stocks are never nerfed in any BN (4S can be made too pricey though), and we have a good pre-4S stock script.
         13.1, // Hard.   Unlock Stanek's Gift. We've put a lot of effort into min/maxing the Tetris, so we should try to get it early, even though it's a hard BN. I might change my mind and push this down if it proves too slow.
         7.1,  // Hard.   Unlocks the bladeburner API (and bladeburner outside of BN 6/7). Many recommend it before BN9 since it ends up being a faster win condition in some of the tougher bitnodes ahead.
@@ -140,7 +149,6 @@ export async function main(ns) {
 
         // Low Priority:
         8.3,  // Hard.   Just gives stock "Limit orders" which we don't use in our scripts,
-        3.3,  // Hard.   Corporations. Autopilot can now run corporation automation in BN3/SF3.3+, but this remains lower priority than broader automation unlocks.
         12.9999 // Easy. Keep playing forever. Only stanek scales very well here, there is much work to be done to be able to climb these faster.
     ];
     const augTRP = "The Red Pill";
@@ -183,6 +191,7 @@ export async function main(ns) {
     let sleevesMaxedOut = false; // Flag used only when the player is replaying BN 10 with all sleeves but has suppressed auto-destroying the BN, to allow continued auto-installs
     let bn10SleevesIncomplete = false; // Flag used after BN10 is complete to preserve cash for Covenant sleeve purchases
     let bn10SleeveReserve = 0; // Current cash reserve needed for the next Covenant sleeve or memory purchase
+    let autopilotHandoffLaunched = false;
     let cachedStocksValue = 0;
     let forceStockLiquidation = false;
     let loggedBnCompletion = false; // Flag set to ensure that if we choose to stay in the BN, we only log the "BN completed" message once per reset.
@@ -207,6 +216,10 @@ export async function main(ns) {
             log(ns, `WARNING: You have previously enabled the flag "--${flag}". Because of the way this script saves its run settings, the ` +
                 `only way to now turn this back off will be to manually edit or delete the file ${ns.getScriptName()}.config.txt`, true);
 
+        if (tryEarlyCasinoHandoffBeforeStartup(ns))
+            return;
+        ns.ramOverride(6.4);
+
         let startUpRan = false, keepRunning = true;
         while (keepRunning) {
             try {
@@ -220,7 +233,8 @@ export async function main(ns) {
                     `\n${getErrorInfo(err)}`, false, 'warning');
                 keepRunning = shouldWeKeepRunning(ns);
             }
-            await ns.sleep(options['interval']);
+            if (keepRunning)
+                await ns.sleep(options['interval']);
         }
     }
 
@@ -347,7 +361,7 @@ export async function main(ns) {
         forceStockLiquidation = false;
         const player = await getPlayerInfo(ns);
         if (handlePreCasinoBootstrap(ns, player))
-            return shouldWeKeepRunning(ns);
+            return !autopilotHandoffLaunched && shouldWeKeepRunning(ns);
         await updateCachedData(ns);
         const stocksValue = await getStocksValueIfRamAvailable(ns);
         cachedStocksValue = stocksValue;
@@ -358,10 +372,65 @@ export async function main(ns) {
         manageReservedMoney(ns, player, stocksValue);
         await maybeAcceptStaneksGift(ns, player);
         if (await maybeDoCasino(ns, player))
-            return shouldWeKeepRunning(ns);
+            return !autopilotHandoffLaunched && shouldWeKeepRunning(ns);
         await checkOnRunningScripts(ns, player);
+        if (autopilotHandoffLaunched)
+            return false;
         await maybeInstallAugmentations(ns, player);
+        if (autopilotHandoffLaunched)
+            return false;
         return shouldWeKeepRunning(ns); // Return false to shut down autopilot.js if we installed augs, or don't have enough home RAM
+    }
+
+    /** Launch a tiny script that calls ns.spawn after autopilot exits. */
+    function launchSpawnHandoff(ns, targetScript, args) {
+        const handoffScript = getFilePath('spawn-handoff.js');
+        const rawArgs = JSON.stringify(args);
+        const handoffRam = 3.6;
+        let pid = 0, err;
+        try {
+            pid = ns.run(handoffScript, { threads: 1, ramOverride: handoffRam, temporary: true }, targetScript, rawArgs);
+        } catch (error) {
+            err = error;
+        }
+        if (pid) {
+            autopilotHandoffLaunched = true;
+            return pid;
+        }
+        throw new Error(`Failed to launch ${handoffScript}` + (err ? `: ${getErrorInfo(err)}` : ''));
+    }
+
+    /** Handle the low-RAM casino/pre-casino handoff before startup refreshes add too much dynamic RAM.
+     * @param {NS} ns
+     * @returns {boolean} true if autopilot should exit now. */
+    function tryEarlyCasinoHandoffBeforeStartup(ns) {
+        if (options['disable-casino'])
+            return false;
+        homeRam = ns.getServerMaxRam("home");
+        if (homeRam != 8)
+            return false;
+        const earlyResetInfo = ns.getResetInfo();
+        if (earlyResetInfo.currentNode == 8)
+            return false;
+        resetInfo = earlyResetInfo;
+        const cash = ns.getServerMoneyAvailable("home");
+        if (cash < 300000) {
+            const infiltrationMarker = `${resetInfo.lastAugReset}:Joe's Guns:cash`;
+            ns.write(preCasinoInfiltrationFile, infiltrationMarker, "w");
+            ns.write(preCasinoInfiltrationResultFile, JSON.stringify({ success: false, reason: 'launching' }), "w");
+            log(ns, `INFO: Casino bootstrap is below ${formatMoney(300000)}. ` +
+                `Handing off to direct pre-casino infiltration at Joe's Guns before startup consumes RAM.`, true, 'info');
+            launchSpawnHandoff(ns, getFilePath('infiltration-runner.js'), ['--city', 'Sector-12', '--company', "Joe's Guns", '--cash',
+                '--result-file', preCasinoInfiltrationResultFile,
+                '--on-completion-script', getFilePath('casino.js'),
+                '--on-completion-script-args', JSON.stringify(['--game', 'roulette',
+                    '--kill-all-scripts', true, '--on-completion-script', ns.getScriptName()])]);
+            return true;
+        }
+        log(ns, `INFO: Handing off to casino.js for roulette before startup consumes RAM.`, true, 'info');
+        launchSpawnHandoff(ns, getFilePath('casino.js'), ['--game', 'roulette',
+            '--kill-all-scripts', true, '--on-completion-script', ns.getScriptName()]);
+        return true;
     }
 
     /** On a fresh 8GB reset, do the casino cash bootstrap before any other helper-heavy orchestration.
@@ -403,14 +472,11 @@ export async function main(ns) {
             ns.write(preCasinoInfiltrationResultFile, JSON.stringify({ success: false, reason: 'launching' }), "w");
             log(ns, `INFO: Casino bootstrap is below ${formatMoney(300000)}. ` +
                 `Spawning one direct pre-casino infiltration at Joe's Guns for cash.`, true, 'info');
-            ns.spawn(getFilePath('infiltration-runner.js'), {
-                threads: 1,
-                spawnDelay: 100,
-            }, '--city', 'Sector-12', '--company', "Joe's Guns", '--cash',
+            launchSpawnHandoff(ns, getFilePath('infiltration-runner.js'), ['--city', 'Sector-12', '--company', "Joe's Guns", '--cash',
                 '--result-file', preCasinoInfiltrationResultFile,
                 '--on-completion-script', getFilePath('casino.js'),
                 '--on-completion-script-args', JSON.stringify(['--game', 'roulette',
-                    '--kill-all-scripts', true, '--on-completion-script', ns.getScriptName()]));
+                    '--kill-all-scripts', true, '--on-completion-script', ns.getScriptName()])]);
             return true;
         }
 
@@ -859,14 +925,11 @@ export async function main(ns) {
                 ns.write(preCasinoInfiltrationResultFile, JSON.stringify({ success: false, reason: 'launching' }), "w");
                 log(ns, `INFO: Casino bootstrap is below ${formatMoney(300000)}. ` +
                     `Spawning one direct pre-casino infiltration at Joe's Guns for cash.`, true, 'info');
-                ns.spawn(getFilePath('infiltration-runner.js'), {
-                    threads: 1,
-                    spawnDelay: 100,
-                }, '--city', 'Sector-12', '--company', "Joe's Guns", '--cash',
+                launchSpawnHandoff(ns, getFilePath('infiltration-runner.js'), ['--city', 'Sector-12', '--company', "Joe's Guns", '--cash',
                     '--result-file', preCasinoInfiltrationResultFile,
                     '--on-completion-script', getFilePath('casino.js'),
                     '--on-completion-script-args', JSON.stringify(['--game', 'roulette',
-                        '--kill-all-scripts', true, '--on-completion-script', ns.getScriptName()]));
+                        '--kill-all-scripts', true, '--on-completion-script', ns.getScriptName()])]);
                 return;
             }
             log_once(ns, `INFO: Casino bootstrap is below ${formatMoney(300000)}. ` +
@@ -999,6 +1062,10 @@ export async function main(ns) {
                 daemonArgs.push('--time-before-boosting-best-hack-server', options['time-before-boosting-best-hack-server']);
             if (options['spend-hashes-on-server-hacking-threshold'] != 0.1)
                 daemonArgs.push('--spend-hashes-on-server-hacking-threshold', options['spend-hashes-on-server-hacking-threshold']);
+            if (Number(options['work-tail-x']) >= 0) daemonArgs.push('--work-tail-x', options['work-tail-x']);
+            if (Number(options['work-tail-y']) >= 0) daemonArgs.push('--work-tail-y', options['work-tail-y']);
+            if (Number(options['work-tail-width']) > 0) daemonArgs.push('--work-tail-width', options['work-tail-width']);
+            if (Number(options['work-tail-height']) > 0) daemonArgs.push('--work-tail-height', options['work-tail-height']);
         }
 
         // Once stanek's gift is accepted, launch it once per reset before we launch daemon (Note: stanek's gift is auto-purchased by faction-manager.js on your first install)
@@ -1029,10 +1096,7 @@ export async function main(ns) {
             }
             if (homeRam == 8 && !singularityAvailable) {
                 log(ns, `INFO: Spawning daemon.js directly and exiting autopilot to free RAM on 8GB home.`, true, 'info');
-                ns.spawn(getFilePath('daemon.js'), {
-                    threads: 1,
-                    spawnDelay: 100,
-                }, ...daemonArgs);
+                launchSpawnHandoff(ns, getFilePath('daemon.js'), daemonArgs);
                 return;
             }
             let daemonPid = launchScriptHelper(ns, 'daemon.js', daemonArgs);
@@ -1150,7 +1214,7 @@ export async function main(ns) {
             // If we've been in the BN for less than 1 minute, wait a while to establish player's income rate 
             if (getTimeInAug() < 60000) {
                 log_once(ns, `INFO: Waiting a minute to establish player income before deciding whether casino.js is needed.`);
-                return false;
+                return true;
             }
             // Since it's possible that the CashRoot Startker Kit could give a false income velocity, account for that.
             const cashRootBought = installedAugmentations.includes(`CashRoot Starter Kit`);
@@ -1166,7 +1230,7 @@ export async function main(ns) {
         // If we aren't in Aevum already, wait until we have the 200K required to travel (plus some extra buffer to actually spend at the casino)
         if (player.city != "Aevum" && player.money < 300000) {
             log_once(ns, `INFO: Waiting until we have ${formatMoney(300000)} to travel to Aevum and run casino.js`);
-            return false;
+            return true;
         }
 
         const casinoGameScript = getFilePath('casino-roulette.js');
@@ -1184,16 +1248,13 @@ export async function main(ns) {
             await killScript(ns, 'work-for-factions.js');
             await killScript(ns, 'daemon.js'); // We also have to kill daemon which can make us study.
         }
-        ns.kill('infiltrate.js', 'home', '--quiet');
         // Kill any action, in case we are studying or working out, as it might steal focus or funds before we can bet it at the casino.
-        if (singularityAvailable) // No big deal if we can't, casino.js has logic to find the stop button and click it.
+        if (singularityAvailable && getHomeFreeRam(ns) >= 4.6) // No big deal if we can't, casino.js has logic to find the stop button and click it.
             _ = await getNsDataThroughFile(ns, `ns.singularity.stopAction()`);
 
         log(ns, `INFO: Spawning casino.js for roulette so autopilot frees RAM before roulette starts.`, true, 'info');
-        ns.spawn(casinoDispatcherScript, {
-            threads: 1,
-            spawnDelay: 100,
-        }, '--game', 'roulette', '--kill-all-scripts', true, '--on-completion-script', ns.getScriptName());
+        launchSpawnHandoff(ns, casinoDispatcherScript, ['--game', 'roulette',
+            '--kill-all-scripts', true, '--on-completion-script', ns.getScriptName()]);
         return true;
     }
 
@@ -1520,14 +1581,11 @@ export async function main(ns) {
             ascendArgs.push("--allow-soft-reset")
         try {
             const ascendScript = getFilePath('ascend.js');
-            log(ns, `INFO: Spawning ascend.js and exiting autopilot so ascend.js can clear RAM before installing.`, true, 'info');
-            ns.spawn(ascendScript, {
-                threads: 1,
-                spawnDelay: 100,
-            }, ...ascendArgs);
+            log(ns, `INFO: Launching ascend handoff and exiting autopilot so ascend.js can clear RAM before installing.`, true, 'info');
+            launchSpawnHandoff(ns, ascendScript, ascendArgs);
             return;
         } catch (error) {
-            errLog = `ERROR: Failed to spawn ascend.js. Will try again later.\nCaught: ${getErrorInfo(error)}`;
+            errLog = `ERROR: Failed to launch ascend handoff. Will try again later.\nCaught: ${getErrorInfo(error)}`;
         }
         // If we got this far, something went wrong
         persist_log(ns, log(ns, errLog, true, 'error'));
@@ -1705,8 +1763,10 @@ export async function main(ns) {
     /** Helper to launch a script and log whether if it succeeded or failed
      * @param {NS} ns */
     function launchScriptHelper(ns, baseScriptName, args = [], convertFileName = true) {
-        if (!options['no-tail-windows'])
+        if (!options['no-tail-windows']) {
             tail(ns); // If we're going to be launching scripts, show our tail window so that we can easily be killed if the user wants to interrupt.
+            applyAutopilotTailLayout(ns);
+        }
         const scriptName = convertFileName ? getFilePath(baseScriptName) : baseScriptName;
         let pid, err;
         try { pid = ns.run(scriptName, 1, ...args); }
@@ -1735,6 +1795,17 @@ export async function main(ns) {
     /** @param {NS} ns */
     function getHomeFreeRam(ns) {
         return ns.getServerMaxRam('home') - ns.getServerUsedRam('home');
+    }
+
+    function applyAutopilotTailLayout(ns) {
+        const width = Number(options['tail-width']);
+        const height = Number(options['tail-height']);
+        const x = Number(options['tail-x']);
+        const y = Number(options['tail-y']);
+        if (Number.isFinite(width) && Number.isFinite(height) && width > 0 && height > 0)
+            ns.ui.resizeTail(width, height, ns.pid);
+        if (Number.isFinite(x) && Number.isFinite(y) && x >= 0 && y >= 0)
+            ns.ui.moveTail(x, y, ns.pid);
     }
 
     function parseJsonSafe(text) {

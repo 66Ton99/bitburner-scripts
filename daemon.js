@@ -14,8 +14,7 @@ const argsSchema = [
     ['spend-hashes-for-money-when-under', 10E6], // (Default 10m) Convert 4 hashes to money whenever we're below this amount
     ['disable-spend-hashes', false], // An easy way to set the above to a very large negative number, thus never spending hashes for Money
 
-    ['x', false], // Focus on a strategy that produces the most hack EXP rather than money
-    ['xp-only', false], // Same as above
+    ['xp-only', false], // Focus on a strategy that produces the most hack EXP rather than money
     ['initial-study-time', 10], // Seconds. Set to 0 to not do any studying at startup. By default, if early in an augmentation, will start with a little study to boost hack XP
     ['initial-hack-xp-time', 10], // Seconds. Set to 0 to not do any hack-xp grinding at startup. By default, if early in an augmentation, will start with a little study to boost hack XP
 
@@ -24,6 +23,10 @@ const argsSchema = [
 
     ['tail-windows', false], // Open tail windows for helper scripts. Disabled by default; pass --tail-windows to opt in.
     ['tail-go', false], // Open a tail window for go.js when it is launched
+    ['work-tail-x', -1], // Optional x position for the work-for-factions.js tail window.
+    ['work-tail-y', -1], // Optional y position for the work-for-factions.js tail window.
+    ['work-tail-width', -1], // Optional width for the work-for-factions.js tail window.
+    ['work-tail-height', -1], // Optional height for the work-for-factions.js tail window.
 
     ['autopilot-mode', false], // Let daemon own background automation launches requested by autopilot.js.
     ['singularity-confirmed', false], // Autopilot already verified Singularity access; avoid source-file false negatives for automation gating.
@@ -67,20 +70,17 @@ const argsSchema = [
     // Debugging flags
     ['silent-misfires', false], // Instruct remote scripts not to alert when they misfire
     ['no-tail-windows', false], // Legacy explicit suppression flag. Tail windows are already disabled by default unless --tail-windows is passed.
-    ['h', false], // Do nothing but hack, no prepping (drains servers to 0 money, if you want to do that for some reason)
-    ['hack-only', false], // Same as above
-    ['v', false], // Detailed logs about batch scheduling / tuning
-    ['verbose', false], // Same as above
-    ['o', false], // Good for debugging, run the main targettomg loop once then stop, with some extra logs
-    ['run-once', false], // Same as above
+    ['hack-only', false], // Do nothing but hack, no prepping (drains servers to 0 money, if you want to do that for some reason)
+    ['verbose', false], // Detailed logs about batch scheduling / tuning
+    ['run-once', false], // Good for debugging, run the main targeting loop once then stop, with some extra logs
 ];
 
 const hackForwardedOptionNames = new Set([
-    'x', 'xp-only', 'initial-study-time', 'initial-hack-xp-time',
+    'xp-only', 'initial-study-time', 'initial-hack-xp-time',
     'reserved-ram', 'double-reserve-threshold',
     'initial-max-targets', 'cycle-timing-delay', 'queue-delay', 'recovery-thread-padding',
     'max-batches', 'max-steal-percentage', 'looping-mode',
-    'i', 'silent-misfires', 'no-tail-windows', 'h', 'hack-only', 'v', 'verbose', 'o', 'run-once',
+    'i', 'silent-misfires', 'no-tail-windows', 'hack-only', 'verbose', 'run-once',
 ]);
 
 function getHackArgs(rawArgs) {
@@ -164,9 +164,9 @@ export async function main(ns) {
     let openTailWindows = false;
 
     // Command line Flags
-    let xpOnly = false; // "-x" command line arg - focus on a strategy that produces the most hack EXP rather than money
-    let verbose = false; // "-v" command line arg - Detailed logs about batch scheduling / tuning
-    let runOnce = false; // "-o" command line arg - Good for debugging, run the main targettomg loop once then stop
+    let xpOnly = false; // --xp-only command line arg - focus on a strategy that produces the most hack EXP rather than money
+    let verbose = false; // --verbose command line arg - Detailed logs about batch scheduling / tuning
+    let runOnce = false; // --run-once command line arg - Good for debugging, run the main targeting loop once then stop
     let loopingMode = false;
 
     let daemonHost = null; // the name of the host of this daemon, so we don't have to call the function more than once.
@@ -341,9 +341,9 @@ export async function main(ns) {
 
         // Process configuration
         options = runOptions;
-        xpOnly = options.x || options['xp-only'];
-        verbose = options.v || options['verbose'];
-        runOnce = options.o || options['run-once'];
+        xpOnly = options['xp-only'];
+        verbose = options['verbose'];
+        runOnce = options['run-once'];
         loopingMode = options['looping-mode'];
         homeReservedRam = Math.max(options['reserved-ram'], options['critical-home-ram-reserve']);
         openTailWindows = options['tail-windows'] && !options['no-tail-windows'];
@@ -372,10 +372,10 @@ export async function main(ns) {
         dictSourceFiles = await getActiveSourceFiles_Custom(ns, getNsDataThroughFile);
         log(ns, "The following source files are active: " + JSON.stringify(dictSourceFiles));
 
-        // Log which flaggs are active
-        if (xpOnly) log(ns, '-x - Hack XP Grinding mode activated!');
-        if (verbose) log(ns, '-v - Verbose logging activated!');
-        if (runOnce) log(ns, '-o - Run-once mode activated!');
+        // Log which flags are active
+        if (xpOnly) log(ns, '--xp-only - Hack XP Grinding mode activated!');
+        if (verbose) log(ns, '--verbose - Verbose logging activated!');
+        if (runOnce) log(ns, '--run-once - Run-once mode activated!');
         if (loopingMode) {
             log(ns, '--looping-mode - scheduled remote tasks will loop themselves');
         }
@@ -447,6 +447,14 @@ export async function main(ns) {
             return bitNodeN == 8 ? ["--money-focus", "--reserve", 0, "--equipment-budget", 0, "--augmentations-budget", 0] : [];
         }
 
+        function appendWorkTailArgs(args) {
+            if (Number(options['work-tail-x']) >= 0) args.push("--tail-x", options['work-tail-x']);
+            if (Number(options['work-tail-y']) >= 0) args.push("--tail-y", options['work-tail-y']);
+            if (Number(options['work-tail-width']) > 0) args.push("--tail-width", options['work-tail-width']);
+            if (Number(options['work-tail-height']) > 0) args.push("--tail-height", options['work-tail-height']);
+            return args;
+        }
+
         function getAutopilotWorkForFactionsArgs() {
             const args = ["--fast-crimes-only"];
             if (hasSingularityAccess()) args.push("--singularity-confirmed");
@@ -454,11 +462,11 @@ export async function main(ns) {
             if (!options['late-netburners']) args.push("--skip", "Netburners");
             if (options['cashroot-priority']) args.push("--first", "Sector-12");
             if (options['disable-bladeburner']) args.push("--no-bladeburner-check");
-            if (!openTailWindows) args.push("--no-tail-windows");
+            if (options['no-tail-windows']) args.push("--no-tail-windows");
             if (!options['cashroot-priority'] && !options['disable-rush-gangs'] && !playerInGang) {
                 args.push("--crime-focus", "--training-stat-per-multi-threshold", 200, "--prioritize-invites");
             }
-            return args;
+            return appendWorkTailArgs(args);
         }
 
         function getAutopilotGraftArgs() {
@@ -508,7 +516,8 @@ export async function main(ns) {
         // Set up "asynchronous helpers" - standalone scripts to manage certain aspacts of the game. daemon.js launches each of these once when ready (but not again if they are shut down)
         const defaultStockmasterArgs = openTailWindows ? ["--show-market-summary"] : [];
         const defaultWorkForFactionsArgs = ['--fast-crimes-only', '--no-coding-contracts', '--no-company-work'];
-        if (!openTailWindows) defaultWorkForFactionsArgs.push('--no-tail-windows');
+        if (options['no-tail-windows']) defaultWorkForFactionsArgs.push('--no-tail-windows');
+        appendWorkTailArgs(defaultWorkForFactionsArgs);
         refreshHomeReservedRam(ns);
         const isWorkForFactionsDisabled = () => options['disable-script'].some(disabled =>
             disabled == 'work-for-factions.js' || String(disabled).split('/').pop() == 'work-for-factions.js');
@@ -541,7 +550,7 @@ export async function main(ns) {
                 relaunchIfExited: true,
                 ignoreReservedRam: false,
             }, // Start our stockmaster
-            { name: "hacknet-upgrade-manager.js", shouldRun: () => shouldUpgradeHacknet(), args: () => ["-c", "--max-payoff-time", "1h", "--interval", "0", "--reserve", hacknetReserve(ns)], shouldTail: false }, // One-time kickstart of hash income by buying everything with up to 1h payoff time immediately
+            { name: "hacknet-upgrade-manager.js", shouldRun: () => shouldUpgradeHacknet(), args: () => ["--continuous", "--max-payoff-time", "1h", "--interval", "0", "--reserve", hacknetReserve(ns)], shouldTail: false }, // One-time kickstart of hash income by buying everything with up to 1h payoff time immediately
             {
                 name: "spend-hacknet-hashes.js",
                 shouldRun: () => options['autopilot-mode'] ? getAutopilotSpendHashesArgs() != null : reqRam(64) && 9 in dictSourceFiles,
@@ -621,10 +630,10 @@ export async function main(ns) {
             { interval: 26000, name: "/Tasks/program-manager.js", shouldRun: () => 4 in dictSourceFiles && !ns.fileExists("SQLInject.exe", "home") },
             { interval: 27000, name: "/Tasks/contractor.js", minRamReq: 14.2 }, // Periodically look for coding contracts that need solving
             // Buy every hacknet upgrade with up to 4h payoff if it is less than 10% of our current money or 8h if it is less than 1% of our current money.
-            { interval: 28000, name: "hacknet-upgrade-manager.js", shouldRun: shouldUpgradeHacknet, args: () => ["-c", "--max-payoff-time", "4h", "--max-spend", getPlayerMoney(ns) * 0.1, "--reserve", hacknetReserve(ns)] },
-            { interval: 28500, name: "hacknet-upgrade-manager.js", shouldRun: shouldUpgradeHacknet, args: () => ["-c", "--max-payoff-time", "8h", "--max-spend", getPlayerMoney(ns) * 0.01, "--reserve", hacknetReserve(ns)] },
+            { interval: 28000, name: "hacknet-upgrade-manager.js", shouldRun: shouldUpgradeHacknet, args: () => ["--continuous", "--max-payoff-time", "4h", "--max-spend", getPlayerMoney(ns) * 0.1, "--reserve", hacknetReserve(ns)] },
+            { interval: 28500, name: "hacknet-upgrade-manager.js", shouldRun: shouldUpgradeHacknet, args: () => ["--continuous", "--max-payoff-time", "8h", "--max-spend", getPlayerMoney(ns) * 0.01, "--reserve", hacknetReserve(ns)] },
             // Buy upgrades regardless of payoff if they cost less than 0.1% of our money
-            { interval: 29000, name: "hacknet-upgrade-manager.js", shouldRun: shouldUpgradeHacknet, args: () => ["-c", "--max-payoff-time", "1E100h", "--max-spend", getPlayerMoney(ns) * 0.001, "--reserve", hacknetReserve(ns)] },
+            { interval: 29000, name: "hacknet-upgrade-manager.js", shouldRun: shouldUpgradeHacknet, args: () => ["--continuous", "--max-payoff-time", "1E100h", "--max-spend", getPlayerMoney(ns) * 0.001, "--reserve", hacknetReserve(ns)] },
             {   // Spend about 50% of un-reserved cash on home RAM upgrades (permanent) when they become available
                 interval: 30000, name: "/Tasks/ram-manager.js", args: () => ['--budget', 0.5, '--reserve', reservedMoney(ns)],
                 shouldRun: () => 4 in dictSourceFiles && shouldImproveHacking()

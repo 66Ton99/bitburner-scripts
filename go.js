@@ -15,12 +15,10 @@ import {
 } from './helpers.js'
 
 const argsSchema = [
-    ['cheats', true], // (Now true by default - but still an option for backwards compatibility) This is only possible if you have BN14.2
     ['disable-cheats', false], // Set to true if you want to *not* use cheats for some reason.
     ['cheat-chance-threshold', 0.9], // Don't cheat if our success chance is less than this
     ['logtime', false], // Logs time time it takes for each player to take their move
     ['runOnce', false], // Will only play one game if enabled
-    ['silent', false], // (Obsolete) This script used to automatically tail. Now if you want to do this, call with --tail like normal.
 ];
 
 export function autocomplete(data, args) {
@@ -36,7 +34,6 @@ export async function main(ns) {
     let cheatChanceThreshold = 1.0;
     let logtime = false;
     let runOnce = true;
-    let silent = false;
     let currentValidMovesTurn = 0; //The turn count that the currentValidMoves is valid for
     let turn = 0;
     let START = performance.now();

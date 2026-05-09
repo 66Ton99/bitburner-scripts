@@ -4,7 +4,7 @@ import {
 } from './helpers.js'
 
 let options;
-const workForFactionsVersion = "2026-05-07-cashroot-gang-protected.1";
+const workForFactionsVersion = "2026-05-09-grafting-pause-before-target-log.1";
 const argsSchema = [
     ['first', []], // Grind rep with these factions first. Also forces a join of this faction if we normally wouldn't (e.g. no desired augs or all augs owned)
     ['skip', []], // Don't work for these factions
@@ -12,6 +12,10 @@ const argsSchema = [
     ['desired-stats', []], // Factions will be removed from our 'early-faction-order' once all augs with these stats have been bought out
     ['desired-augs', []], // The augmentations will keep a faction in our 'early-faction-order' regardless of whether they have any --desired-stats
     ['no-tail-windows', false], // Set to true to prevent the default behaviour of opening a tail window any time we initiate focused player work.
+    ['tail-x', -1], // Optional tail window x position in screen pixels. Set both tail-x and tail-y to pin the window.
+    ['tail-y', -1], // Optional tail window y position in screen pixels. Set both tail-x and tail-y to pin the window.
+    ['tail-width', -1], // Optional tail window width in pixels.
+    ['tail-height', -1], // Optional tail window height in pixels.
     ['no-focus', false], // Disable doing work that requires focusing (crime), and forces study/faction/company work to be non-focused (even if it means incurring a penalty)
     ['no-studying', false], // Disable studying.
     ['pay-for-studies-threshold', 200000], // Only be willing to pay for our studies if we have this much money
@@ -114,7 +118,6 @@ const infiltrationHospitalizedRetryDelay = 250;
 const statusUpdateInterval = 60 * 1000; // 1 minute (outside of this, minor updates in e.g. stats aren't logged)
 const checkForNewPrioritiesInterval = 10 * 60 * 1000; // 10 minutes. Interrupt whatever we're doing and check whether we could be doing something more useful.
 const waitForFactionInviteTime = 30 * 1000; // The game will only issue one new invite every 25 seconds, so if you earned two by travelling to one city, might have to wait a while
-const infiltrationHospitalizedLocationCooldown = 10 * 60 * 1000; // Avoid retrying a location that recently hospitalized us.
 const infiltrationTravelFailedLocationCooldown = 60 * 1000; // Avoid spam-retrying a location we currently cannot travel to.
 const infiltrationActiveLockFile = "/Temp/work-for-factions-infiltration-active.txt";
 const minAdaptiveInfiltrationDifficulty = 1.0;
@@ -141,6 +144,7 @@ let netburnersEligibility = { nodes: 0, levels: 0, ram: 0, cores: 0, ready: fals
 let lastMoneyFallbackStatus = "";
 let lastNoFactionInfiltrationTargetStatus = "";
 let lastNoFactionInfiltrationTargetStatusUpdate = 0;
+let lastInfiltrationConsoleStatus = "";
 
 function shouldDeferSilhouette(player) {
     if (player.factions.includes("Silhouette"))
@@ -247,6 +251,7 @@ export async function main(ns) {
     log(ns, `INFO: work-for-factions.js version ${workForFactionsVersion}`, true, 'info');
     if (!options['no-tail-windows']) {
         tail(ns);
+        applyTailLayout(ns);
         ns.atExit(() => ns.ui.closeTail(ns.pid));
     }
 
@@ -256,6 +261,7 @@ export async function main(ns) {
     recentHospitalizedLocations = {};
     lastMoneyFallbackStatus = lastNoFactionInfiltrationTargetStatus = "";
     lastNoFactionInfiltrationTargetStatusUpdate = 0;
+    lastInfiltrationConsoleStatus = "";
     // Process configuration options
     firstFactions = (options['first'] || []).map(f => f.replaceAll('_', ' ')); // Factions that end up in this list will be prioritized and joined regardless of their augmentations available.
     options.skip = (options.skip || []).map(f => f.replaceAll('_', ' '));
@@ -1177,6 +1183,11 @@ async function startBackgroundCombatTraining(ns, requirement, factionName = "unk
         return false;
     }
     if (currentClassType === expectedGymStat && currentWork.location === gymName) return true;
+    if (currentWork.type == "GRAFTING") {
+        log(ns, `Cannot prepare background ${statToTrain} training at ${gymName} before "${factionName}" because grafting is active. ` +
+            `Infiltration will continue without background training.`, false, 'info');
+        return false;
+    }
     if (currentWork.type && !["CLASS", ""].includes(currentWork.type)) {
         await stop(ns);
         log(ns, `Stopped current ${currentWork.type} work to prepare background ${statToTrain} training at ${gymName} ` +
@@ -1214,6 +1225,11 @@ async function ensureBackgroundWeakestCombatTraining(ns, reason = "infiltration"
     const currentWork = await getCurrentWorkInfo(ns);
     const currentClassType = String(currentWork.classType || "").toLowerCase();
     if (currentClassType === expectedGymStat && currentWork.location === gymName) return true;
+    if (currentWork.type == "GRAFTING") {
+        log(ns, `Cannot prepare background ${statToTrain} training before ${reason} because grafting is active. ` +
+            `Infiltration will continue without background training.`, false, 'info');
+        return false;
+    }
     if (currentWork.type && !["CLASS", ""].includes(currentWork.type)) {
         await stop(ns);
         log(ns, `Stopped current ${currentWork.type} work to prepare background ${statToTrain} training before ${reason}.`, false, 'info');
@@ -1503,6 +1519,7 @@ export async function workForSingleFaction(ns, factionName, forceThroughInvitePr
         return ns.print(`--prioritize-invites Skipping working for faction for now...`);
     let lastStatusUpdateTime = 0;
     let lastSelectedInfiltrationTarget = "";
+    let stickyInfiltrationTarget = "";
     while ((currentReputation = (await getFactionReputation(ns, factionName))) < factionRepRequired) {
         if (breakToMainLoop()) {
             return ns.print('INFO: Interrupting infiltration to check on high-level priorities.');
@@ -1513,9 +1530,22 @@ export async function workForSingleFaction(ns, factionName, forceThroughInvitePr
         const currentWealth = currentMoney + stockValue;
         const desiredAugCost = Math.max(0, mostExpensiveDesiredAugCostByFaction[factionName] || 0);
         const moneyShortfall = Math.max(0, desiredAugCost - currentWealth);
-        const bestLocation = await pickBestInfiltrationLocation(ns, remainingRep, currentMoney);
+        const bestLocation = await pickBestInfiltrationLocation(ns, remainingRep, currentMoney, stickyInfiltrationTarget);
         if (!bestLocation) {
             printNoFactionInfiltrationTargetStatus(ns, factionName);
+            await ns.sleep(loopSleepInterval);
+            continue;
+        }
+        const currentWorkBeforeInfiltration = await getCurrentWorkInfo(ns);
+        if (currentWorkBeforeInfiltration?.type == "GRAFTING") {
+            stickyInfiltrationTarget = getInfiltrationLocationKey(bestLocation);
+            const pauseStatus = `Grafting active; pausing infiltration for "${factionName}" at "${bestLocation.location.name}" ` +
+                `until grafting completes.`;
+            if (lastFactionWorkStatus != pauseStatus) {
+                lastFactionWorkStatus = pauseStatus;
+                ns.print(pauseStatus);
+            }
+            infiltrationConsoleStatus(`paused ${bestLocation.location.name}@${bestLocation.location.city} -> ${factionName}: grafting-active v=${workForFactionsVersion}`);
             await ns.sleep(loopSleepInterval);
             continue;
         }
@@ -1531,9 +1561,8 @@ export async function workForSingleFaction(ns, factionName, forceThroughInvitePr
         const targetSummary = `${factionName}|${bestLocation.location.city}|${bestLocation.location.name}|${playerBeforeTravel.city}|${travelNeeded}`;
         if (targetSummary != lastSelectedInfiltrationTarget) {
             lastSelectedInfiltrationTarget = targetSummary;
-            devConsoleLog(`Infiltrating "${bestLocation.location.name}"@${bestLocation.location.city} for "${factionName}" ` +
-                `(${Math.round(remainingRep).toLocaleString('en')} rep remaining, ~${Math.round(bestLocation.reward.tradeRep).toLocaleString('en')}/run` +
-                `${travelNeeded ? `, travel ${playerBeforeTravel.city}->${bestLocation.location.city}` : ''}).`);
+            infiltrationConsoleStatus(formatFactionInfiltrationSelection(bestLocation, factionName, remainingRep,
+                travelNeeded ? `${playerBeforeTravel.city}->${bestLocation.location.city}` : ""));
         }
         if (travelNeeded) {
             const travelWorked = await goToCity(ns, bestLocation.location.city);
@@ -1552,15 +1581,23 @@ export async function workForSingleFaction(ns, factionName, forceThroughInvitePr
         if (!infiltrationResult.success) {
             if (infiltrationResult.reason == 'hospitalized')
                 noteHospitalizedInfiltration(bestLocation);
-            if (infiltrationResult.reason == 'travel-failed')
+            if (['travel-failed', 'direct-travel-failed'].includes(infiltrationResult.reason))
                 noteTravelFailedInfiltration(bestLocation);
-            if (['timeout', 'reward-click-failed', 'button-not-found', 'start-failed'].includes(infiltrationResult.reason))
+            if (['timeout', 'reward-click-failed', 'button-not-found'].includes(infiltrationResult.reason))
                 noteFailedInfiltration(bestLocation, infiltrationResult.reason);
+            if (shouldRetrySameInfiltrationTarget(infiltrationResult.reason))
+                stickyInfiltrationTarget = getInfiltrationLocationKey(bestLocation);
+            else
+                stickyInfiltrationTarget = "";
             devConsoleLog(`Infiltration runner failed for "${factionName}" at "${bestLocation.location.name}" with reason "${infiltrationResult.reason}".`);
-            log(ns, `WARN: Infiltration runner failed for "${factionName}" at "${bestLocation.location.name}" (${infiltrationResult.reason}). Retrying...`, false, 'warning');
+            const retryAction = shouldRetrySameInfiltrationTarget(infiltrationResult.reason) ?
+                `Retrying the same target.` :
+                `Retrying...`;
+            log(ns, `WARN: Infiltration runner failed for "${factionName}" at "${bestLocation.location.name}" (${infiltrationResult.reason}). ${retryAction}`, false, 'warning');
             await ns.sleep(loopSleepInterval);
             continue;
         }
+        stickyInfiltrationTarget = "";
 
         const estimatedRep = formatInfiltrationRepEstimate(bestLocation);
         const status = `Using infiltration at "${bestLocation.location.name}" for "${factionName}" until ${Math.round(factionRepRequired).toLocaleString('en')} rep ` +
@@ -1624,7 +1661,7 @@ async function handlePassiveInfiltrationFaction(ns, factionName) {
 }
 
 /** Pick the best currently-feasible infiltration target by trade rep. */
-async function pickBestInfiltrationLocation(ns, remainingRep = Number.POSITIVE_INFINITY, currentMoney = Number.POSITIVE_INFINITY) {
+async function pickBestInfiltrationLocation(ns, remainingRep = Number.POSITIVE_INFINITY, currentMoney = Number.POSITIVE_INFINITY, preferredLocationKey = "") {
     const locations = await getNsDataThroughFile(ns, `ns.infiltration.getPossibleLocations()`, '/Temp/infiltration-locations.txt');
     if (!locations?.length) return null;
     const player = await getPlayerInfo(ns);
@@ -1636,11 +1673,34 @@ async function pickBestInfiltrationLocation(ns, remainingRep = Number.POSITIVE_I
             !isLocationCoolingDown(infiltration.location?.name));
     const candidateLocations = reachableLocations;
     if (candidateLocations.length == 0) return null;
+    if (preferredLocationKey) {
+        const preferredLocation = candidateLocations.find(infiltration => getInfiltrationLocationKey(infiltration) == preferredLocationKey);
+        if (preferredLocation) return preferredLocation;
+    }
     const selectedLocation = Number.isFinite(remainingRep) ?
         ([...candidateLocations].sort((a, b) => compareRepInfiltrationTargets(a, b, remainingRep, player.city))[0] ?? null) :
         (candidateLocations
             .sort((a, b) => b.reward.tradeRep - a.reward.tradeRep || a.difficulty - b.difficulty)[0] ?? null);
     return selectedLocation;
+}
+
+function getInfiltrationLocationKey(infiltration) {
+    const location = infiltration?.location || {};
+    return `${location.city || ""}|${location.name || ""}`;
+}
+
+function shouldRetrySameInfiltrationTarget(reason) {
+    return [
+        'hospitalized',
+        'hospitalized-retrying',
+        'start-failed',
+        'infiltrate.js-start-failed',
+        'go-to-location-failed',
+        'direct-go-to-location-failed',
+        'grafting-active',
+        'missing-result',
+        'launch-failed',
+    ].includes(reason);
 }
 
 function getCurrentRepInfiltrationDifficultyCap(infiltration, currentCity, currentMoney = Number.POSITIVE_INFINITY) {
@@ -1841,9 +1901,7 @@ function isLocationCoolingDown(locationName) {
 
 function noteHospitalizedInfiltration(location) {
     const locationName = location?.location?.name;
-    if (locationName)
-        recentHospitalizedLocations[locationName] = Date.now() + infiltrationHospitalizedLocationCooldown;
-    devConsoleLog(`Infiltration location "${locationName}" put on cooldown after hospitalization.`);
+    devConsoleLog(`Infiltration location "${locationName}" hospitalized us. Retrying the same target; not switching companies.`);
 }
 
 function noteTravelFailedInfiltration(location) {
@@ -1993,6 +2051,33 @@ function devConsoleLog(message) {
     devConsole('log', `[work-for-factions pid=${scriptPid}] ${message}`);
 }
 
+function applyTailLayout(ns) {
+    const width = Number(options['tail-width']);
+    const height = Number(options['tail-height']);
+    const x = Number(options['tail-x']);
+    const y = Number(options['tail-y']);
+    if (Number.isFinite(width) && Number.isFinite(height) && width > 0 && height > 0)
+        ns.ui.resizeTail(width, height, ns.pid);
+    if (Number.isFinite(x) && Number.isFinite(y) && x >= 0 && y >= 0)
+        ns.ui.moveTail(x, y, ns.pid);
+}
+
+function infiltrationConsoleStatus(message, method = 'log') {
+    if (message == lastInfiltrationConsoleStatus) return;
+    lastInfiltrationConsoleStatus = message;
+    devConsole(method, `[infiltration] ${message}`);
+}
+
+function formatFactionInfiltrationSelection(bestLocation, factionName, remainingRep, travelRoute = "") {
+    const repPerRun = Math.max(0, bestLocation?.reward?.tradeRep || 0);
+    const runsNeeded = repPerRun > 0 ? Math.max(1, Math.ceil(remainingRep / repPerRun)) : "?";
+    return `target ${bestLocation.location.name}@${bestLocation.location.city} -> ${factionName} ` +
+        `(need ${Math.round(remainingRep).toLocaleString('en')} rep, ` +
+        `${repPerRun > 0 ? `~${Math.round(repPerRun).toLocaleString('en')}/run` : "rep/run unknown"}, ` +
+        `${runsNeeded} run${runsNeeded === 1 ? "" : "s"}` +
+        `${travelRoute ? `, travel ${travelRoute}` : ""})`;
+}
+
 function buildFactionManagerPurchaseArgs() {
     const args = ["--purchase"];
     for (const stat of options['desired-stats'] || [])
@@ -2023,25 +2108,97 @@ async function runInfiltrationRunner(ns, city, company, factionName = null, take
     const resultFile = `/Temp/infiltration-runner-${ns.pid}.txt`;
     ns.rm(resultFile);
     const args = ['--city', city, '--company', company, '--result-file', resultFile];
-    let effectiveAllowTravel = allowTravel;
-    if (!effectiveAllowTravel) {
-        const player = await getPlayerInfo(ns);
-        if (player.city != city) {
-            effectiveAllowTravel = true;
-            devConsoleLog(`Infiltration runner fallback enabled travel from "${player.city}" to "${city}" for "${company}".`);
-        }
-    }
-    if (effectiveAllowTravel) args.push('--allow-travel');
     if (takeCash) args.push('--cash');
     else args.push('--faction', factionName);
     if (options['infiltration-debug']) args.push('--debug');
+    const locationPrep = await prepareInfiltrationLocation(ns, city, company);
+    if (!locationPrep.opened) {
+        if (locationPrep.blocked == "grafting") {
+            const result = { success: false, reason: 'grafting-active' };
+            const detail = formatLocationPrepFailure(locationPrep);
+            infiltrationConsoleStatus(`paused ${company}@${city}: ${result.reason}${detail} v=${workForFactionsVersion}`, 'log');
+            return result;
+        }
+        const result = { success: false, reason: 'direct-go-to-location-failed' };
+        const detail = formatLocationPrepFailure(locationPrep);
+        infiltrationConsoleStatus(`failed ${company}@${city}: ${result.reason}${detail} v=${workForFactionsVersion}`, 'error');
+        return result;
+    }
+    args.push('--location-ready');
     const pid = await getNsDataThroughFile(ns, 'ns.run(ns.args[0], 1, ...JSON.parse(ns.args[1]))', null,
         [getFilePath('infiltration-runner.js'), JSON.stringify(args)]);
-    if (!pid) return { success: false, reason: 'launch-failed' };
+    if (!pid) {
+        infiltrationConsoleStatus(`launch-failed ${company}@${city}`, 'error');
+        return { success: false, reason: 'launch-failed' };
+    }
     while (await getNsDataThroughFile(ns, 'ns.isRunning(ns.args[0])', null, [pid]))
         await ns.sleep(100);
     const result = ns.read(resultFile);
-    return result ? JSON.parse(result) : { success: false, reason: 'missing-result' };
+    const parsedResult = result ? JSON.parse(result) : { success: false, reason: 'missing-result' };
+    infiltrationConsoleStatus(`${parsedResult.success ? 'done' : 'failed'} ${company}@${city}: ${parsedResult.reason}`,
+        parsedResult.success ? 'log' : 'error');
+    return parsedResult;
+}
+
+/** @param {NS} ns */
+async function prepareInfiltrationLocation(ns, city, company) {
+    const result = await getNsDataThroughFile(ns, `(() => {
+        const city = ns.args[0];
+        const company = ns.args[1];
+        const beforePlayer = ns.getPlayer();
+        const beforeWork = ns.singularity.getCurrentWork();
+        const result = {
+            requestedCity: city,
+            company,
+            beforeCity: beforePlayer.city,
+            beforeWork,
+            stopped: false,
+            travelAttempted: false,
+            travelResult: null,
+            cityAfterTravel: beforePlayer.city,
+            opened: false,
+            afterCity: beforePlayer.city,
+            afterWork: beforeWork,
+        };
+        if (beforeWork?.type == "GRAFTING")
+            return { ...result, blocked: "grafting" };
+        if (beforeWork?.type) {
+            result.stopped = ns.singularity.stopAction();
+        }
+        if (ns.getPlayer().city != city) {
+            result.travelAttempted = true;
+            result.travelResult = ns.singularity.travelToCity(city);
+            result.cityAfterTravel = ns.getPlayer().city;
+        }
+        if (ns.getPlayer().city == city)
+            result.opened = ns.singularity.goToLocation(company);
+        result.afterCity = ns.getPlayer().city;
+        result.afterWork = ns.singularity.getCurrentWork();
+        return result;
+    })()`, `/Temp/infiltration-location-prep-${ns.pid}.txt`, [city, company]);
+    if (!result?.opened)
+        devConsoleLog(`Direct infiltration location prep failed: ${JSON.stringify(result || {})}.`);
+    return result || { opened: false, error: "missing-result" };
+}
+
+function formatLocationPrepFailure(result) {
+    if (!result) return " (error=no-result)";
+    const parts = [];
+    if (result.error) parts.push(`error=${result.error}`);
+    if (result.blocked) parts.push(`blocked=${result.blocked}`);
+    if (result.beforeCity) parts.push(`beforeCity=${result.beforeCity}`);
+    if (result.beforeCity && result.requestedCity && result.beforeCity != result.requestedCity)
+        parts.push(`city ${result.beforeCity}->${result.cityAfterTravel || result.afterCity || "?"}`);
+    if (result.travelAttempted)
+        parts.push(`travel=${result.travelResult}`);
+    if (result.beforeWork?.type)
+        parts.push(`work=${result.beforeWork.type}${result.stopped ? "/stopped" : ""}`);
+    if (result.afterWork?.type)
+        parts.push(`afterWork=${result.afterWork.type}`);
+    if (result.afterCity && result.requestedCity && result.afterCity != result.requestedCity)
+        parts.push(`afterCity=${result.afterCity}`);
+    if (result.opened !== undefined) parts.push(`opened=${result.opened}`);
+    return parts.length ? ` (${parts.join(", ")})` : " (error=no-detail)";
 }
 
 /** Stop whatever focus work we're currently doing

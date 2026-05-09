@@ -10,13 +10,11 @@ const argsSchema = [
     ['spend-all-before-install', false], // Before installing, spend all practical cash on permanent purchases/upgrades instead of preserving a RAM budget cushion.
     ['cashroot-only', false], // Limit the final augmentation purchase pass to CashRoot Starter Kit.
     ['skip-staneks-gift', false], // By default, we get stanek's gift before our first install (except in BN8). If set to true, skip this step.
-    /* Deprecated */['bypass-stanek-warning', false], // (Obsoleted by the above option) Used to warn you if you were installing augs without accepting stanek's gift
     // Spawn this script after installing augmentations (Note: Args not supported by the game)
     ['on-reset-script', null], // By default, will start with `stanek.js` if you have stanek's gift, otherwise `daemon.js`.
     ['ticks-to-wait-for-additional-purchases', 10], // Don't reset until we've gone this many game ticks without any new purchases being made (10 * 200ms (game tick time) ~= 2 seconds)
     ['max-wait-time', 60000], // The maximum number of milliseconds we'll wait for external scripts to purchase whatever permanent upgrades they can before we ascend anyway.
     ['prioritize-home-ram', false], // If set to true, will spend as much money as possible on upgrading home RAM before buying augmentations
-    /* Deprecated */['prioritize-augmentations', true], // (Legacy flag, now ignored - left for backwards compatibility)
 ];
 
 const ascendVersion = "2026-05-06-cashroot-only.1";
@@ -40,9 +38,6 @@ export async function main(ns) {
     if (!(4 in dictSourceFiles))
         return log(ns, "ERROR: You cannot automate installing augmentations until you have unlocked singularity access (SF4).", true, 'error');
     ns.disableLog('sleep');
-    if (options['prioritize-augmentations'])
-        log(ns, "INFO: The --prioritize-augmentations flag is deprecated, as this is now the default behaviour. Use --prioritize-home-ram to get back the old behaviour.")
-
     // Kill every script except this one, since it can interfere with out spending
     let pid = await runCommand(ns, `ns.ps().filter(s => s.filename != ns.args[0]).forEach(s => ns.kill(s.pid));`,
         '/Temp/kill-everything-but.js', [ns.getScriptName()]);
@@ -114,7 +109,7 @@ export async function main(ns) {
     if (options['skip-staneks-gift']) {
         log(ns, 'INFO: Sending the --ignore-stanek argument to faction-manager.js')
     }
-    const facmanArgs = ['--purchase', '-v'];
+    const facmanArgs = ['--purchase', '--verbose'];
     if (options['cashroot-only']) facmanArgs.push('--purchase-mode', 'cashroot-only');
     if (options['skip-staneks-gift']) facmanArgs.push('--ignore-stanek');
     pid = ns.run(getFilePath('faction-manager.js'), 1, ...facmanArgs);

@@ -35,7 +35,6 @@ const liquidationPauseFile = "/Temp/stockmaster-liquidation-pause.txt";
 
 let options;
 const argsSchema = [
-    ['l', false], // Stop any other running stockmaster.js instances and sell all stocks
     ['liquidate', false], // Sell all stocks. In BN8, keeps the live trader alive unless --kill-trader is set.
     ['keep-trader', false], // Liquidate positions without killing an existing trading instance, preserving pre-4S history.
     ['kill-trader', false], // Force --liquidate to kill an existing trading instance, even where keep-trader would be preferred.
@@ -79,17 +78,17 @@ export async function main(ns) {
     // If given the "liquidate" command, try to kill any versions of this script trading in stocks
     // NOTE: We must do this immediately before we start resetting / overwriting global state below (which is shared between script instances)
     const hasTixApiAccess = await getNsDataThroughFile(ns, 'ns.stock.hasTixApiAccess()');
-    if (runOptions.l || runOptions.liquidate) {
+    if (runOptions.liquidate) {
         if (!hasTixApiAccess) return log(ns, 'ERROR: Cannot liquidate stocks because we do not have Tix Api Access', true, 'error');
         const currentResetInfo = await getNsDataThroughFile(ns, 'ns.getResetInfo()');
-        const keepTrader = runOptions['keep-trader'] || (runOptions.liquidate && !runOptions.l && !runOptions['kill-trader'] && currentResetInfo.currentNode == 8);
+        const keepTrader = runOptions['keep-trader'] || (!runOptions['kill-trader'] && currentResetInfo.currentNode == 8);
         if (keepTrader) {
             const pauseUntil = Date.now() + Math.max(0, Number(runOptions['liquidation-pause-ms']) || 0);
             await ns.write(liquidationPauseFile, String(pauseUntil), 'w');
             log(ns, `INFO: Keeping existing stockmaster trader alive and pausing new purchases for ${formatDuration(pauseUntil - Date.now())}.`, false, 'info');
         } else {
             log(ns, 'INFO: Killing any other stockmaster processes...', false, 'info');
-            await runCommand(ns, `ns.ps().filter(proc => proc.filename == '${ns.getScriptName()}' && !proc.args.includes('-l') && !proc.args.includes('--liquidate'))` +
+            await runCommand(ns, `ns.ps().filter(proc => proc.filename == '${ns.getScriptName()}' && !proc.args.includes('--liquidate'))` +
                 `.forEach(proc => ns.kill(proc.pid))`, '/Temp/kill-stockmarket-scripts.js');
         }
         log(ns, 'INFO: Checking for and liquidating any stocks...', false, 'info');

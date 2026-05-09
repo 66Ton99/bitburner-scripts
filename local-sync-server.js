@@ -16,6 +16,9 @@ const defaults = {
   newFile: [],
   extension: [".js", ".ns", ".txt", ".script"],
   omitFolder: ["Temp/"],
+  devtoolsHost: "127.0.0.1",
+  devtoolsPort: 0,
+  terminalCommand: [],
 };
 
 function printUsage() {
@@ -35,10 +38,14 @@ Options:
   --new-file <file>          Add extra files to the upload list (repeatable)
   --extension <ext>          Allowed file extension when scanning local files (repeatable)
   --omit-folder <path>       Omit local folders when scanning files (repeatable)
+  --devtools-host <host>     Chrome DevTools Protocol host for script-free game control
+  --devtools-port <port>     Chrome DevTools Protocol port for script-free game control
+  --terminal-command <cmd>   Terminal command to run through DevTools after upload (repeatable)
   --help                     Show this message
 
 Example:
   node local-sync-server.js --source-root /Volumes/SRC/bitburner-scripts
+  node local-sync-server.js --devtools-port 9222 --terminal-command "run autopilot.js"
 `);
 }
 
@@ -60,7 +67,7 @@ function normalizeRelative(relativePath) {
 
 function parseArgs(argv) {
   const options = structuredClone(defaults);
-  const repeatedKeys = new Set(["download", "newFile", "extension", "omitFolder"]);
+  const repeatedKeys = new Set(["download", "newFile", "extension", "omitFolder", "terminalCommand"]);
   const keyMap = new Map([
     ["host", "host"],
     ["port", "port"],
@@ -71,6 +78,9 @@ function parseArgs(argv) {
     ["new-file", "newFile"],
     ["extension", "extension"],
     ["omit-folder", "omitFolder"],
+    ["devtools-host", "devtoolsHost"],
+    ["devtools-port", "devtoolsPort"],
+    ["terminal-command", "terminalCommand"],
   ]);
 
   for (let index = 0; index < argv.length; index += 1) {
@@ -95,12 +105,18 @@ function parseArgs(argv) {
     if (repeatedKeys.has(mappedKey)) {
       options[mappedKey].push(value);
     } else {
-      options[mappedKey] = mappedKey === "port" ? Number(value) : value;
+      options[mappedKey] = mappedKey === "port" || mappedKey === "devtoolsPort" ? Number(value) : value;
     }
   }
 
   if (!Number.isInteger(options.port) || options.port <= 0 || options.port > 65535) {
     throw new Error(`Invalid --port value: ${options.port}`);
+  }
+  if (!Number.isInteger(options.devtoolsPort) || options.devtoolsPort < 0 || options.devtoolsPort > 65535) {
+    throw new Error(`Invalid --devtools-port value: ${options.devtoolsPort}`);
+  }
+  if (options.terminalCommand.length > 0 && !options.devtoolsPort) {
+    throw new Error(`--terminal-command requires --devtools-port`);
   }
   options.subfolder = trimSlash(options.subfolder);
   options.sourceRoot = path.resolve(options.sourceRoot);
@@ -292,6 +308,106 @@ async function pushFiles(socket, filesToUpload, options) {
   }
 }
 
+async function fetchJson(url) {
+  const response = await fetch(url);
+  if (!response.ok) throw new Error(`HTTP ${response.status} from ${url}`);
+  return await response.json();
+}
+
+async function getBitburnerDevtoolsTarget(options) {
+  const baseUrl = `http://${options.devtoolsHost}:${options.devtoolsPort}`;
+  const targets = await fetchJson(`${baseUrl}/json/list`);
+  const pageTargets = targets.filter((target) => target.type === "page" && target.webSocketDebuggerUrl);
+  return pageTargets.find((target) => /bitburner/i.test(`${target.title || ""} ${target.url || ""}`)) ??
+    pageTargets.find((target) => !/devtools/i.test(`${target.title || ""} ${target.url || ""}`)) ??
+    pageTargets[0] ??
+    null;
+}
+
+function cdpEvaluate(webSocketUrl, expression) {
+  return new Promise((resolve, reject) => {
+    const socket = new WebSocket(webSocketUrl);
+    const id = 1;
+    const timeout = setTimeout(() => {
+      socket.close();
+      reject(new Error("Timed out waiting for DevTools Runtime.evaluate"));
+    }, 10000);
+
+    socket.addEventListener("open", () => {
+      socket.send(JSON.stringify({
+        id,
+        method: "Runtime.evaluate",
+        params: {
+          expression,
+          awaitPromise: true,
+          returnByValue: true,
+        },
+      }));
+    });
+    socket.addEventListener("message", (event) => {
+      const message = JSON.parse(event.data);
+      if (message.id !== id) return;
+      clearTimeout(timeout);
+      socket.close();
+      if (message.error) {
+        reject(new Error(message.error.message || JSON.stringify(message.error)));
+        return;
+      }
+      const exception = message.result?.exceptionDetails;
+      if (exception) {
+        reject(new Error(exception.exception?.description || exception.text || "Runtime.evaluate failed"));
+        return;
+      }
+      resolve(message.result?.result?.value);
+    });
+    socket.addEventListener("error", () => {
+      clearTimeout(timeout);
+      reject(new Error(`Failed to connect to DevTools target ${webSocketUrl}`));
+    });
+  });
+}
+
+function createTerminalCommandExpression(command) {
+  const source = String.raw`
+    async (command) => {
+      let req = globalThis.__bbWebpackRequire;
+      if (!req && globalThis.webpackChunkbitburner) {
+        globalThis.webpackChunkbitburner.push([[Symbol("local-sync-terminal-command")], {}, (r) => { req = r; }]);
+        globalThis.__bbWebpackRequire = req;
+      }
+      if (!req?.m) throw new Error("Bitburner webpack runtime was not found");
+      let Terminal = null;
+      for (const moduleId of Object.keys(req.m)) {
+        try {
+          const moduleExports = req(moduleId);
+          if (moduleExports?.Terminal?.executeCommands) {
+            Terminal = moduleExports.Terminal;
+            break;
+          }
+        } catch { }
+      }
+      if (!Terminal) throw new Error("Bitburner Terminal module was not found");
+      Terminal.executeCommands(command);
+      return "Executed terminal command: " + command;
+    }
+  `;
+  return `(${source})(${JSON.stringify(command)})`;
+}
+
+async function runTerminalCommandsThroughDevtools(options) {
+  if (options.terminalCommand.length === 0) return;
+  const target = await getBitburnerDevtoolsTarget(options);
+  if (!target) {
+    throw new Error(`No Bitburner DevTools page target found on ${options.devtoolsHost}:${options.devtoolsPort}`);
+  }
+  console.log(`Using DevTools target: ${target.title || target.url}`);
+  for (const command of options.terminalCommand) {
+    process.stdout.write(`Running terminal command through DevTools: ${command} ... `);
+    await cdpEvaluate(target.webSocketDebuggerUrl, createTerminalCommandExpression(command));
+    process.stdout.write("OK\n");
+  }
+}
+
 function startServer(options) {
   return new Promise((resolve, reject) => {
     const server = http.createServer((request, response) => {
@@ -332,6 +448,7 @@ function startServer(options) {
         console.log(`Bitburner connected. Uploading ${filesToUpload.length} file(s) to ${options.server}...`);
         await pushFiles(socket, filesToUpload, options);
         console.log(`Upload complete. ${filesToUpload.length} file(s) pushed to ${options.server}.`);
+        await runTerminalCommandsThroughDevtools(options);
         socket.end();
       } catch (error) {
         console.error(error instanceof Error ? error.message : String(error));
