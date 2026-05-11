@@ -4,10 +4,11 @@ import {
     formatMoney, formatDuration, formatRam, getErrorInfo, tail, jsonReplacer, scanAllServers
 } from './helpers.js'
 
-const autopilotVersion = "2026-05-09-bn3-before-bn8.1";
+const autopilotVersion = "2026-05-11-throttle-bn8-trp-purchase.1";
 const stockValueHelperRam = 3.6;
 const ownedAugmentationsHelperRam = 6.6;
 const earlyBootstrapHelperRam = 12;
+const bn8TrpPurchaseAttemptInterval = 60 * 1000;
 const preCasinoInfiltrationFile = "/Temp/autopilot-pre-casino-infiltration.txt";
 const preCasinoInfiltrationResultFile = "/Temp/autopilot-pre-casino-infiltration-result.txt";
 const earlyHomeRamTarget = 1024;
@@ -86,14 +87,14 @@ const argsSchema = [ // The set of all command line arguments
     ['xp-mode-interval-minutes', 55], // Every time this many minutes has elapsed, toggle daemon.js to runing in --xp-only mode, which prioritizes earning hack-exp rather than money
     ['xp-mode-duration-minutes', 5], // The number of minutes to keep daemon.js in --xp-only mode before switching back to normal money-earning mode.
     ['no-tail-windows', false], // Set to true to prevent the default behaviour of opening a tail window for certain launched scripts. (Doesn't affect scripts that open their own tail windows)
-    ['tail-x', 1075], // Default autopilot.js tail window x position, captured from the current live layout.
-    ['tail-y', 0], // Default autopilot.js tail window y position, captured from the current live layout.
-    ['tail-width', 1444], // Default autopilot.js tail window width, captured from the current live layout.
-    ['tail-height', 377], // Default autopilot.js tail window height, captured from the current live layout.
-    ['work-tail-x', -1], // Optional x position for the work-for-factions.js tail window.
-    ['work-tail-y', -1], // Optional y position for the work-for-factions.js tail window.
-    ['work-tail-width', -1], // Optional width for the work-for-factions.js tail window.
-    ['work-tail-height', -1], // Optional height for the work-for-factions.js tail window.
+    ['tail-x', 675], // Default autopilot.js tail window x position.
+    ['tail-y', 0], // Default autopilot.js tail window y position.
+    ['tail-width', 1400], // Default autopilot.js tail window width.
+    ['tail-height', 377], // Default autopilot.js tail window height.
+    ['work-tail-x', 900], // Optional x position for the work-for-factions.js tail window.
+    ['work-tail-y', 650], // Optional y position for the work-for-factions.js tail window.
+    ['work-tail-width', 1400], // Optional width for the work-for-factions.js tail window.
+    ['work-tail-height', 377], // Optional height for the work-for-factions.js tail window.
 ];
 
 export function autocomplete(data, args) {
@@ -187,6 +188,7 @@ export async function main(ns) {
     let installCountdown = 0; // Start of a countdown before we install augmentations.
     let installCountdownResets = 0; // Number of times we've reset the countdown because our affordable augs has increased
     let lastFactionManagerRefresh = 0; // Last time autopilot refreshed faction-manager output itself
+    let lastBn8TrpPurchaseAttempt = 0;
     let bnCompletionSuppressed = false; // Flag if we've detected that we've won the BN, but are suppressing a restart
     let sleevesMaxedOut = false; // Flag used only when the player is replaying BN 10 with all sleeves but has suppressed auto-destroying the BN, to allow continued auto-installs
     let bn10SleevesIncomplete = false; // Flag used after BN10 is complete to preserve cash for Covenant sleeve purchases
@@ -1348,6 +1350,18 @@ export async function main(ns) {
         return pid;
     }
 
+    async function maybeForceBn8TrpPurchase(ns, reason) {
+        if (Date.now() - lastBn8TrpPurchaseAttempt < bn8TrpPurchaseAttemptInterval) {
+            return setStatus(ns, `BN8 Red Pill mode: joined Daedalus but "${augTRP}" is not purchased. ` +
+                `Waiting before retrying faction-manager purchase. ${reason}`);
+        }
+        lastBn8TrpPurchaseAttempt = Date.now();
+        log(ns, `INFO: BN8 Red Pill mode: joined Daedalus but "${augTRP}" is not purchased. ` +
+            `${reason} Forcing a faction-manager purchase attempt.`, false, 'info');
+        await runFactionManagerForAugmentations(ns, { purchase: true, noNeuroflux: true });
+        return true;
+    }
+
     /** Logic to detect if it's a good time to install augmentations, and if so, do so
      * @param {NS} ns
      * @param {Player} player */
@@ -1380,9 +1394,7 @@ export async function main(ns) {
             await getNsDataThroughFile(ns, 'ns.singularity.getOwnedAugmentations(true)', '/Temp/player-augs-purchased.txt') : [];
         const bn8TrpPurchased = bn8PurchasedAugmentations.includes(augTRP);
         if (bn8FrequentInstall && player.factions.includes("Daedalus") && !installedAugmentations.includes(augTRP) && !bn8TrpPurchased) {
-            log(ns, `INFO: BN8 Red Pill mode: joined Daedalus but "${augTRP}" is not purchased. ` +
-                `Forcing a faction-manager purchase attempt.`);
-            await runFactionManagerForAugmentations(ns, { purchase: true, noNeuroflux: true });
+            await maybeForceBn8TrpPurchase(ns, `Singularity does not report it as purchased.`);
             return reservedPurchase = 0;
         }
         if (!facman) {
@@ -1448,9 +1460,7 @@ export async function main(ns) {
         const cashRootGateActive = !installedAugmentations.includes(augCashRoot) && !cashRootReady;
 
         if (bn8RedPillMode && player.factions.includes("Daedalus") && !bn8TrpReady) {
-            log(ns, `INFO: BN8 Red Pill mode: joined Daedalus but "${augTRP}" is not marked affordable/awaiting. ` +
-                `Forcing a ${augTRP} purchase attempt before waiting.`);
-            await runFactionManagerForAugmentations(ns, { purchase: true, noNeuroflux: true });
+            await maybeForceBn8TrpPurchase(ns, `Faction-manager output does not mark it affordable/awaiting.`);
             return reservedPurchase = 0;
         }
 

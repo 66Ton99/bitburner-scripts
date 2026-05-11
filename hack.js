@@ -1661,7 +1661,7 @@ export async function main(ns) {
             // Schedule the FarmXP threads first, ensuring that they are not split (if they our split, our hack threads above 'effectiveHackThreads' lose their free ride)
             let success = true;
             if (!loopRunning) { // In looping mode, we only schedule one FarmXp (hack) loop, so skip this if one is already running
-                const farmXpArgs = [server.name, scheduleTime, expTime, "FarmXP", ...getFlagsArgs(expTool.shortName, server.name, allowLoop)];
+                const farmXpArgs = [server.name, scheduleTime, expTime, "FarmXP", ...getFlagsArgs(expTool.shortName, server.name, allowLoop, true)];
                 if (verbose) log(ns, `Scheduling ${threads}x ${expTool.shortName} on ${allocatedServer?.name ?? "(any)"} targetting ${server.name}`);
                 success = await arbitraryExecution(ns, expTool, threads, farmXpArgs, allocatedServer?.name);
             }
@@ -1683,7 +1683,7 @@ export async function main(ns) {
                     if (allWeakLoopsScheduled) break;
                     if (verbose) log(ns, `Scheduling ${weakenThreadsNeeded}x weak on ${allocatedServer?.name ?? "(any)"} targetting ${server.name}`);
                     success &&= await arbitraryExecution(ns, getTool("weak"), weakenThreadsNeeded,
-                        [server.name, scheduleWeak, server.timeToWeaken(), "weakenForXp", ...getFlagsArgs("weak", server.name, allowLoop)],
+                        [server.name, scheduleWeak, server.timeToWeaken(), "weakenForXp", ...getFlagsArgs("weak", server.name, allowLoop, true)],
                         singleServer ? allocatedServer?.name : null, !singleServer);
                     if (success && allowLoop && !allWeakLoopsScheduled)
                         loopsByServer_Weaken[server.name] = 1 + (loopsByServer_Weaken[server.name] ?? 0);
@@ -1699,7 +1699,7 @@ export async function main(ns) {
                     if (allGrowLoopsScheduled) break;
                     if (verbose) log(ns, `Scheduling ${growThreadsNeeded}x grow on ${allocatedServer?.name ?? "(any)"} targetting ${server.name}`);
                     success &&= await arbitraryExecution(ns, getTool("grow"), growThreadsNeeded,
-                        [server.name, scheduleGrow, server.timeToGrow(), "growForXp", ...getFlagsArgs("grow", server.name, allowLoop)],
+                        [server.name, scheduleGrow, server.timeToGrow(), "growForXp", ...getFlagsArgs("grow", server.name, allowLoop, true)],
                         singleServer ? allocatedServer?.name : null, !singleServer);
                     if (success && allowLoop && !allGrowLoopsScheduled)
                         loopsByServer_Grow[server.name] = 1 + (loopsByServer_Grow[server.name] ?? 0);
