@@ -4,7 +4,7 @@ import {
 } from './helpers.js'
 
 let options;
-const workForFactionsVersion = "2026-05-11-observed-infiltration-eta.1";
+const workForFactionsVersion = "2026-05-11-focused-hack-study.1";
 const argsSchema = [
     ['first', []], // Grind rep with these factions first. Also forces a join of this faction if we normally wouldn't (e.g. no desired augs or all augs owned)
     ['skip', []], // Don't work for these factions
@@ -25,6 +25,7 @@ const argsSchema = [
     ['no-company-work', false], // Disable working for companies / megacorps to earn company faction invites
     ['crime-focus', false], // Useful in crime-focused BNs when you want to focus on crime related factions
     ['fast-crimes-only', false], // Assasination and Heist are so slow, I can see people wanting to disable them just so they can interrupt at will.
+    ['min-homicide-chance-for-kills', 0.25], // Below this Homicide success chance, use safer crimes to build stats/karma instead of wasting cycles on low-probability kills.
     ['invites-only', false], // Just work to get invites, don't work for augmentations / faction rep
     ['prioritize-invites', false], // Prioritize working for as many invites as is practical before starting to grind for faction reputation
     ['get-invited-to-every-faction', false], // You want to be in every faction? You got it!
@@ -33,6 +34,8 @@ const argsSchema = [
     ['infiltrate-for-money-under', 0], // If set, use company infiltration for money until this cash threshold is reached
     ['max-infiltration-difficulty', 3.2], // Keep a safety margin under the game's 3.5 hard lock and favor stability over greed.
     ['infiltration-debug', false], // Enable dev-console infiltration diagnostics. Disabled by default to keep normal automation quiet.
+    ['cross-city-background-training', true], // Start gym training in a gym city before travelling to a different city for infiltration.
+    ['disable-cross-city-background-training', false], // Disable cross-city background gym training.
     ['no-bladeburner-check', false], // By default, will avoid working if bladeburner is active and "The Blade's Simulacrum" isn't installed
     ['singularity-confirmed', false], // Internal: parent orchestration already verified Singularity access.
 ];
@@ -789,15 +792,18 @@ async function earnFactionInvite(ns, factionName) {
                 `are probably too low to increase hack from ${player.skills.hacking} to ${requirement} in a reasonable amount of time ` +
                 `(${hackHeuristic} < ${formatNumberShort(em, 2)} - configure with --training-stat-per-multi-threshold)`);
         let studying = false;
+        const focusStudy = shouldFocus === undefined ? true : shouldFocus;
         if (player.money > options['pay-for-studies-threshold']) { // If we have sufficient money, pay for the best studies
             if (player.city != "Volhaven") await goToCity(ns, "Volhaven");
-            studying = await study(ns, false, "Algorithms");
+            studying = await study(ns, focusStudy, "Algorithms");
         } else if (uniByCity[player.city]) // Otherwise only go to free university if our city has a university
-            studying = await study(ns, false, "Computer Science");
+            studying = await study(ns, focusStudy, "Computer Science");
         else
             return ns.print(`You have insufficient money (${formatMoney(player.money)} < --pay-for-studies-threshold ` +
                 `${formatMoney(options['pay-for-studies-threshold'])}) to travel or pay for studies, and your current ` +
                 `city ${player.city} does not have a university from which to take free computer science.`);
+        if (studying && focusStudy && !options['no-tail-windows'])
+            tail(ns);
         if (studying)
             workedForInvite = await monitorStudies(ns, 'hacking', requirement);
         // If we studied for hacking, and were awaiting a backdoor, spawn the backdoor script now
@@ -950,8 +956,9 @@ export async function crimeForKillsKarmaStats(ns, reqKills, reqKarma, reqStats, 
         if (!forever && breakToMainLoop()) return ns.print('INFO: Interrupting crime to check on high-level priorities.');
         let crimeChances = await getNsDataThroughFile(ns, `Object.fromEntries(ns.args.map(c => [c, ns.singularity.getCrimeChance(c)]))`, '/Temp/crime-chances.txt', bestCrimesByDifficulty);
         let karma = -ns.heart.break();
+        const homicideReady = crimeChances["Homicide"] >= (options?.['min-homicide-chance-for-kills'] ?? 0.25);
         crime = crimeCount < 2 ? (crimeChances["Homicide"] > 0.75 ? "Homicide" : "Mug") : // Start with a few fast & easy crimes to boost stats if we're just starting
-            (!needStats && (player.numPeopleKilled < reqKills || karma < reqKarma)) ? "Homicide" : // If *all* we need now is kills or Karma, homicide is the fastest way to do that, even at low proababilities
+            (!needStats && (player.numPeopleKilled < reqKills || karma < reqKarma)) ? (homicideReady ? "Homicide" : "Mug") : // If all we need now is kills or Karma, wait for a practical homicide chance before farming kills.
                 bestCrimesByDifficulty.find((c, index) => doFastCrimesOnly && index <= 1 ? 0 : crimeChances[c] >= chanceThresholds[index]); // Otherwise, crime based on success chance vs relative reward (precomputed)
         // Warn if current crime is disrupted
         let currentWork = await getCurrentWorkInfo(ns);
@@ -1138,6 +1145,38 @@ function chooseCombatTrainingGym(player, requirement, preferredCity = null) {
         .sort((a, b) => a.etaMs - b.etaMs)[0]?.gymName || bestGymByCity[player.city] || "Powerhouse Gym";
 }
 
+function getGymCity(gymName) {
+    return Object.entries(bestGymByCity).find(([, gym]) => gym == gymName)?.[0];
+}
+
+function isCrossCityBackgroundTrainingEnabled() {
+    return !!options?.['cross-city-background-training'] && !options?.['disable-cross-city-background-training'];
+}
+
+function getPaidTrainingRequiredMoney(player, gymName, finalCity = null) {
+    const gymCity = getGymCity(gymName);
+    if (!gymCity) return Number.POSITIVE_INFINITY;
+    const travelSpend = (player.city == gymCity ? 0 : cityTravelCost) +
+        (finalCity && finalCity != gymCity ? cityTravelCost : 0);
+    return isBn8() ?
+        Math.max(options['pay-for-studies-threshold'] + travelSpend, bn8CashReserve + travelSpend) :
+        options['pay-for-studies-threshold'] + travelSpend;
+}
+
+function canAffordBackgroundTrainingRoute(player, gymName, finalCity = null) {
+    return player.money >= getPaidTrainingRequiredMoney(player, gymName, finalCity);
+}
+
+function chooseBackgroundTrainingGym(player, requirement, preferredCity = null, finalCity = null) {
+    const preferredGym = preferredCity ? bestGymByCity[preferredCity] : null;
+    const candidateGyms = [...new Set([bestGymByCity[player.city], preferredGym, ...Object.values(bestGymByCity)].filter(Boolean))];
+    const affordableCandidates = candidateGyms.filter(gymName => canAffordBackgroundTrainingRoute(player, gymName, finalCity));
+    const candidates = affordableCandidates.length > 0 ? affordableCandidates : candidateGyms;
+    return candidates
+        .map(gymName => ({ gymName, etaMs: getCombatTrainingPlan(player, requirement, gymName).sequentialEtaMs }))
+        .sort((a, b) => a.etaMs - b.etaMs)[0]?.gymName || null;
+}
+
 function getCombatTrainingAssessment(player, requirement, preferredCity = null) {
     const gymName = chooseCombatTrainingGym(player, requirement, preferredCity);
     return { gymName, plan: getCombatTrainingPlan(player, requirement, gymName) };
@@ -1202,7 +1241,10 @@ async function startBackgroundCombatTraining(ns, requirement, factionName = "unk
     const player = await getPlayerInfo(ns);
     const deficientStats = statOrder.filter(stat => player.skills[stat] < requirement);
     if (deficientStats.length == 0) return true;
-    const gymName = bestGymByCity[player.city];
+    const gymName = isCrossCityBackgroundTrainingEnabled() ?
+        chooseBackgroundTrainingGym(player, requirement, preferredCity, preferredCity) :
+        bestGymByCity[player.city];
+    const gymCity = getGymCity(gymName);
     const statToTrain = deficientStats.sort((a, b) => player.skills[a] - player.skills[b])[0];
     const expectedGymStat = gymStatBySkill[statToTrain];
     const currentWork = await getCurrentWorkInfo(ns);
@@ -1218,6 +1260,14 @@ async function startBackgroundCombatTraining(ns, requirement, factionName = "unk
         }
         return false;
     }
+    const routeRequiredMoney = getPaidTrainingRequiredMoney(player, gymName, preferredCity);
+    if (isCrossCityBackgroundTrainingEnabled() &&
+        !await ensureCashForAction(ns, player, routeRequiredMoney, `prepare background ${statToTrain} training at ${gymName} before "${factionName}"`)) {
+        log(ns, `Cannot prepare background ${statToTrain} training at ${gymName} before "${factionName}" because cash is insufficient ` +
+            `for gym + infiltration travel. Need ${formatMoney(routeRequiredMoney)}, ` +
+            `have ${formatMoney(player.money)}. Infiltration will continue.`, false, 'info');
+        return false;
+    }
     if (currentClassType === expectedGymStat && currentWork.location === gymName) return true;
     if (currentWork.type == "GRAFTING") {
         log(ns, `Cannot prepare background ${statToTrain} training at ${gymName} before "${factionName}" because grafting is active. ` +
@@ -1231,7 +1281,7 @@ async function startBackgroundCombatTraining(ns, requirement, factionName = "unk
     }
     const started = await workOutAtGym(ns, false, expectedGymStat, gymName);
     if (started)
-        log(ns, `Prepared background ${statToTrain} training at ${gymName} for "${factionName}" before starting infiltration. ` +
+        log(ns, `Prepared background ${statToTrain} training at ${gymName}${gymCity ? ` in ${gymCity}` : ""} for "${factionName}" before starting infiltration. ` +
             `Current combat min ${getMinCombatStat(player)}, target ${requirement}.`, false, 'info');
     else
         log(ns, `Failed to prepare background ${statToTrain} training at ${gymName} for "${factionName}". ` +
@@ -1250,16 +1300,27 @@ async function stopBackgroundCombatTraining(ns, reason = "infiltration") {
 }
 
 /** @param {NS} ns */
-async function ensureBackgroundWeakestCombatTraining(ns, reason = "infiltration") {
+async function ensureBackgroundWeakestCombatTraining(ns, reason = "infiltration", preferredCity = null) {
     const statOrder = ["strength", "defense", "dexterity", "agility"];
     const gymStatBySkill = { strength: "str", defense: "def", dexterity: "dex", agility: "agi" };
     const player = await getPlayerInfo(ns);
-    const gymName = bestGymByCity[player.city];
+    const gymName = isCrossCityBackgroundTrainingEnabled() ?
+        chooseBackgroundTrainingGym(player, 0, preferredCity, preferredCity) :
+        bestGymByCity[player.city];
     if (!gymName) return false;
+    const gymCity = getGymCity(gymName);
     const statToTrain = statOrder.sort((a, b) => (player.skills[a] || 0) - (player.skills[b] || 0))[0];
     const expectedGymStat = gymStatBySkill[statToTrain];
     const currentWork = await getCurrentWorkInfo(ns);
     const currentClassType = String(currentWork.classType || "").toLowerCase();
+    const routeRequiredMoney = getPaidTrainingRequiredMoney(player, gymName, preferredCity);
+    if (isCrossCityBackgroundTrainingEnabled() &&
+        !await ensureCashForAction(ns, player, routeRequiredMoney, `prepare background ${statToTrain} training at ${gymName} before ${reason}`)) {
+        log(ns, `Cannot prepare background ${statToTrain} training at ${gymName} before ${reason} because cash is insufficient ` +
+            `for gym + infiltration travel. Need ${formatMoney(routeRequiredMoney)}, ` +
+            `have ${formatMoney(player.money)}. Infiltration will continue.`, false, 'info');
+        return false;
+    }
     if (currentClassType === expectedGymStat && currentWork.location === gymName) return true;
     if (currentWork.type == "GRAFTING") {
         log(ns, `Cannot prepare background ${statToTrain} training before ${reason} because grafting is active. ` +
@@ -1272,7 +1333,7 @@ async function ensureBackgroundWeakestCombatTraining(ns, reason = "infiltration"
     }
     const started = await workOutAtGym(ns, false, expectedGymStat, gymName);
     if (started)
-        log(ns, `Prepared background ${statToTrain} training at ${gymName} before ${reason}. ` +
+        log(ns, `Prepared background ${statToTrain} training at ${gymName}${gymCity ? ` in ${gymCity}` : ""} before ${reason}. ` +
             `Combat min ${getMinCombatStat(player)}.`, false, 'info');
     return started;
 }
@@ -1592,6 +1653,12 @@ export async function workForSingleFaction(ns, factionName, forceThroughInvitePr
                 `and "${trainingTarget.location.location.name}" is estimated at ${formatDuration(trainingTarget.totalEtaMs)} ` +
                 `once all combat stats reach ${trainingTarget.requiredCombatStat}.`, false, 'info');
         }
+        if (isCrossCityBackgroundTrainingEnabled()) {
+            if (trainingTarget)
+                await startBackgroundCombatTraining(ns, trainingTarget.requiredCombatStat, `${factionName} infiltration`, bestLocation.location.city);
+            else
+                await ensureBackgroundWeakestCombatTraining(ns, `${factionName} infiltration`, bestLocation.location.city);
+        }
         const playerBeforeTravel = await getPlayerInfo(ns);
         const travelNeeded = playerBeforeTravel.city != bestLocation.location.city;
         const targetSummary = `${factionName}|${bestLocation.location.city}|${bestLocation.location.name}|${playerBeforeTravel.city}|${travelNeeded}`;
@@ -1609,10 +1676,12 @@ export async function workForSingleFaction(ns, factionName, forceThroughInvitePr
                 continue;
             }
         }
-        if (trainingTarget)
-            await startBackgroundCombatTraining(ns, trainingTarget.requiredCombatStat, `${factionName} infiltration`, bestLocation.location.city);
-        else
-            await ensureBackgroundWeakestCombatTraining(ns, `${factionName} infiltration`);
+        if (!isCrossCityBackgroundTrainingEnabled()) {
+            if (trainingTarget)
+                await startBackgroundCombatTraining(ns, trainingTarget.requiredCombatStat, `${factionName} infiltration`, bestLocation.location.city);
+            else
+                await ensureBackgroundWeakestCombatTraining(ns, `${factionName} infiltration`);
+        }
         const infiltrationResult = await runInfiltrationRunner(ns, bestLocation.location.city, bestLocation.location.name, factionName, false, false);
         recordObservedInfiltrationRunTime(bestLocation, infiltrationResult);
         await healAfterInfiltrationIfNeeded(ns, `${bestLocation.location.name} -> ${factionName}`);
@@ -2034,7 +2103,7 @@ async function workForInfiltrationMoney(ns, moneyTarget) {
 
 /** @param {NS} ns */
 async function runMoneyInfiltration(ns, bestLocation, currentMoney, moneyTarget) {
-    await ensureBackgroundWeakestCombatTraining(ns, "money infiltration");
+    await ensureBackgroundWeakestCombatTraining(ns, "money infiltration", bestLocation.location.city);
     const targetSummary = moneyTarget > currentMoney ?
         `target ${formatMoney(moneyTarget)}, ` :
         '';
@@ -2083,7 +2152,7 @@ async function waitForLocalMoneyInfiltration(ns, localLocation) {
     if (requiredCombatStat > 0)
         await startBackgroundCombatTraining(ns, requiredCombatStat, "money infiltration", localLocation.location.city);
     else
-        await ensureBackgroundWeakestCombatTraining(ns, "money infiltration");
+        await ensureBackgroundWeakestCombatTraining(ns, "money infiltration", localLocation.location.city);
     await ns.sleep(loopSleepInterval);
     return false;
 }

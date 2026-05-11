@@ -4,14 +4,16 @@ import {
     formatMoney, formatDuration, formatRam, getErrorInfo, tail, jsonReplacer, scanAllServers
 } from './helpers.js'
 
-const autopilotVersion = "2026-05-11-throttle-bn8-trp-purchase.1";
+const autopilotVersion = "2026-05-11-bn3-bootstrap-no-reserve.1";
 const stockValueHelperRam = 3.6;
 const ownedAugmentationsHelperRam = 6.6;
 const earlyBootstrapHelperRam = 12;
 const bn8TrpPurchaseAttemptInterval = 60 * 1000;
 const preCasinoInfiltrationFile = "/Temp/autopilot-pre-casino-infiltration.txt";
 const preCasinoInfiltrationResultFile = "/Temp/autopilot-pre-casino-infiltration-result.txt";
+const earlyBootstrapPurchasesFile = `/Temp/early-bootstrap-purchases-${autopilotVersion}.txt`;
 const earlyHomeRamTarget = 1024;
+const bn3EarlyHomeRamTarget = 4096;
 
 const preCasinoBlockedScripts = [
     'daemon.js',
@@ -95,6 +97,7 @@ const argsSchema = [ // The set of all command line arguments
     ['work-tail-y', 650], // Optional y position for the work-for-factions.js tail window.
     ['work-tail-width', 1400], // Optional width for the work-for-factions.js tail window.
     ['work-tail-height', 377], // Optional height for the work-for-factions.js tail window.
+    ['cross-city-background-training', true], // Let work-for-factions start gym training in a gym city, then travel elsewhere for infiltration while training continues.
 ];
 
 export function autocomplete(data, args) {
@@ -942,8 +945,32 @@ export async function main(ns) {
             return;
         }
 
-        if (homeRam >= earlyBootstrapHelperRam + getCriticalAutopilotRamReserve() && homeRam < earlyHomeRamTarget) {
-            const bootstrapRan = await tryEarlyPermanentBootstrapPurchases(ns);
+        const earlyHomeRamTargetForCurrentBn = getEarlyHomeRamTarget();
+        if (homeRam >= earlyBootstrapHelperRam + getCriticalAutopilotRamReserve() && homeRam < earlyHomeRamTargetForCurrentBn) {
+            const bootstrapResult = await tryEarlyPermanentBootstrapPurchases(ns, earlyHomeRamTargetForCurrentBn);
+            const bootstrapRan = !!bootstrapResult;
+            if (homeRam < earlyHomeRamTargetForCurrentBn) {
+                const nextHomeRamCost = Number(bootstrapResult?.nextHomeRamCost || 0);
+                const bootstrapCash = Number(bootstrapResult?.cash ?? player.money);
+                if (nextHomeRamCost > 0 && bootstrapCash < nextHomeRamCost) {
+                    const bootstrapStockValue = Math.max(0, Number(cachedStocksValue) || 0);
+                    const bootstrapNetWorth = bootstrapCash + bootstrapStockValue;
+                    if (bootstrapNetWorth >= nextHomeRamCost * 1.001) {
+                        forceStockLiquidation = true;
+                        log_once(ns, `INFO: BN${resetInfo.currentNode} home RAM bootstrap can afford the next upgrade from net worth. ` +
+                            `Liquidating stocks for a concrete ${formatMoney(nextHomeRamCost)} RAM purchase ` +
+                            `(cash ${formatMoney(bootstrapCash)}, stock ${formatMoney(bootstrapStockValue)}).`);
+                    }
+                } else {
+                    const killedCount = stopEarlyBootstrapBlockersDirect(ns, runningScripts);
+                    if (killedCount > 0)
+                        log(ns, `INFO: Stopped ${killedCount} home script${killedCount == 1 ? '' : 's'} so autopilot can buy ${formatRam(earlyHomeRamTargetForCurrentBn)} home RAM before relaunching workers.`, true, 'info');
+                    else
+                        log_once(ns, `INFO: Waiting to reach ${formatRam(earlyHomeRamTargetForCurrentBn)} home RAM before launching workers. ` +
+                            `Current home RAM is ${formatRam(homeRam)}; keeping bootstrap cash available for the next RAM upgrade.`);
+                    return;
+                }
+            }
             if (!bootstrapRan) {
                 const killedCount = stopEarlyBootstrapBlockersDirect(ns, runningScripts);
                 if (killedCount > 0) {
@@ -1054,6 +1081,8 @@ export async function main(ns) {
             if (options['disable-grafting']) daemonArgs.push('--disable-grafting');
             if (options['disable-rush-gangs']) daemonArgs.push('--disable-rush-gangs');
             if (options['disable-bladeburner']) daemonArgs.push('--disable-bladeburner');
+            if (options['cross-city-background-training']) daemonArgs.push('--cross-city-background-training');
+            else daemonArgs.push('--disable-cross-city-background-training');
             if (pursueNetburnersLateGame) daemonArgs.push('--late-netburners');
             if (pursueCompanyFactionsLateGame) daemonArgs.push('--late-company-work');
             if (forceStockLiquidation) daemonArgs.push('--force-stock-liquidate');
@@ -1263,7 +1292,7 @@ export async function main(ns) {
     /** Buy the permanent early-game basics before daemon/host-manager can spend casino cash on temporary servers.
      * @param {NS} ns
      * @returns {Promise<boolean>} true if the helper ran, even if cash was insufficient for more purchases. */
-    async function tryEarlyPermanentBootstrapPurchases(ns) {
+    async function tryEarlyPermanentBootstrapPurchases(ns, targetHomeRam = getEarlyHomeRamTarget()) {
         if (!singularityAvailable) return true;
         const freeRam = getHomeFreeRam(ns);
         if (freeRam < earlyBootstrapHelperRam) {
@@ -1288,7 +1317,8 @@ export async function main(ns) {
                 result.homeRamUpgrades.push([before, after]);
                 cash = ns.getServerMoneyAvailable("home");
             }
-            if (!ns.scan("home").includes("darkweb") && cash >= 200000 && ns.singularity.purchaseTor()) {
+            const hadTor = ns.hasTorRouter ? ns.hasTorRouter() : ns.scan("home").includes("darkweb");
+            if (!hadTor && cash >= 200000 && ns.singularity.purchaseTor()) {
                 result.tor = true;
                 cash = ns.getServerMoneyAvailable("home");
             }
@@ -1302,9 +1332,11 @@ export async function main(ns) {
                 }
             }
             result.homeRam = ns.getServerMaxRam("home");
+            result.cash = cash;
+            result.nextHomeRamCost = result.homeRam < targetHomeRam ? ns.singularity.getUpgradeHomeRamCost() : 0;
             return result;
-        })()`, '/Temp/early-bootstrap-purchases.txt', [
-            earlyHomeRamTarget,
+        })()`, earlyBootstrapPurchasesFile, [
+            targetHomeRam,
             JSON.stringify(portCrackerCosts),
             JSON.stringify(portCrackerNames),
         ]);
@@ -1321,7 +1353,11 @@ export async function main(ns) {
             log(ns, `SUCCESS: Purchased TOR router before launching daemon.js.`, true, 'success');
         if (result.programs?.length > 0)
             log(ns, `SUCCESS: Purchased port crackers before launching daemon.js: ${result.programs.join(", ")}.`, true, 'success');
-        return true;
+        return result;
+    }
+
+    function getEarlyHomeRamTarget() {
+        return resetInfo.currentNode == 3 ? bn3EarlyHomeRamTarget : earlyHomeRamTarget;
     }
 
     /** Retrieves the last faction manager output file, parses, and provides type-hints for it.
@@ -1715,27 +1751,8 @@ export async function main(ns) {
         if (resetInfo.currentNode == 10 && bn10SleevesIncomplete && Number.isFinite(bn10SleeveReserve) && bn10SleeveReserve > 0) {
             return writeReserveForTarget(ns, bn10SleeveReserve, stocksValue);
         }
-        // Otherwise, reserve money for stocks for a while, as it's our main source of income early in the BN
-        // It also acts as a decent way to save up for augmentations
-        const stockBootstrapReserve = 8E9; // Keep early stock bootstrap money only after we have actually built up enough cash.
-        const targetReserve = stocksValue > 0 || player.money >= stockBootstrapReserve ?
-            stockBootstrapReserve :
-            0;
-        return writeReserveForTarget(ns, targetReserve, stocksValue); // Reserve only the cash gap not already covered by stocks
-        // NOTE: After several iterations, I decided that the above is actually best to keep in all scenarios:
-        // - Casino.js ignores the reserve, so the above takes care of ensuring our casino seed money isn't spent
-        // - In low-income situations, stockmaster will be our best source of income. We invoke it such that it ignores
-        //	 the global reserve, so this 8B is for stocks only. The 2B remaining is plenty to kickstart the rest.
-        // - Once high-hack/gang income is achieved, this 8B will not be missed anyway.
-        /*
-        if(!ranCasino) {
-            ns.write("reserve.txt", 300000, "w"); // Prevent other scripts from spending our casino seed money
-            return moneyReserved = true;
-        }
-        // Otherwise, clear any reserve we previously had
-        if(moneyReserved) ns.write("reserve.txt", 0, "w"); // Remove the casino reserve we would have placed
-        return moneyReserved = false;
-        */
+        // No default savings reserve: reserve.txt is only for concrete near-term purchases/actions.
+        return writeReserveForTarget(ns, 0, stocksValue);
     }
 
     /** Write the cash-only reserve needed for a target reserve after accounting for stock liquidation value.
@@ -1744,6 +1761,11 @@ export async function main(ns) {
      * @param {number} stocksValue */
     function writeReserveForTarget(ns, targetReserve, stocksValue = cachedStocksValue) {
         const reserve = Math.max(0, (Number(targetReserve) || 0) - Math.max(0, Number(stocksValue) || 0));
+        return writeCashReserve(ns, reserve);
+    }
+
+    function writeCashReserve(ns, reserve) {
+        reserve = Math.max(0, Number(reserve) || 0);
         const currentReserve = Number(ns.read("reserve.txt") || 0);
         return currentReserve == reserve ? true : ns.write("reserve.txt", reserve, "w");
     }

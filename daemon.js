@@ -38,6 +38,8 @@ const argsSchema = [
     ['disable-grafting', false], // Disable grafting automation launch in autopilot mode.
     ['disable-rush-gangs', false], // Disable rush-gang work-for-factions mode in autopilot mode.
     ['disable-bladeburner', false], // Relay autopilot bladeburner disablement to managed helpers.
+    ['cross-city-background-training', true], // Let work-for-factions start gym training in one city and then travel elsewhere for infiltration.
+    ['disable-cross-city-background-training', false], // Disable cross-city background gym training.
     ['late-netburners', false], // Enable late-game Netburners/hacknet faction mode.
     ['late-company-work', false], // Enable late-game company faction work mode.
     ['force-stock-liquidate', false], // Autopilot requested a one-shot stock liquidation via stockmaster.js.
@@ -462,6 +464,10 @@ export async function main(ns) {
             if (!options['late-netburners']) args.push("--skip", "Netburners");
             if (options['cashroot-priority']) args.push("--first", "Sector-12");
             if (options['disable-bladeburner']) args.push("--no-bladeburner-check");
+            if (options['cross-city-background-training'] && !options['disable-cross-city-background-training'])
+                args.push("--cross-city-background-training");
+            else
+                args.push("--disable-cross-city-background-training");
             if (options['no-tail-windows']) args.push("--no-tail-windows");
             if (!options['cashroot-priority'] && !options['disable-rush-gangs'] && !playerInGang) {
                 args.push("--crime-focus", "--training-stat-per-multi-threshold", 200, "--prioritize-invites");
@@ -516,6 +522,10 @@ export async function main(ns) {
         // Set up "asynchronous helpers" - standalone scripts to manage certain aspacts of the game. daemon.js launches each of these once when ready (but not again if they are shut down)
         const defaultStockmasterArgs = openTailWindows ? ["--show-market-summary"] : [];
         const defaultWorkForFactionsArgs = ['--fast-crimes-only', '--no-coding-contracts', '--no-company-work'];
+        if (options['cross-city-background-training'] && !options['disable-cross-city-background-training'])
+            defaultWorkForFactionsArgs.push('--cross-city-background-training');
+        else
+            defaultWorkForFactionsArgs.push('--disable-cross-city-background-training');
         if (options['no-tail-windows']) defaultWorkForFactionsArgs.push('--no-tail-windows');
         appendWorkTailArgs(defaultWorkForFactionsArgs);
         refreshHomeReservedRam(ns);
@@ -635,7 +645,10 @@ export async function main(ns) {
             // Buy upgrades regardless of payoff if they cost less than 0.1% of our money
             { interval: 29000, name: "hacknet-upgrade-manager.js", shouldRun: shouldUpgradeHacknet, args: () => ["--continuous", "--max-payoff-time", "1E100h", "--max-spend", getPlayerMoney(ns) * 0.001, "--reserve", hacknetReserve(ns)] },
             {   // Spend about 50% of un-reserved cash on home RAM upgrades (permanent) when they become available
-                interval: 30000, name: "/Tasks/ram-manager.js", args: () => ['--budget', 0.5, '--reserve', reservedMoney(ns)],
+                interval: 30000, name: "/Tasks/ram-manager.js", args: () => {
+                    const bn3Bootstrap = bitNodeN == 3 && ns.getServerMaxRam("home") < 4096;
+                    return ['--budget', bn3Bootstrap ? 1 : 0.5, '--reserve', bn3Bootstrap ? 0 : reservedMoney(ns)];
+                },
                 shouldRun: () => 4 in dictSourceFiles && shouldImproveHacking()
             },
             {   // Periodically check for new faction invites and join if deemed useful to be in that faction. Also determines how many augs we could afford if we installed right now
