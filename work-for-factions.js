@@ -4,7 +4,7 @@ import {
 } from './helpers.js'
 
 let options;
-const workForFactionsVersion = "2026-05-11-focused-hack-study.1";
+const workForFactionsVersion = "2026-05-11-infiltration-training-eta-gate.1";
 const argsSchema = [
     ['first', []], // Grind rep with these factions first. Also forces a join of this faction if we normally wouldn't (e.g. no desired augs or all augs owned)
     ['skip', []], // Don't work for these factions
@@ -1867,6 +1867,18 @@ function estimateRepInfiltrationEtaMs(infiltration, remainingRep, travelNeeded, 
     return trainingTimeMs + travelTimeMs + runsNeeded * estimateInfiltrationRunTimeMs(infiltration);
 }
 
+function estimateBlendedTrainingInfiltrationEtaMs(currentBestLocation, trainingCandidate, remainingRep, playerCity) {
+    const currentRunTimeMs = estimateInfiltrationRunTimeMs(currentBestLocation);
+    const currentRepPerRun = Math.max(1, currentBestLocation?.reward?.tradeRep || 0);
+    const runsDuringTraining = Math.max(0, Math.floor(trainingCandidate.trainingTimeMs / currentRunTimeMs));
+    const repEarnedDuringTraining = runsDuringTraining * currentRepPerRun;
+    const remainingAfterTraining = Math.max(0, remainingRep - repEarnedDuringTraining);
+    if (remainingAfterTraining <= 0)
+        return trainingCandidate.trainingTimeMs;
+    return trainingCandidate.trainingTimeMs +
+        estimateRepInfiltrationEtaMs(trainingCandidate.location, remainingAfterTraining, trainingCandidate.location.location?.city != playerCity);
+}
+
 async function pickInfiltrationTrainingTarget(ns, currentMoney, remainingRep, currentBestLocation) {
     if (!currentBestLocation?.reward?.tradeRep) return null;
     const locations = await getNsDataThroughFile(ns, `ns.infiltration.getPossibleLocations()`, '/Temp/infiltration-locations.txt');
@@ -1888,19 +1900,20 @@ async function pickInfiltrationTrainingTarget(ns, currentMoney, remainingRep, cu
         .map(candidate => {
             const trainingTimeMs = estimateCombatTrainingTimeMs(player, candidate.requiredCombatStat);
             const totalEtaMs = estimateRepInfiltrationEtaMs(candidate.location, remainingRep, candidate.location.location?.city != player.city, trainingTimeMs);
-            return { ...candidate, trainingTimeMs, totalEtaMs, currentBestEtaMs };
+            const blendedEtaMs = estimateBlendedTrainingInfiltrationEtaMs(currentBestLocation, { ...candidate, trainingTimeMs }, remainingRep, player.city);
+            return { ...candidate, trainingTimeMs, totalEtaMs, blendedEtaMs, currentBestEtaMs };
         });
     const trainingCandidates = allTrainingCandidates
+        .filter(candidate => candidate.blendedEtaMs < currentBestEtaMs)
         .sort((a, b) => b.location.reward.tradeRep - a.location.reward.tradeRep ||
-            a.totalEtaMs - b.totalEtaMs ||
+            a.blendedEtaMs - b.blendedEtaMs ||
             a.requiredCombatStat - b.requiredCombatStat);
     const selectedTrainingTarget = trainingCandidates[0] ?? null;
     if (selectedTrainingTarget)
         devConsoleLog(`Selected infiltration training target "${selectedTrainingTarget.location.location.name}" ` +
             `requiring combat stats ${selectedTrainingTarget.requiredCombatStat}. ETA current="${formatDuration(selectedTrainingTarget.currentBestEtaMs)}", ` +
-            `training="${formatDuration(selectedTrainingTarget.trainingTimeMs)}", target="${formatDuration(selectedTrainingTarget.totalEtaMs)}", ` +
-            `rep/run ~${Math.round(selectedTrainingTarget.location.reward.tradeRep).toLocaleString('en')}` +
-            `${selectedTrainingTarget.totalEtaMs > selectedTrainingTarget.currentBestEtaMs ? ', slower than current target but training can run in background' : ''}.`);
+            `training="${formatDuration(selectedTrainingTarget.trainingTimeMs)}", blended="${formatDuration(selectedTrainingTarget.blendedEtaMs)}", ` +
+            `target="${formatDuration(selectedTrainingTarget.totalEtaMs)}", rep/run ~${Math.round(selectedTrainingTarget.location.reward.tradeRep).toLocaleString('en')}.`);
     return selectedTrainingTarget;
 }
 
