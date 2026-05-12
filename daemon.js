@@ -15,6 +15,7 @@ const argsSchema = [
     ['disable-spend-hashes', false], // An easy way to set the above to a very large negative number, thus never spending hashes for Money
 
     ['xp-only', false], // Focus on a strategy that produces the most hack EXP rather than money
+    ['money-focus', false], // Relay to hack.js to prioritize money and skip hack-XP kickstarts.
     ['initial-study-time', 10], // Seconds. Set to 0 to not do any studying at startup. By default, if early in an augmentation, will start with a little study to boost hack XP
     ['initial-hack-xp-time', 10], // Seconds. Set to 0 to not do any hack-xp grinding at startup. By default, if early in an augmentation, will start with a little study to boost hack XP
 
@@ -78,7 +79,7 @@ const argsSchema = [
 ];
 
 const hackForwardedOptionNames = new Set([
-    'xp-only', 'initial-study-time', 'initial-hack-xp-time',
+    'xp-only', 'money-focus', 'initial-study-time', 'initial-hack-xp-time',
     'reserved-ram', 'double-reserve-threshold',
     'initial-max-targets', 'cycle-timing-delay', 'queue-delay', 'recovery-thread-padding',
     'max-batches', 'max-steal-percentage', 'looping-mode',
@@ -343,7 +344,7 @@ export async function main(ns) {
 
         // Process configuration
         options = runOptions;
-        xpOnly = options['xp-only'];
+        xpOnly = options['xp-only'] && !options['money-focus'];
         verbose = options['verbose'];
         runOnce = options['run-once'];
         loopingMode = options['looping-mode'];
@@ -375,6 +376,7 @@ export async function main(ns) {
         log(ns, "The following source files are active: " + JSON.stringify(dictSourceFiles));
 
         // Log which flags are active
+        if (options['money-focus']) log(ns, '--money-focus - Money-focused hacking mode activated; daemon startup XP helpers are disabled.');
         if (xpOnly) log(ns, '--xp-only - Hack XP Grinding mode activated!');
         if (verbose) log(ns, '--verbose - Verbose logging activated!');
         if (runOnce) log(ns, '--run-once - Run-once mode activated!');
@@ -405,6 +407,21 @@ export async function main(ns) {
 
         function hasSingularityAccess() {
             return options['singularity-confirmed'] || 4 in dictSourceFiles;
+        }
+
+        function isMoneyFocusSpendingLocked() {
+            return !!options['money-focus'];
+        }
+
+        function isMoneyFocusBlockedHelper(helper) {
+            if (!isMoneyFocusSpendingLocked()) return false;
+            return ['work-for-factions.js', 'go.js', 'gangs.js', 'sleeve.js', 'bladeburner.js',
+                'graft-manager.js', 'darknet-manager.js', 'faction-manager.js', 'backdoor-all-servers.js']
+                .includes(String(helper.name || '').split('/').pop());
+        }
+
+        function shouldBypassCorporationHomeRamGate() {
+            return options['money-focus'] && bitNodeN == 3;
         }
 
         function getEffectiveSf4Level() {
@@ -532,6 +549,7 @@ export async function main(ns) {
         const isWorkForFactionsDisabled = () => options['disable-script'].some(disabled =>
             disabled == 'work-for-factions.js' || String(disabled).split('/').pop() == 'work-for-factions.js');
         const canRunWorkForFactionsAfterFocus = async () => !isWorkForFactionsDisabled() &&
+            !isMoneyFocusSpendingLocked() &&
             hasSingularityAccess() && (options['autopilot-mode'] ? options['casino-complete'] : true) &&
             reqRam(256 / (2 ** getEffectiveSf4Level()));
         const shouldRunWorkForFactions = async () => await canRunWorkForFactionsAfterFocus() && !studying;
@@ -551,7 +569,7 @@ export async function main(ns) {
                 restartOnArgsChange: true,
                 ignoreReservedRam: false,
             },
-            { name: "go.js", shouldRun: async () => !(await isWorkForFactionsPending()) && reqRam(64) && homeServer.ramAvailable(/*ignoreReservedRam:*/true) >= 20, minRamReq: 20.2, shouldTail: options['tail-go'] }, // Play go.js (various multipliers, but large dynamic ram requirements)
+            { name: "go.js", shouldRun: async () => !isMoneyFocusSpendingLocked() && !(await isWorkForFactionsPending()) && reqRam(64) && homeServer.ramAvailable(/*ignoreReservedRam:*/true) >= 20, minRamReq: 20.2, shouldTail: options['tail-go'] }, // Play go.js (various multipliers, but large dynamic ram requirements)
             {
                 name: "stockmaster.js",
                 shouldRun: () => options['autopilot-mode'] ? options['casino-complete'] && reqRam(32) : reqRam(64),
@@ -560,6 +578,16 @@ export async function main(ns) {
                 relaunchIfExited: true,
                 ignoreReservedRam: false,
             }, // Start our stockmaster
+            {
+                name: "money-infiltration.js",
+                shouldRun: () => options['money-focus'] && (options['autopilot-mode'] ? options['casino-complete'] : true) &&
+                    whichServerIsRunning(ns, getFilePath('infiltration-runner.js'), false)[0] == null &&
+                    reqRam(64),
+                restartOnArgsChange: true,
+                relaunchIfExited: true,
+                cooldownMs: 30 * 1000,
+                ignoreReservedRam: false,
+            },
             { name: "hacknet-upgrade-manager.js", shouldRun: () => shouldUpgradeHacknet(), args: () => ["--continuous", "--max-payoff-time", "1h", "--interval", "0", "--reserve", hacknetReserve(ns)], shouldTail: false }, // One-time kickstart of hash income by buying everything with up to 1h payoff time immediately
             {
                 name: "spend-hacknet-hashes.js",
@@ -571,14 +599,14 @@ export async function main(ns) {
             }, // Always have this running to make sure hashes aren't wasted
             {
                 name: "sleeve.js",
-                shouldRun: () => options['autopilot-mode'] ? options['casino-complete'] && reqRam(64) && 10 in dictSourceFiles && 2 in dictSourceFiles : reqRam(64) && 10 in dictSourceFiles,
+                shouldRun: () => !isMoneyFocusSpendingLocked() && (options['autopilot-mode'] ? options['casino-complete'] && reqRam(64) && 10 in dictSourceFiles && 2 in dictSourceFiles : reqRam(64) && 10 in dictSourceFiles),
                 args: () => options['autopilot-mode'] ? getAutopilotSleeveArgs() : [],
                 restartOnArgsChange: true,
                 ignoreReservedRam: false,
             }, // Script to create manage our sleeves for us
             {
                 name: "gangs.js",
-                shouldRun: async () => !(await isWorkForFactionsPending()) &&
+                shouldRun: async () => !isMoneyFocusSpendingLocked() && !(await isWorkForFactionsPending()) &&
                     (options['autopilot-mode'] ? options['casino-complete'] && reqRam(64) && 2 in dictSourceFiles && await isPlayerInGang(ns) : reqRam(64) && 2 in dictSourceFiles),
                 args: () => options['autopilot-mode'] ? getAutopilotGangArgs() : [],
                 restartOnArgsChange: true,
@@ -587,10 +615,11 @@ export async function main(ns) {
             }, // Script to create manage our gang for us
             {
                 name: "bladeburner.js", // Script to manage bladeburner for us. Run automatically if not disabled and bladeburner API is available
-                shouldRun: () => !options['disable-bladeburner'] && !options['disable-script'].includes('bladeburner.js') && reqRam(64)
+                shouldRun: () => !isMoneyFocusSpendingLocked() && !options['disable-bladeburner'] && !options['disable-script'].includes('bladeburner.js') && reqRam(64)
                     && 7 in dictSourceFiles && bitNodeMults.BladeburnerRank != 0 // Don't run bladeburner in BN's where it can't rank up (currently just BN8)
             },
         ];
+        asynchronousHelpers = asynchronousHelpers.filter(helper => !isMoneyFocusBlockedHelper(helper));
         if (options['autopilot-mode']) {
             asynchronousHelpers.push(
                 {
@@ -599,7 +628,8 @@ export async function main(ns) {
                     shouldRun: () => options['casino-complete'] && !options['disable-corporation'] &&
                         (bitNodeN == 3 || (dictSourceFiles[3] ?? 0) >= 3) &&
                         whichServerIsRunning(ns, 'corporation.js', false)[0] == null &&
-                        reqRam(corporationMinHomeRam) && hasFreeRamForScript(ns, getFilePath('corporation.js'), homeReservedRam),
+                        (shouldBypassCorporationHomeRamGate() || reqRam(corporationMinHomeRam)) &&
+                        hasFreeRamForScript(ns, getFilePath('corporation.js'), homeReservedRam),
                     cooldownMs: 60 * 1000,
                     relaunchIfExited: true,
                     ignoreReservedRam: false,
@@ -607,20 +637,21 @@ export async function main(ns) {
                 {
                     name: "Tasks/darknet-manager.js",
                     args: () => !openTailWindows ? ['--no-tail-windows'] : [],
-                    shouldRun: () => options['casino-complete'] && !options['disable-darknet'] && reqRam(darknetMinHomeRam),
+                    shouldRun: () => !isMoneyFocusSpendingLocked() && options['casino-complete'] && !options['disable-darknet'] && reqRam(darknetMinHomeRam),
                     cooldownMs: 60 * 1000,
                     ignoreReservedRam: false,
                 },
                 {
                     name: "graft-manager.js",
                     args: () => getAutopilotGraftArgs(),
-                    shouldRun: async () => options['casino-complete'] && !options['disable-grafting'] &&
+                    shouldRun: async () => !isMoneyFocusSpendingLocked() && options['casino-complete'] && !options['disable-grafting'] &&
                         (bitNodeN == 10 || 10 in dictSourceFiles) && await shouldRunAutopilotGrafting(ns),
                     restartOnArgsChange: true,
                     cooldownMs: 60 * 1000,
                     ignoreReservedRam: false,
                 },
             );
+            asynchronousHelpers = asynchronousHelpers.filter(helper => !isMoneyFocusBlockedHelper(helper));
         }
         // Add any additional scripts to be run provided by --run-script arguments
         options['run-script'].forEach(s => asynchronousHelpers.push({ name: s }));
@@ -646,7 +677,7 @@ export async function main(ns) {
             { interval: 29000, name: "hacknet-upgrade-manager.js", shouldRun: shouldUpgradeHacknet, args: () => ["--continuous", "--max-payoff-time", "1E100h", "--max-spend", getPlayerMoney(ns) * 0.001, "--reserve", hacknetReserve(ns)] },
             {   // Spend about 50% of un-reserved cash on home RAM upgrades (permanent) when they become available
                 interval: 30000, name: "/Tasks/ram-manager.js", args: () => {
-                    const bn3Bootstrap = bitNodeN == 3 && ns.getServerMaxRam("home") < 4096;
+                    const bn3Bootstrap = bitNodeN == 3;
                     return ['--budget', bn3Bootstrap ? 1 : 0.5, '--reserve', bn3Bootstrap ? 0 : reservedMoney(ns)];
                 },
                 shouldRun: () => 4 in dictSourceFiles && shouldImproveHacking()
@@ -654,7 +685,7 @@ export async function main(ns) {
             {   // Periodically check for new faction invites and join if deemed useful to be in that faction. Also determines how many augs we could afford if we installed right now
                 interval: 31000, name: "faction-manager.js", args: ['--verbose', 'false'],
                 // Don't start auto-joining factions until we're holding 1 billion (so coding contracts returning money is probably less critical) or we've joined one already
-                shouldRun: () => 4 in dictSourceFiles && (_cachedPlayerInfo.factions.length > 0 || getPlayerMoney(ns) > 1e9) &&
+                shouldRun: () => !isMoneyFocusSpendingLocked() && 4 in dictSourceFiles && (_cachedPlayerInfo.factions.length > 0 || getPlayerMoney(ns) > 1e9) &&
                     reqRam(128 / (2 ** dictSourceFiles[4])) // Uses singularity functions, and higher SF4 levels result in lower RAM requirements
             },
             {   // Periodically look to purchase new servers, but note that these are often not a great use of our money (hack income isn't everything) so we may hold-back.
@@ -667,7 +698,7 @@ export async function main(ns) {
                     '--utilization-trigger', '0'], // Disable utilization-based restrictions on purchasing RAM
             },
             // Check if any new servers can be backdoored. If there are many, this can eat up a lot of RAM, so make this the last script scheduled at startup.
-            { interval: 33000, name: "/Tasks/backdoor-all-servers.js", shouldRun: () => 4 in dictSourceFiles && playerHackSkill() > 10 }, // Don't do this until we reach hack level 10. If we backdoor too early, it's very slow and eats up RAM for a long time,
+            { interval: 33000, name: "/Tasks/backdoor-all-servers.js", shouldRun: () => !isMoneyFocusSpendingLocked() && 4 in dictSourceFiles && playerHackSkill() > 10 }, // Don't do this until we reach hack level 10. If we backdoor too early, it's very slow and eats up RAM for a long time,
         ];
         periodicScripts.forEach(tool => tool.ignoreReservedRam ??= false);
         if (verbose) // In verbose mode, have periodic sripts persist their logs.
@@ -677,7 +708,7 @@ export async function main(ns) {
 
         // If we ascended less than 10 minutes ago, start with some study and/or XP cycles to quickly restore hack XP
         const timeSinceLastAug = Date.now() - resetInfo.lastAugReset;
-        const shouldKickstartHackXp = (playerHackSkill() < 500 && timeSinceLastAug < 600000 && reqRam(16)); // RamReq ensures we don't attempt this in BN1.1
+        const shouldKickstartHackXp = !options['money-focus'] && (playerHackSkill() < 500 && timeSinceLastAug < 600000 && reqRam(16)); // RamReq ensures we don't attempt this in BN1.1
         studying = shouldKickstartHackXp ? true : false; // Flag will be used to prevent focus-stealing scripts from running until hack.js is done studying.
         if (studying)
             focusReservedUntil = Date.now() + 5000 + 1000 * (options['initial-study-time'] + options['initial-hack-xp-time']);

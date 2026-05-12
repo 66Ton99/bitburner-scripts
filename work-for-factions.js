@@ -4,7 +4,7 @@ import {
 } from './helpers.js'
 
 let options;
-const workForFactionsVersion = "2026-05-11-infiltration-training-eta-gate.1";
+const workForFactionsVersion = "2026-05-12-bn3-skip-crime-rep.1";
 const argsSchema = [
     ['first', []], // Grind rep with these factions first. Also forces a join of this faction if we normally wouldn't (e.g. no desired augs or all augs owned)
     ['skip', []], // Don't work for these factions
@@ -111,6 +111,7 @@ const preferredCompanyFactionOrder = [
 ]
 // Order in which to focus on crime factions. Start with the hardest-to-earn invites, assume we will skip to next best if not achievable.
 const preferredCrimeFactionOrder = ["Slum Snakes", "Tetrads", "Speakers for the Dead", "The Syndicate", "The Dark Army", "The Covenant", "Daedalus", "Netburners", "NiteSec", "The Black Hand"];
+const bn3DefaultSkippedCrimeRepFactions = ["Slum Snakes", "Tetrads", "Speakers for the Dead", "The Syndicate", "The Dark Army", "The Covenant"];
 // Gang factions in order of ease-of-invite. If gangs are available, as we near 54K Karma to unlock gangs (as per --karma-threshold-for-gang-invites), we will attempt to get into any/all of these.
 const desiredGangFactions = ["Slum Snakes", "The Syndicate", "The Dark Army", "Speakers for the Dead"];
 // Previously this was needed because you couldn't work for any gang factions once in a gang, but that was changed.
@@ -327,6 +328,7 @@ export async function main(ns) {
 /** @param {NS} ns */
 async function loadStartupData(ns) {
     const playerInfo = await getPlayerInfo(ns);
+    currentBitnode = (await getResetInfoRd(ns)).currentNode;
     const allKnownFactions = factions.concat(playerInfo.factions.filter(f => !factions.includes(f)));
     bitNodeMults = await tryGetBitNodeMultipliers(ns);
 
@@ -389,7 +391,11 @@ async function loadStartupData(ns) {
     // Unless otherwise configured, we will skip factions with no remaining augmentations
     completedFactions = filterableFactions.filter(fac => mostExpensiveAugByFaction[fac] == -1);
     softCompletedFactions = filterableFactions.filter(fac => mostExpensiveDesiredAugByFaction[fac] == -1 && !completedFactions.includes(fac));
-    skipFactions = options.skip.concat(cannotWorkForFactions).concat(completedFactions).filter(fac => !firstFactions.includes(fac));
+    const bn3CrimeRepSkips = currentBitnode == 3 && options['crime-focus'] && !options['get-invited-to-every-faction'] ?
+        bn3DefaultSkippedCrimeRepFactions : [];
+    skipFactions = options.skip.concat(bn3CrimeRepSkips).concat(cannotWorkForFactions).concat(completedFactions).filter(fac => !firstFactions.includes(fac));
+    if (bn3CrimeRepSkips.length > 0)
+        ns.print(`BN3 crime-focus: skipping long combat/crime faction rep grinds by default: ${bn3CrimeRepSkips.filter(f => !firstFactions.includes(f)).join(", ")}`);
     if (completedFactions.length > 0)
         ns.print(`${completedFactions.length} factions will be skipped (for having no remaining relevant augs): ${completedFactions.join(", ")}`);
     if (softCompletedFactions.length > 0)
@@ -2342,7 +2348,7 @@ async function prepareInfiltrationLocation(ns, city, company) {
         };
         if (beforeWork?.type == "GRAFTING")
             return { ...result, blocked: "grafting" };
-        if (beforeWork?.type) {
+        if (beforeWork?.type && beforeWork.type != "CLASS") {
             result.stopped = ns.singularity.stopAction();
         }
         if (ns.getPlayer().city != city) {

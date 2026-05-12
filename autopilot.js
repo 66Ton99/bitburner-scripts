@@ -4,7 +4,7 @@ import {
     formatMoney, formatDuration, formatRam, getErrorInfo, tail, jsonReplacer, scanAllServers
 } from './helpers.js'
 
-const autopilotVersion = "2026-05-11-bn3-bootstrap-no-reserve.1";
+const autopilotVersion = "2026-05-11-money-focus-until-bn3-ram.1";
 const stockValueHelperRam = 3.6;
 const ownedAugmentationsHelperRam = 6.6;
 const earlyBootstrapHelperRam = 12;
@@ -88,6 +88,7 @@ const argsSchema = [ // The set of all command line arguments
     ['on-completion-script-args', []], // Optional args to pass to the script when we defeat the bitnode
     ['xp-mode-interval-minutes', 55], // Every time this many minutes has elapsed, toggle daemon.js to runing in --xp-only mode, which prioritizes earning hack-exp rather than money
     ['xp-mode-duration-minutes', 5], // The number of minutes to keep daemon.js in --xp-only mode before switching back to normal money-earning mode.
+    ['money-focus', true], // In BN3 RAM bootstrap, prioritize earning money and buying RAM over focus/side activities.
     ['no-tail-windows', false], // Set to true to prevent the default behaviour of opening a tail window for certain launched scripts. (Doesn't affect scripts that open their own tail windows)
     ['tail-x', 675], // Default autopilot.js tail window x position.
     ['tail-y', 0], // Default autopilot.js tail window y position.
@@ -1003,6 +1004,7 @@ export async function main(ns) {
         const shouldForceSector12 = !installedAugmentations.includes(augCashRoot) &&
             !facmanOutput?.affordable_augs?.includes(augCashRoot) &&
             !facmanOutput?.awaiting_install_augs?.includes(augCashRoot);
+        const moneyFocus = isMoneyFocusActive();
         const stockCashFraction = (resetInfo.currentNode == 8 || bn10SleevesIncomplete) ? 0.001 : 0.1;
         const stockBuyFraction = (resetInfo.currentNode == 8 || bn10SleevesIncomplete) ? 0.001 : 0.4;
         if (pursueNetburnersLateGame || pursueCompanyFactionsLateGame) {
@@ -1035,12 +1037,12 @@ export async function main(ns) {
                 daemonArgs.push("--initial-max-targets", 1);
             } else { // XP-ONLY MODE: We can shift daemon.js to this when we want to prioritize earning hack exp rather than money
                 // Only do this if we aren't in --looping mode because TODO: currently it does not kill it's loops on shutdown, so they'd be stuck in hack exp mode
-                let useXpOnlyMode = prioritizeHackForDaedalus || prioritizeHackForWd ||
+                let useXpOnlyMode = !moneyFocus && (prioritizeHackForDaedalus || prioritizeHackForWd ||
                     // In BNs that give no money for hacking, always start daemon.js in this mode (except BN8, because TODO: --xp-only doesn't handle stock manipulation)
-                    (bitNodeMults.ScriptHackMoney * bitNodeMults.ScriptHackMoneyGain == 0 && resetInfo.currentNode != 8);
+                    (bitNodeMults.ScriptHackMoney * bitNodeMults.ScriptHackMoneyGain == 0 && resetInfo.currentNode != 8));
                 const timedXpModeHackCap = 2500;
                 const allowTimedXpMode = player.skills.hacking < timedXpModeHackCap;
-                if (!useXpOnlyMode && allowTimedXpMode) { // Otherwise, respect the configured interval / duration while hack XP still has meaningful near-term value
+                if (!moneyFocus && !useXpOnlyMode && allowTimedXpMode) { // Otherwise, respect the configured interval / duration while hack XP still has meaningful near-term value
                     const xpInterval = Number(options['xp-mode-interval-minutes']);
                     const xpDuration = Number(options['xp-mode-duration-minutes']);
                     const minutesInAug = getTimeInAug() / 60.0 / 1000.0;
@@ -1051,7 +1053,9 @@ export async function main(ns) {
                     else if (existingDaemon?.args.includes("--xp-only"))
                         daemonRelaunchMessage = `Time is up for "xp-mode", Relaunching daemon.js normally to focus on earning money for ${xpInterval} minutes (--xp-mode-interval-minutes)`;
                 } else if (!useXpOnlyMode && existingDaemon?.args.includes("--xp-only")) {
-                    daemonRelaunchMessage = `Hack level (${player.skills.hacking}) is already high enough that timed "xp-mode" is no longer useful. Relaunching daemon.js normally to focus on earning money.`;
+                    daemonRelaunchMessage = moneyFocus ?
+                        `BN3 RAM bootstrap is active. Relaunching daemon.js normally to focus on earning money for RAM.` :
+                        `Hack level (${player.skills.hacking}) is already high enough that timed "xp-mode" is no longer useful. Relaunching daemon.js normally to focus on earning money.`;
                 }
                 if (useXpOnlyMode) {
                     daemonArgs.push("--xp-only", "--silent-misfires");
@@ -1083,6 +1087,14 @@ export async function main(ns) {
             if (options['disable-bladeburner']) daemonArgs.push('--disable-bladeburner');
             if (options['cross-city-background-training']) daemonArgs.push('--cross-city-background-training');
             else daemonArgs.push('--disable-cross-city-background-training');
+            if (moneyFocus) {
+                daemonArgs.push('--money-focus');
+                for (const script of ['work-for-factions.js', 'go.js', 'gangs.js', 'sleeve.js', 'bladeburner.js',
+                    'graft-manager.js', 'Tasks/darknet-manager.js', 'faction-manager.js', 'Tasks/backdoor-all-servers.js'])
+                    daemonArgs.push('--disable-script', getFilePath(script));
+                daemonArgs.push('--disable-grafting', '--disable-darknet', '--disable-bladeburner');
+                log_once(ns, `INFO: BN3 --money-focus mode is active. Prioritizing hacking income, stocks, and home RAM upgrades before side activities.`);
+            }
             if (pursueNetburnersLateGame) daemonArgs.push('--late-netburners');
             if (pursueCompanyFactionsLateGame) daemonArgs.push('--late-company-work');
             if (forceStockLiquidation) daemonArgs.push('--force-stock-liquidate');
@@ -1241,12 +1253,8 @@ export async function main(ns) {
 
         // If we're making more than ~5b / minute from the start of the BN, there's no need to run casino.
         // In BN8 this is impossible, so in that case we don't even check and head straight to the casino.
-        if (resetInfo.currentNode != 8 && homeRam > 8) {
-            // If we've been in the BN for less than 1 minute, wait a while to establish player's income rate 
-            if (getTimeInAug() < 60000) {
-                log_once(ns, `INFO: Waiting a minute to establish player income before deciding whether casino.js is needed.`);
-                return true;
-            }
+        // Do not wait for the baseline; before it exists, continue to the normal casino/cash checks.
+        if (resetInfo.currentNode != 8 && homeRam > 8 && getTimeInAug() >= 60000) {
             // Since it's possible that the CashRoot Startker Kit could give a false income velocity, account for that.
             const cashRootBought = installedAugmentations.includes(`CashRoot Starter Kit`);
             const incomePerMs = (playerWealth - (cashRootBought ? 1e6 : 0)) / getTimeInAug();
@@ -1360,6 +1368,10 @@ export async function main(ns) {
         return resetInfo.currentNode == 3 ? bn3EarlyHomeRamTarget : earlyHomeRamTarget;
     }
 
+    function isMoneyFocusActive() {
+        return !!options['money-focus'] && resetInfo.currentNode == 3 && homeRam < bn3EarlyHomeRamTarget;
+    }
+
     /** Retrieves the last faction manager output file, parses, and provides type-hints for it.
      * @returns {{ installed_augs: string[], installed_count: number, installed_count_nf: number, installed_count_ex_nf: number,
      *             owned_augs: string[], owned_count: number, owned_count_nf: number, owned_count_ex_nf: number,
@@ -1404,6 +1416,12 @@ export async function main(ns) {
     async function maybeInstallAugmentations(ns, player) {
         if (!singularityAvailable)  // Cannot automate augmentations or installs without singularity
             return setStatus(ns, `No singularity access, so you're on your own. You should manually work for factions and install augmentations!`);
+
+        if (isMoneyFocusActive()) {
+            setStatus(ns, `BN3 --money-focus is active until home RAM reaches ${formatRam(bn3EarlyHomeRamTarget)}. ` +
+                `Not buying or installing augmentations during the RAM bootstrap.`);
+            return reservedPurchase = 0;
+        }
 
         if (resetInfo.currentNode == 10 && bn10SleevesIncomplete) {
             setStatus(ns, `Not buying or installing augmentations because BN10 is complete and Covenant sleeves/memory are still missing. ` +

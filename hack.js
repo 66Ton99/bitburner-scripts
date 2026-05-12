@@ -14,6 +14,7 @@ let options;
 const argsSchema = [
     // Behaviour-changing flags
     ['xp-only', false], // Focus on a strategy that produces the most hack EXP rather than money
+    ['money-focus', false], // Prioritize money over hack-XP kickstarts. Overrides --xp-only and startup study/XP bursts.
     ['initial-study-time', 10], // Seconds. Set to 0 to not do any studying at startup. By default, if early in an augmentation, will start with a little study to boost hack XP
     ['initial-hack-xp-time', 10], // Seconds. Set to 0 to not do any hack-xp grinding at startup. By default, if early in an augmentation, will start with a little study to boost hack XP
 
@@ -99,6 +100,7 @@ export async function main(ns) {
     // Command line Flags
     let hackOnly = false; // --hack-only command line arg - don't grow or shrink, just hack (a.k.a. scrapping mode)
     let xpOnly = false; // --xp-only command line arg - focus on a strategy that produces the most hack EXP rather than money
+    let moneyFocus = false; // --money-focus command line arg - skip startup XP helpers and optimize for money.
     let verbose = false; // --verbose command line arg - Detailed logs about batch scheduling / tuning
     let runOnce = false; // --run-once command line arg - Good for debugging, run the main targeting loop once then stop
     let loopingMode = false;
@@ -236,7 +238,8 @@ export async function main(ns) {
         // Process configuration
         options = runOptions;
         hackOnly = options['hack-only'];
-        xpOnly = options['xp-only'];
+        moneyFocus = options['money-focus'];
+        xpOnly = options['xp-only'] && !moneyFocus;
         verbose = options['verbose'];
         runOnce = options['run-once'];
         loopingMode = options['looping-mode'];
@@ -249,6 +252,7 @@ export async function main(ns) {
 
         // Log which flags are active
         if (hackOnly) log(ns, '--hack-only - Hack-Only mode activated!');
+        if (moneyFocus) log(ns, '--money-focus - Money-focused hacking mode activated; startup study/XP helpers are disabled.');
         if (xpOnly) log(ns, '--xp-only - Hack XP Grinding mode activated!');
         if (verbose) log(ns, '--verbose - Verbose logging activated!');
         if (runOnce) log(ns, '--run-once - Run-once mode activated!');
@@ -280,7 +284,7 @@ export async function main(ns) {
 
         // If we ascended less than 10 minutes ago, start with some study and/or XP cycles to quickly restore hack XP
         const timeSinceLastAug = Date.now() - resetInfo.lastAugReset;
-        const shouldKickstartHackXp = (playerHackSkill() < 500 && timeSinceLastAug < 600000 && reqRam(16)); // RamReq ensures we don't attempt this in BN1.1
+        const shouldKickstartHackXp = !moneyFocus && (playerHackSkill() < 500 && timeSinceLastAug < 600000 && reqRam(16)); // RamReq ensures we don't attempt this in BN1.1
 
         // Immediately crack all servers we can to maximize RAM available on the first loop
         for (const server of getAllServers())
@@ -669,7 +673,7 @@ export async function main(ns) {
                         targeting.push(server);
                         skipped.splice(skipped.findIndex(s => s.name == server.name), 1);
                     }
-                } else if (!isWorkCapped() && lowUtilizationIterations > 10) {
+                } else if (!moneyFocus && !isWorkCapped() && lowUtilizationIterations > 10) {
                     let expectedRunTime = getBestXPFarmTarget().timeToHack();
                     let freeRamToUse = (expectedRunTime < loopInterval) ? // If expected runtime is fast, use as much RAM as we want, it'll all be free by our next loop.
                         1 - (1 - lowUtilizationThreshold) / (1 - utilizationPercent) : // Take us just up to the threshold for 'lowUtilization' so we don't cause unecessary server purchases
@@ -1494,6 +1498,8 @@ export async function main(ns) {
     /** @param {NS} ns
      * Grind hack XP by filling a bunch of RAM with hack() / grow() / weaken() against a relatively easy target */
     async function farmHackXp(ns, fractionOfFreeRamToConsume = 1, verbose = false, numTargets = undefined) {
+        if (moneyFocus)
+            return 0;
         if (!xpOnly) // Only use basic single-target hacking unless we're in XP mode
             return await scheduleHackExpCycle(ns, getBestXPFarmTarget(), fractionOfFreeRamToConsume, verbose, false); // Grind some XP from the single best target for farming XP
         // Otherwise, target multiple servers until we can't schedule any more. Each next best host should get the next best (biggest) server
