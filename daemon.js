@@ -504,6 +504,7 @@ export async function main(ns) {
         }
 
         async function shouldRunAutopilotGrafting(ns) {
+            if (bitNodeN == 3) return false;
             if (bitNodeN == 8 && getPlayerMoney(ns) < 100e9) return false;
             try {
                 return (await getCurrentWorkInfo(ns))?.type != "GRAFTING";
@@ -528,11 +529,11 @@ export async function main(ns) {
             return args;
         }
 
-        function hasFreeRamForScript(ns, scriptName, homeReserve = 0) {
+        function hasFreeRamForScript(ns, scriptName, ignoreHomeReserve = false) {
             const scriptRam = ns.getScriptRam(scriptName, "home");
             if (!Number.isFinite(scriptRam) || scriptRam <= 0) return false;
             return getAllServers().some(server => server.hasRoot() &&
-                server.ramAvailable(server.name != "home") >= scriptRam);
+                server.ramAvailable(ignoreHomeReserve || server.name != "home") >= scriptRam);
         }
 
         // ASYNCHRONOUS HELPERS
@@ -567,6 +568,8 @@ export async function main(ns) {
                 args: () => options['autopilot-mode'] ? getAutopilotWorkForFactionsArgs() : defaultWorkForFactionsArgs,  // Singularity script to manage how we use our "focus" work.
                 shouldRun: shouldRunWorkForFactions,
                 restartOnArgsChange: true,
+                relaunchIfExited: true,
+                cooldownMs: 5 * 60 * 1000,
                 ignoreReservedRam: false,
             },
             { name: "go.js", shouldRun: async () => !isMoneyFocusSpendingLocked() && !(await isWorkForFactionsPending()) && reqRam(64) && homeServer.ramAvailable(/*ignoreReservedRam:*/true) >= 20, minRamReq: 20.2, shouldTail: options['tail-go'] }, // Play go.js (various multipliers, but large dynamic ram requirements)
@@ -629,10 +632,10 @@ export async function main(ns) {
                         (bitNodeN == 3 || (dictSourceFiles[3] ?? 0) >= 3) &&
                         whichServerIsRunning(ns, 'corporation.js', false)[0] == null &&
                         (shouldBypassCorporationHomeRamGate() || reqRam(corporationMinHomeRam)) &&
-                        hasFreeRamForScript(ns, getFilePath('corporation.js'), homeReservedRam),
+                        hasFreeRamForScript(ns, getFilePath('corporation.js'), shouldBypassCorporationHomeRamGate()),
                     cooldownMs: 60 * 1000,
                     relaunchIfExited: true,
-                    ignoreReservedRam: false,
+                    ignoreReservedRam: shouldBypassCorporationHomeRamGate(),
                 },
                 {
                     name: "Tasks/darknet-manager.js",

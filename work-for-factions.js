@@ -4,7 +4,7 @@ import {
 } from './helpers.js'
 
 let options;
-const workForFactionsVersion = "2026-05-12-bn3-skip-crime-rep.1";
+const workForFactionsVersion = "2026-05-13-bn3-grafting-background.1";
 const argsSchema = [
     ['first', []], // Grind rep with these factions first. Also forces a join of this faction if we normally wouldn't (e.g. no desired augs or all augs owned)
     ['skip', []], // Don't work for these factions
@@ -111,7 +111,7 @@ const preferredCompanyFactionOrder = [
 ]
 // Order in which to focus on crime factions. Start with the hardest-to-earn invites, assume we will skip to next best if not achievable.
 const preferredCrimeFactionOrder = ["Slum Snakes", "Tetrads", "Speakers for the Dead", "The Syndicate", "The Dark Army", "The Covenant", "Daedalus", "Netburners", "NiteSec", "The Black Hand"];
-const bn3DefaultSkippedCrimeRepFactions = ["Slum Snakes", "Tetrads", "Speakers for the Dead", "The Syndicate", "The Dark Army", "The Covenant"];
+const bn3DefaultSkippedCrimeRepFactions = ["Tetrads", "Speakers for the Dead", "The Syndicate", "The Dark Army", "The Covenant"];
 // Gang factions in order of ease-of-invite. If gangs are available, as we near 54K Karma to unlock gangs (as per --karma-threshold-for-gang-invites), we will attempt to get into any/all of these.
 const desiredGangFactions = ["Slum Snakes", "The Syndicate", "The Dark Army", "Speakers for the Dead"];
 // Previously this was needed because you couldn't work for any gang factions once in a gang, but that was changed.
@@ -151,7 +151,12 @@ let lastMoneyFallbackStatus = "";
 let lastNoFactionInfiltrationTargetStatus = "";
 let lastNoFactionInfiltrationTargetStatusUpdate = 0;
 let lastInfiltrationConsoleStatus = "";
+let lastMoneyInfiltrationConsoleStatus = "";
 let observedInfiltrationRunTimeByLocation = {};
+let lastNothingToDoStatus = "";
+let lastNothingToDoStatusUpdate = 0;
+let loopHadDeferredInvite = false;
+let lastLoopHadDeferredInvite = false;
 
 function shouldDeferSilhouette(player) {
     if (player.factions.includes("Silhouette"))
@@ -172,6 +177,7 @@ function shouldDeferNetburners(player) {
 }
 
 function deferFactionInvite(ns, factionName, message, cooldownMs = 5 * 60 * 1000) {
+    loopHadDeferredInvite = true;
     const now = Date.now();
     const lastLog = recentFactionInviteDeferrals[factionName] ?? 0;
     if (now - lastLog >= cooldownMs) {
@@ -179,6 +185,23 @@ function deferFactionInvite(ns, factionName, message, cooldownMs = 5 * 60 * 1000
         ns.print(message);
     }
     return "deferred";
+}
+
+function printNothingToDoStatus(ns, status, cooldownMs = statusUpdateInterval) {
+    const now = Date.now();
+    if (status == lastNothingToDoStatus && now - lastNothingToDoStatusUpdate < cooldownMs)
+        return;
+    lastNothingToDoStatus = status;
+    lastNothingToDoStatusUpdate = now;
+    ns.print(status);
+}
+
+function exitAfterDeferredInviteOnlyPass(ns) {
+    if (!loopHadDeferredInvite || breakToMainLoop()) return false;
+    lastLoopHadDeferredInvite = true;
+    printNothingToDoStatus(ns, `INFO: Faction work is blocked by deferred invite requirements. ` +
+        `Exiting so hacking/money automation can progress; daemon will retry faction work later.`);
+    return true;
 }
 
 function recordMoneyGateStatus(factionName, requirement, cash, stockValue) {
@@ -237,6 +260,14 @@ function canPursueFaction(player, factionName) {
     return true;
 }
 
+function shouldBypassPrioritizeInvitesForFaction(factionName) {
+    return currentBitnode == 3 && options['crime-focus'] && factionName == "Slum Snakes";
+}
+
+function shouldTreatGraftingAsBackground(factionName = null) {
+    return currentBitnode == 3 && (!factionName || factionName == "Daedalus" || factionName == "Slum Snakes");
+}
+
 export function autocomplete(data, args) {
     data.flags(argsSchema);
     const lastFlag = args.length > 1 ? args[args.length - 2] : null;
@@ -268,7 +299,7 @@ export async function main(ns) {
     recentHospitalizedLocations = {};
     lastMoneyFallbackStatus = lastNoFactionInfiltrationTargetStatus = "";
     lastNoFactionInfiltrationTargetStatusUpdate = 0;
-    lastInfiltrationConsoleStatus = "";
+    lastInfiltrationConsoleStatus = lastMoneyInfiltrationConsoleStatus = "";
     observedInfiltrationRunTimeByLocation = {};
     // Process configuration options
     firstFactions = (options['first'] || []).map(f => f.replaceAll('_', ' ')); // Factions that end up in this list will be prioritized and joined regardless of their augmentations available.
@@ -315,7 +346,8 @@ export async function main(ns) {
     scope = 0;
     while (true) { // After each loop, we will repeat all prevous work "strategies" to see if anything new has been unlocked, and add one more "strategy" to the queue
         try {
-            await mainLoop(ns);
+            if (await mainLoop(ns) == "deferred-idle")
+                return;
         } catch (err) {
             log(ns, 'WARNING: work-for-factions.js caught an unhandled error in its main loop. Trying again in 5 seconds...\n' + getErrorInfo(err), false, 'warning');
             await ns.sleep(loopSleepInterval);
@@ -410,7 +442,9 @@ let lastMainLoopMessage = "";
 
 /** @param {NS} ns */
 async function mainLoop(ns) {
-    if (!breakToMainLoop()) scope++; // Increase the scope of work if the last iteration completed early (i.e. due to all work within that scope being complete)
+    if (!breakToMainLoop() && !lastLoopHadDeferredInvite) scope++; // Increase scope only after a clean no-work pass.
+    lastLoopHadDeferredInvite = false;
+    loopHadDeferredInvite = false;
     scope = Math.min(scope, 9);
     mainLoopStart = Date.now();
     // If changing our loop scope, log a message
@@ -500,22 +534,26 @@ async function mainLoop(ns) {
             return;
         }
     }
+    if (exitAfterDeferredInviteOnlyPass(ns)) return "deferred-idle";
     if (scope <= 1 || breakToMainLoop()) return;
 
     // Strategy 2: Grind XP with all priority factions that are joined or can be joined, until every single one has desired REP
     if (await workForFirstActionableFaction(ns, factionWorkOrder, faction => workForSingleFaction(ns, faction)))
         return;
+    if (exitAfterDeferredInviteOnlyPass(ns)) return "deferred-idle";
     if (scope <= 2 || breakToMainLoop()) return;
 
     // Strategy 3: Work for any megacorporations not yet completed to earn their faction invites. Once joined, we don't lose these factions on reset.
     let megacorpFactions = preferredCompanyFactionOrder.filter(f => !skipFactions.includes(f) && canPursueFaction(player, f));
     if (!options['no-company-work'])
         await workForAllMegacorps(ns, megacorpFactions, false);
+    if (exitAfterDeferredInviteOnlyPass(ns)) return "deferred-idle";
     if (scope <= 3 || breakToMainLoop()) return;
 
     // Strategy 4: Work for megacorps again, but this time also work for the company factions once the invite is earned
     if (!options['no-company-work'])
         await workForAllMegacorps(ns, megacorpFactions, true);
+    if (exitAfterDeferredInviteOnlyPass(ns)) return "deferred-idle";
     if (scope <= 4 || breakToMainLoop()) return;
 
     // Strategies 5+ now work towards getting an invite to *all factions in the game*
@@ -529,6 +567,7 @@ async function mainLoop(ns) {
     // Strategy 5: For *all factions in the game*, try to earn an invite and work for rep until we can afford the most-expensive *desired* aug.
     if (await workForFirstActionableFaction(ns, allFactionsWorkOrder.filter(f => !softCompletedFactions.includes(f)), faction => workForSingleFaction(ns, faction)))
         return;
+    if (exitAfterDeferredInviteOnlyPass(ns)) return "deferred-idle";
     if (scope <= 5 || breakToMainLoop()) return;
 
     // Strategy 6: Revisit all factions until each has enough rep for its most expensive useful aug.
@@ -537,16 +576,19 @@ async function mainLoop(ns) {
         .concat(allIncompleteFactions.reverse().filter(f => !factionWorkOrder.includes(f)));
     if (await workForFirstActionableFaction(ns, allFactionsWorkOrderReversed, faction => workForSingleFaction(ns, faction, false, true))) // ForceBestAug = true
         return;
+    if (exitAfterDeferredInviteOnlyPass(ns)) return "deferred-idle";
     if (scope <= 6 || breakToMainLoop()) return;
 
     // Strategy 7: Next, revisit all factions and grind XP until we can afford the most expensive aug on this install.
     if (await workForFirstActionableFaction(ns, allFactionsWorkOrder, faction => workForSingleFaction(ns, faction, true, true))) // ForceBestAug = true
         return;
+    if (exitAfterDeferredInviteOnlyPass(ns)) return "deferred-idle";
     if (scope <= 7 || breakToMainLoop()) return;
 
     // Strategy 8: Final rep pass with forceRep enabled so already-joined factions are not skipped by any earlier heuristic.
     if (await workForFirstActionableFaction(ns, allFactionsWorkOrder, faction => workForSingleFaction(ns, faction, false, true, true))) // ForceRep = true
         return;
+    if (exitAfterDeferredInviteOnlyPass(ns)) return "deferred-idle";
     if (scope <= 8 || breakToMainLoop()) return;
 
     // Strategy 9: Busy ourselves for a while longer, then loop to see if there anything more we can do for the above factions
@@ -573,7 +615,8 @@ async function mainLoop(ns) {
         else if (moneyGateStatus)
             printMoneyGateStatus(ns);
         else
-            ns.print(`INFO: Nothing to do. Sleeping for 30 seconds to see if magically we join a faction`);
+            printNothingToDoStatus(ns, `INFO: Nothing actionable for faction work right now. Waiting 30 seconds for ` +
+                `background hacking/money/invite progress before rechecking.`);
         await ns.sleep(30000);
     }
     if (scope <= 9) scope--; // Cap the 'scope' value from increasing perpetually when we're on our last strategy
@@ -787,16 +830,18 @@ async function earnFactionInvite(ns, factionName) {
     if (requirement && player.skills.hacking < requirement &&
         // Special case (Daedalus): Don't grind for hack requirement if we previously did a grind for the physical requirements
         !(reqHackingOrCombat.includes(factionName) && workedForInvite)) {
-        ns.print(`${reasonPrefix} you have insufficient hack level. Need: ${requirement}, Have: ${player.skills.hacking}`);
         const em = requirement / options['training-stat-per-multi-threshold'];
         if (options['no-studying'])
-            return ns.print(`--no-studying is set, nothing we can do to improve hack level.`);
+            return deferFactionInvite(ns, factionName, `${reasonPrefix} you have insufficient hack level. Need: ${requirement}, ` +
+                `Have: ${player.skills.hacking}. --no-studying is set, nothing we can do to improve hack level.`);
         if (hackHeuristic < em)
-            return ns.print(`Your combination of Hacking mult (${formatNumberShort(player.mults.hacking)}), exp_mult ` +
+            return deferFactionInvite(ns, factionName, `Deferring faction "${factionName}" invite because hacking training is currently impractical. ` +
+                `Need hack ${requirement}, have ${player.skills.hacking}. Hacking mult ${formatNumberShort(player.mults.hacking)}, exp_mult ` +
                 `(${formatNumberShort(player.mults.hacking_exp)}), and bitnode hacking / study exp mults ` +
                 `(${formatNumberShort(bitNodeMults.HackingLevelMultiplier)}) / (${formatNumberShort(bitNodeMults.ClassGymExpGain)}) ` +
-                `are probably too low to increase hack from ${player.skills.hacking} to ${requirement} in a reasonable amount of time ` +
-                `(${hackHeuristic} < ${formatNumberShort(em, 2)} - configure with --training-stat-per-multi-threshold)`);
+                `give heuristic ${hackHeuristic}, below threshold ${formatNumberShort(em, 2)}. ` +
+                `Background hacking/augmentations should improve this; configure with --training-stat-per-multi-threshold if desired.`);
+        ns.print(`${reasonPrefix} you have insufficient hack level. Need: ${requirement}, Have: ${player.skills.hacking}`);
         let studying = false;
         const focusStudy = shouldFocus === undefined ? true : shouldFocus;
         if (player.money > options['pay-for-studies-threshold']) { // If we have sufficient money, pay for the best studies
@@ -1539,8 +1584,8 @@ let lastInterruptionNotice = "";
 async function isValidInterruption(ns, currentWork = null) {
     let interruptionNotice = "";
     currentWork ??= await getCurrentWorkInfo(ns); // Retrieve current work (unless it was passed in)
-    // Never interrupt grafting
-    if (currentWork.type == "GRAFTING") {
+    // Never interrupt grafting except in BN3 where faction progression toward The Red Pill is higher priority.
+    if (currentWork.type == "GRAFTING" && !shouldTreatGraftingAsBackground()) {
         interruptionNotice = "Grafting in progress. Pausing all activity to avoid interrupting...";
         wasGrafting = true;
     }
@@ -1618,7 +1663,8 @@ export async function workForSingleFaction(ns, factionName, forceThroughInvitePr
         `${startingFavor?.toFixed(2)}, Target Rep: ${Math.round(factionRepRequired).toLocaleString('en')}`);
     if (options['invites-only'])
         return ns.print(`--invites-only Skipping working for faction...`);
-    if (options['prioritize-invites'] && !forceThroughInvitePriority && !forceBestAug && !forceRep)
+    if (options['prioritize-invites'] && !shouldBypassPrioritizeInvitesForFaction(factionName) &&
+        !forceThroughInvitePriority && !forceBestAug && !forceRep)
         return ns.print(`--prioritize-invites Skipping working for faction for now...`);
     let lastStatusUpdateTime = 0;
     let lastSelectedInfiltrationTarget = "";
@@ -1640,7 +1686,7 @@ export async function workForSingleFaction(ns, factionName, forceThroughInvitePr
             continue;
         }
         const currentWorkBeforeInfiltration = await getCurrentWorkInfo(ns);
-        if (currentWorkBeforeInfiltration?.type == "GRAFTING") {
+        if (currentWorkBeforeInfiltration?.type == "GRAFTING" && !shouldTreatGraftingAsBackground(factionName)) {
             stickyInfiltrationTarget = getInfiltrationLocationKey(bestLocation);
             const pauseStatus = `Grafting active; pausing infiltration for "${factionName}" at "${bestLocation.location.name}" ` +
                 `until grafting completes.`;
@@ -1667,7 +1713,9 @@ export async function workForSingleFaction(ns, factionName, forceThroughInvitePr
         }
         const playerBeforeTravel = await getPlayerInfo(ns);
         const travelNeeded = playerBeforeTravel.city != bestLocation.location.city;
-        const targetSummary = `${factionName}|${bestLocation.location.city}|${bestLocation.location.name}|${playerBeforeTravel.city}|${travelNeeded}`;
+        const repPerRun = Math.max(1, bestLocation?.reward?.tradeRep || 0);
+        const remainingRuns = Math.max(1, Math.ceil(remainingRep / repPerRun));
+        const targetSummary = `${factionName}|${bestLocation.location.city}|${bestLocation.location.name}|${playerBeforeTravel.city}|${travelNeeded}|${remainingRuns}`;
         if (targetSummary != lastSelectedInfiltrationTarget) {
             lastSelectedInfiltrationTarget = targetSummary;
             infiltrationConsoleStatus(formatFactionInfiltrationSelection(bestLocation, factionName, remainingRep,
@@ -1721,10 +1769,6 @@ export async function workForSingleFaction(ns, factionName, forceThroughInvitePr
             lastStatusUpdateTime = Date.now();
             ns.print(`${status} Currently at ${Math.round(currentReputation).toLocaleString('en')}, ` +
                 `estimated ${estimatedRep} rep per run.`);
-        }
-        if (await tryPurchaseAugmentations(ns)) {
-            await loadStartupData(ns);
-            return true;
         }
         await tryBuyReputation(ns);
         await ns.sleep(loopSleepInterval);
@@ -1947,6 +1991,13 @@ function printNoFactionInfiltrationTargetStatus(ns, factionName) {
 function compareRepInfiltrationTargets(a, b, remainingRep, currentCity) {
     const aStats = getRepInfiltrationTargetStats(a, remainingRep, currentCity);
     const bStats = getRepInfiltrationTargetStats(b, remainingRep, currentCity);
+    if (aStats.runCount == 1 && bStats.runCount == 1) {
+        return aStats.etaMs - bStats.etaMs ||
+            aStats.difficulty - bStats.difficulty ||
+            aStats.travelPenalty - bStats.travelPenalty ||
+            aStats.overshoot - bStats.overshoot ||
+            bStats.tradeRep - aStats.tradeRep;
+    }
     return bStats.tradeRep - aStats.tradeRep ||
         aStats.difficulty - bStats.difficulty ||
         aStats.travelPenalty - bStats.travelPenalty ||
@@ -1960,7 +2011,8 @@ function getRepInfiltrationTargetStats(infiltration, remainingRep, currentCity) 
     const runCount = tradeRep > 0 ? Math.ceil(remainingRep / tradeRep) : Number.POSITIVE_INFINITY;
     const overshoot = tradeRep > 0 ? Math.max(0, tradeRep * runCount - remainingRep) : Number.POSITIVE_INFINITY;
     const travelPenalty = infiltration?.location?.city == currentCity ? 0 : 1;
-    return { tradeRep, difficulty, runCount, overshoot, travelPenalty };
+    const etaMs = estimateRepInfiltrationEtaMs(infiltration, remainingRep, travelPenalty > 0);
+    return { tradeRep, difficulty, runCount, overshoot, travelPenalty, etaMs };
 }
 
 async function pickBestMoneyInfiltrationLocation(ns, currentMoney = Number.POSITIVE_INFINITY, scanResult = null) {
@@ -2134,9 +2186,11 @@ async function runMoneyInfiltration(ns, bestLocation, currentMoney, moneyTarget)
     }
     const playerBeforeTravel = await getPlayerInfo(ns);
     const travelNeeded = playerBeforeTravel.city != bestLocation.location.city;
+    moneyInfiltrationConsoleStatus(`target ${bestLocation.location.name}@${bestLocation.location.city} ${formatMoney(bestLocation.reward.sellCash)}`);
     if (travelNeeded) {
         const travelWorked = await goToCity(ns, bestLocation.location.city);
         if (!travelWorked) {
+            moneyInfiltrationConsoleStatus(`travel-failed ${bestLocation.location.name}@${bestLocation.location.city}`, 'error');
             devConsoleLog(`Travel failed from "${playerBeforeTravel.city}" to "${bestLocation.location.city}" for money infiltration at "${bestLocation.location.name}".`);
             noteTravelFailedInfiltration(bestLocation);
             return false;
@@ -2150,8 +2204,10 @@ async function runMoneyInfiltration(ns, bestLocation, currentMoney, moneyTarget)
             noteHospitalizedInfiltration(bestLocation);
         if (infiltrationResult.reason == 'travel-failed')
             noteTravelFailedInfiltration(bestLocation);
+        moneyInfiltrationConsoleStatus(`failed ${bestLocation.location.name}@${bestLocation.location.city}: ${infiltrationResult.reason}`, 'error');
         log(ns, `WARN: Money infiltration runner failed at "${bestLocation.location.name}" (${infiltrationResult.reason}).`, false, 'warning');
-    }
+    } else
+        moneyInfiltrationConsoleStatus(`done ${bestLocation.location.name}@${bestLocation.location.city}`);
     return infiltrationResult.success;
 }
 
@@ -2251,6 +2307,12 @@ function infiltrationConsoleStatus(message, method = 'log') {
     devConsole(method, `[infiltration] ${message}`);
 }
 
+function moneyInfiltrationConsoleStatus(message, method = 'log') {
+    if (message == lastMoneyInfiltrationConsoleStatus) return;
+    lastMoneyInfiltrationConsoleStatus = message;
+    devConsole(method, `[money-infiltration] ${message}`);
+}
+
 function formatFactionInfiltrationSelection(bestLocation, factionName, remainingRep, travelRoute = "") {
     const repPerRun = Math.max(0, bestLocation?.reward?.tradeRep || 0);
     const runsNeeded = repPerRun > 0 ? Math.max(1, Math.ceil(remainingRep / repPerRun)) : "?";
@@ -2262,31 +2324,6 @@ function formatFactionInfiltrationSelection(bestLocation, factionName, remaining
         `${travelRoute ? `, travel ${travelRoute}` : ""})`;
 }
 
-function buildFactionManagerPurchaseArgs() {
-    const args = ["--purchase"];
-    for (const stat of options['desired-stats'] || [])
-        args.push("--stat-desired", stat);
-    for (const aug of options['desired-augs'] || [])
-        args.push("--aug-desired", aug);
-    for (const faction of options.skip || [])
-        args.push("--ignore-faction", faction);
-    return args;
-}
-
-/** @param {NS} ns */
-async function tryPurchaseAugmentations(ns) {
-    const args = buildFactionManagerPurchaseArgs();
-    const pid = await getNsDataThroughFile(ns, 'ns.run(ns.args[0], 1, ...JSON.parse(ns.args[1]))', null,
-        [getFilePath('faction-manager.js'), JSON.stringify(args)]);
-    if (!pid) {
-        devConsoleLog(`Could not launch faction-manager.js for purchases.`);
-        return false;
-    }
-    while (await getNsDataThroughFile(ns, 'ns.isRunning(ns.args[0])', null, [pid]))
-        await ns.sleep(100);
-    return true;
-}
-
 /** @param {NS} ns */
 async function runInfiltrationRunner(ns, city, company, factionName = null, takeCash = false, allowTravel = true) {
     const resultFile = `/Temp/infiltration-runner-${ns.pid}.txt`;
@@ -2295,7 +2332,7 @@ async function runInfiltrationRunner(ns, city, company, factionName = null, take
     if (takeCash) args.push('--cash');
     else args.push('--faction', factionName);
     if (options['infiltration-debug']) args.push('--debug');
-    const locationPrep = await prepareInfiltrationLocation(ns, city, company);
+    const locationPrep = await prepareInfiltrationLocation(ns, city, company, shouldTreatGraftingAsBackground(factionName));
     if (!locationPrep.opened) {
         if (locationPrep.blocked == "grafting") {
             const result = { success: false, reason: 'grafting-active' };
@@ -2327,10 +2364,11 @@ async function runInfiltrationRunner(ns, city, company, factionName = null, take
 }
 
 /** @param {NS} ns */
-async function prepareInfiltrationLocation(ns, city, company) {
+async function prepareInfiltrationLocation(ns, city, company, allowGraftingBackground = false) {
     const result = await getNsDataThroughFile(ns, `(() => {
         const city = ns.args[0];
         const company = ns.args[1];
+        const allowGraftingBackground = ns.args[2];
         const beforePlayer = ns.getPlayer();
         const beforeWork = ns.singularity.getCurrentWork();
         const result = {
@@ -2346,9 +2384,9 @@ async function prepareInfiltrationLocation(ns, city, company) {
             afterCity: beforePlayer.city,
             afterWork: beforeWork,
         };
-        if (beforeWork?.type == "GRAFTING")
+        if (beforeWork?.type == "GRAFTING" && !allowGraftingBackground)
             return { ...result, blocked: "grafting" };
-        if (beforeWork?.type && beforeWork.type != "CLASS") {
+        if (beforeWork?.type && beforeWork.type != "CLASS" && beforeWork.type != "GRAFTING") {
             result.stopped = ns.singularity.stopAction();
         }
         if (ns.getPlayer().city != city) {
@@ -2361,7 +2399,7 @@ async function prepareInfiltrationLocation(ns, city, company) {
         result.afterCity = ns.getPlayer().city;
         result.afterWork = ns.singularity.getCurrentWork();
         return result;
-    })()`, `/Temp/infiltration-location-prep-${ns.pid}.txt`, [city, company]);
+    })()`, `/Temp/infiltration-location-prep-${ns.pid}.txt`, [city, company, allowGraftingBackground]);
     if (!result?.opened)
         devConsoleLog(`Direct infiltration location prep failed: ${JSON.stringify(result || {})}.`);
     return result || { opened: false, error: "missing-result" };

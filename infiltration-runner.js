@@ -62,11 +62,12 @@ function log(ns, message) {
 async function runInfiltrationAttempt(ns, options) {
     if (!await waitForInfiltrationIdle(ns, infiltrationTeardownTimeout))
         log(ns, `WARNING: Previous infiltration UI did not fully clear before starting ${options.company}.`);
-
-    if (!await goToCity(ns, options.city, options['allow-travel']))
+    if (!await goToCity(ns, options.city, options['allow-travel'])) {
         return { success: false, reason: 'travel-failed' };
-    if (!options['location-ready'] && !await goToLocation(ns, options.company))
+    }
+    if (!options['location-ready'] && !await goToLocation(ns, options.company)) {
         return { success: false, reason: 'go-to-location-failed' };
+    }
 
     const startTs = Date.now();
     ns.write(infiltrationStartLockFile, `${startTs}`, 'w');
@@ -100,8 +101,6 @@ async function runInfiltrationAttempt(ns, options) {
             log(ns, clicked ?
                 `SUCCESS: Claimed infiltration reward from ${options.company} for ${options.cash ? 'cash' : `faction rep with "${options.faction}"`}.` :
                 `WARNING: Failed to claim infiltration reward from ${options.company} for ${options.cash ? 'cash' : `faction rep with "${options.faction}"`}.`);
-            if (!clicked)
-                devConsoleStatus(`reward-click-failed ${options.company} -> ${options.cash ? 'cash' : options.faction}`, 'error');
             return { success: clicked, reason: clicked ? 'success' : 'reward-click-failed' };
         }
         if (state == "hospitalized") {
@@ -351,18 +350,6 @@ async function ensureInfiltrationAutomationStopped(ns) {
 function debugConsole(options, message) {
     if (options.debug)
         console.log(`[infiltration-runner] ${message}`);
-}
-
-function devConsoleStatus(message, method = 'log') {
-    try {
-        const wnd = getWindow();
-        const widthGap = Math.abs((wnd.outerWidth || 0) - (wnd.innerWidth || 0));
-        const heightGap = Math.abs((wnd.outerHeight || 0) - (wnd.innerHeight || 0));
-        if (widthGap <= 160 && heightGap <= 160) return;
-        const fn = console?.[method];
-        if (typeof fn === "function") fn(`[infiltration] ${message}`);
-        else console.log(`[infiltration] ${message}`);
-    } catch { }
 }
 
 async function clickInfiltrateCompanyButton(ns, options) {

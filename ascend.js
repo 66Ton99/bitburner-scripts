@@ -9,6 +9,7 @@ const argsSchema = [
     ['allow-soft-reset', false], // If set to true, allows ascend.js to invoke a **soft** reset (installs no augs) when no augs are affordable. This is useful e.g. when ascending rapidly to grind hacknet hash upgrades.
     ['spend-all-before-install', false], // Before installing, spend all practical cash on permanent purchases/upgrades instead of preserving a RAM budget cushion.
     ['cashroot-only', false], // Limit the final augmentation purchase pass to CashRoot Starter Kit.
+    ['skip-faction-manager-purchase', false], // Caller already purchased the intended augmentation batch.
     ['skip-staneks-gift', false], // By default, we get stanek's gift before our first install (except in BN8). If set to true, skip this step.
     // Spawn this script after installing augmentations (Note: Args not supported by the game)
     ['on-reset-script', null], // By default, will start with `stanek.js` if you have stanek's gift, otherwise `daemon.js`.
@@ -17,7 +18,7 @@ const argsSchema = [
     ['prioritize-home-ram', false], // If set to true, will spend as much money as possible on upgrading home RAM before buying augmentations
 ];
 
-const ascendVersion = "2026-05-06-cashroot-only.1";
+const ascendVersion = "2026-05-12-skip-facman-purchase.1";
 const augCashRoot = "CashRoot Starter Kit";
 
 export function autocomplete(data, args) {
@@ -101,19 +102,21 @@ export async function main(ns) {
         }
     }
 
-    // STEP 4: Buy as many desired augmentations as possible
-    log(ns, 'Purchasing augmentations...', true, 'info');
-    if (options['cashroot-only']) {
-        log(ns, `INFO: CashRoot-only mode: limiting faction-manager purchase pass to "${augCashRoot}".`, true, 'info');
-    }
-    if (options['skip-staneks-gift']) {
-        log(ns, 'INFO: Sending the --ignore-stanek argument to faction-manager.js')
-    }
     const facmanArgs = ['--purchase', '--verbose'];
     if (options['cashroot-only']) facmanArgs.push('--purchase-mode', 'cashroot-only');
     if (options['skip-staneks-gift']) facmanArgs.push('--ignore-stanek');
-    pid = ns.run(getFilePath('faction-manager.js'), 1, ...facmanArgs);
-    await waitForProcessToComplete(ns, pid, true); // Wait for the script to shut down, indicating it is done.
+    if (options['skip-faction-manager-purchase']) {
+        log(ns, 'INFO: Skipping faction-manager purchase passes because the caller already bought the intended augmentation batch.', true, 'info');
+    } else {
+        // STEP 4: Buy as many desired augmentations as possible
+        log(ns, 'Purchasing augmentations...', true, 'info');
+        if (options['cashroot-only'])
+            log(ns, `INFO: CashRoot-only mode: limiting faction-manager purchase pass to "${augCashRoot}".`, true, 'info');
+        if (options['skip-staneks-gift'])
+            log(ns, 'INFO: Sending the --ignore-stanek argument to faction-manager.js')
+        pid = ns.run(getFilePath('faction-manager.js'), 1, ...facmanArgs);
+        await waitForProcessToComplete(ns, pid, true); // Wait for the script to shut down, indicating it is done.
+    }
 
     // If we are not slated to install any augmentations, ABORT
     // Get owned + purchased augmentations, then installed augmentations. Ensure there's a difference
@@ -188,12 +191,14 @@ export async function main(ns) {
     // TODO: No way to close the pop-up save dialog, which is a deal-breaker for me.
     */
 
-    // STEP 4 REDUX: If somehow we have money left over and can afford some junk augs that weren't on our desired list, grab them too
-    log(ns, 'Seeing if we can afford any other augmentations...', true, 'info');
-    const finalFacmanArgs = [...facmanArgs];
-    if (!options['cashroot-only']) finalFacmanArgs.push('--purchase-mode', 'any');
-    pid = ns.run(getFilePath('faction-manager.js'), 1, ...finalFacmanArgs);
-    await waitForProcessToComplete(ns, pid, true); // Wait for the script to shut down, indicating it is done.
+    if (!options['skip-faction-manager-purchase']) {
+        // STEP 4 REDUX: If somehow we have money left over and can afford some junk augs that weren't on our desired list, grab them too
+        log(ns, 'Seeing if we can afford any other augmentations...', true, 'info');
+        const finalFacmanArgs = [...facmanArgs];
+        if (!options['cashroot-only']) finalFacmanArgs.push('--purchase-mode', 'any');
+        pid = ns.run(getFilePath('faction-manager.js'), 1, ...finalFacmanArgs);
+        await waitForProcessToComplete(ns, pid, true); // Wait for the script to shut down, indicating it is done.
+    }
 
     if (options['spend-all-before-install']) {
         log(ns, 'Spend-all mode: making one final pass over home RAM and cores before installing...', true, 'info');

@@ -1,4 +1,4 @@
-import { formatMoney, getFilePath } from './helpers.js'
+import { devConsole, formatMoney, getFilePath } from './helpers.js'
 
 const argsSchema = [
     ['max-infiltration-difficulty', 3.2],
@@ -8,6 +8,7 @@ const argsSchema = [
 ];
 
 const cityTravelCost = 200000;
+let lastMoneyInfiltrationConsoleStatus = "";
 
 /** @param {NS} ns **/
 export async function main(ns) {
@@ -25,9 +26,12 @@ export async function main(ns) {
     if (!target)
         return finish(ns, options, { success: false, reason: 'no-feasible-target' });
 
+    moneyInfiltrationConsoleStatus(`target ${target.location.name}@${target.location.city} ${formatMoney(target.reward.sellCash)}`);
     ns.print(`INFO: Money infiltration target ${target.location.name}@${target.location.city}, payout ~${formatMoney(target.reward.sellCash)}.`);
-    if (!prepareCity(ns, target))
+    if (!prepareCity(ns, target)) {
+        moneyInfiltrationConsoleStatus(`travel-failed ${target.location.name}@${target.location.city}`, 'error');
         return finish(ns, options, { success: false, reason: 'travel-failed', target: summarizeTarget(target) });
+    }
 
     const resultFile = `/Temp/money-infiltration-runner-${ns.pid}.txt`;
     if (ns.read(resultFile))
@@ -38,8 +42,10 @@ export async function main(ns) {
         '--company', target.location.name,
         '--cash',
         '--result-file', resultFile);
-    if (!pid)
+    if (!pid) {
+        moneyInfiltrationConsoleStatus(`launch-failed ${target.location.name}@${target.location.city}`, 'error');
         return finish(ns, options, { success: false, reason: 'runner-launch-failed', target: summarizeTarget(target) });
+    }
 
     while (ns.isRunning(pid))
         await ns.sleep(1000);
@@ -136,11 +142,21 @@ function summarizeTarget(target) {
 
 function finish(ns, options, result) {
     ns.write(options['result-file'], JSON.stringify(result), 'w');
-    if (result.success)
+    if (result.success) {
+        moneyInfiltrationConsoleStatus(`done ${result.target?.company || 'unknown'}@${result.target?.city || '?'}`);
         ns.print(`SUCCESS: Money infiltration completed at ${result.target?.company || 'unknown'} for cash.`);
-    else if (!['runner-already-active'].includes(result.reason))
+    } else if (!['runner-already-active'].includes(result.reason)) {
+        const target = result.target;
+        moneyInfiltrationConsoleStatus(`failed ${target?.company || 'unknown'}@${target?.city || '?'}: ${result.reason}`, 'error');
         ns.print(`INFO: Money infiltration skipped/failed: ${result.reason}.`);
+    }
     return !!result.success;
+}
+
+function moneyInfiltrationConsoleStatus(message, method = 'log') {
+    if (message == lastMoneyInfiltrationConsoleStatus) return;
+    lastMoneyInfiltrationConsoleStatus = message;
+    devConsole(method, `[money-infiltration] ${message}`);
 }
 
 function parseJson(raw) {
