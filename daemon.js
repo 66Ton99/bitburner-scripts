@@ -33,6 +33,7 @@ const argsSchema = [
     ['singularity-confirmed', false], // Autopilot already verified Singularity access; avoid source-file false negatives for automation gating.
     ['casino-complete', false], // Casino bootstrap is complete, so daemon may launch post-casino automation.
     ['cashroot-priority', false], // Prioritize Sector-12/CashRoot before generic faction/crime work.
+    ['bn3-first-install', false], // Prioritize faction work before hacking helpers until BN3 gets its first non-NeuroFlux install.
     ['disable-casino', false], // Relay autopilot casino setting for helper args that protect casino seed money.
     ['disable-corporation', false], // Disable corporation automation launch in autopilot mode.
     ['disable-darknet', false], // Disable darknet automation launch in autopilot mode.
@@ -415,6 +416,8 @@ export async function main(ns) {
 
         function isMoneyFocusBlockedHelper(helper) {
             if (!isMoneyFocusSpendingLocked()) return false;
+            if (options['cashroot-priority'] && String(helper.name || '').split('/').pop() == 'work-for-factions.js')
+                return false;
             return ['work-for-factions.js', 'go.js', 'gangs.js', 'sleeve.js', 'bladeburner.js',
                 'graft-manager.js', 'darknet-manager.js', 'faction-manager.js', 'backdoor-all-servers.js']
                 .includes(String(helper.name || '').split('/').pop());
@@ -466,6 +469,10 @@ export async function main(ns) {
             return bitNodeN == 8 ? ["--money-focus", "--reserve", 0, "--equipment-budget", 0, "--augmentations-budget", 0] : [];
         }
 
+        function shouldPrioritizeFactionWork() {
+            return options['bn3-first-install'] || options['cashroot-priority'];
+        }
+
         function appendWorkTailArgs(args) {
             if (Number(options['work-tail-x']) >= 0) args.push("--tail-x", options['work-tail-x']);
             if (Number(options['work-tail-y']) >= 0) args.push("--tail-y", options['work-tail-y']);
@@ -479,14 +486,14 @@ export async function main(ns) {
             if (hasSingularityAccess()) args.push("--singularity-confirmed");
             if (!options['late-company-work']) args.push("--no-company-work");
             if (!options['late-netburners']) args.push("--skip", "Netburners");
-            if (options['cashroot-priority']) args.push("--first", "Sector-12");
+            if (options['cashroot-priority'] || options['bn3-first-install']) args.push("--first", "Sector-12");
             if (options['disable-bladeburner']) args.push("--no-bladeburner-check");
             if (options['cross-city-background-training'] && !options['disable-cross-city-background-training'])
                 args.push("--cross-city-background-training");
             else
                 args.push("--disable-cross-city-background-training");
             if (options['no-tail-windows']) args.push("--no-tail-windows");
-            if (!options['cashroot-priority'] && !options['disable-rush-gangs'] && !playerInGang) {
+            if (!options['bn3-first-install'] && !options['cashroot-priority'] && !options['disable-rush-gangs'] && !playerInGang) {
                 args.push("--crime-focus", "--training-stat-per-multi-threshold", 200, "--prioritize-invites");
             }
             return appendWorkTailArgs(args);
@@ -515,6 +522,12 @@ export async function main(ns) {
 
         function getAutopilotSpendHashesArgs() {
             if (!(9 in dictSourceFiles)) return null;
+            const repTarget = (() => {
+                try { return JSON.parse(ns.read("/Temp/work-for-factions-rep-target.txt") || "null"); }
+                catch { return null; }
+            })();
+            if (repTarget?.updated && Date.now() - repTarget.updated < 2 * 60 * 1000)
+                return ["--liquidate", "--spend-on", "Generate_Coding_Contract"];
             if (Date.now() - resetInfo.lastAugReset < options['time-before-boosting-best-hack-server']) return null;
             if (0 == bitNodeMults.ScriptHackMoney * bitNodeMults.ScriptHackMoneyGain) return null;
             const candidates = Object.values(dictServerProfitInfo || {})
@@ -539,7 +552,7 @@ export async function main(ns) {
         // ASYNCHRONOUS HELPERS
         // Set up "asynchronous helpers" - standalone scripts to manage certain aspacts of the game. daemon.js launches each of these once when ready (but not again if they are shut down)
         const defaultStockmasterArgs = openTailWindows ? ["--show-market-summary"] : [];
-        const defaultWorkForFactionsArgs = ['--fast-crimes-only', '--no-coding-contracts', '--no-company-work'];
+        const defaultWorkForFactionsArgs = ['--fast-crimes-only', '--no-company-work'];
         if (options['cross-city-background-training'] && !options['disable-cross-city-background-training'])
             defaultWorkForFactionsArgs.push('--cross-city-background-training');
         else
@@ -550,7 +563,7 @@ export async function main(ns) {
         const isWorkForFactionsDisabled = () => options['disable-script'].some(disabled =>
             disabled == 'work-for-factions.js' || String(disabled).split('/').pop() == 'work-for-factions.js');
         const canRunWorkForFactionsAfterFocus = async () => !isWorkForFactionsDisabled() &&
-            !isMoneyFocusSpendingLocked() &&
+            (!isMoneyFocusSpendingLocked() || options['cashroot-priority']) &&
             hasSingularityAccess() && (options['autopilot-mode'] ? options['casino-complete'] : true) &&
             reqRam(256 / (2 ** getEffectiveSf4Level()));
         const shouldRunWorkForFactions = async () => await canRunWorkForFactionsAfterFocus() && !studying;
@@ -560,18 +573,20 @@ export async function main(ns) {
                 return false;
             return await canRunWorkForFactionsAfterFocus();
         };
+        const workForFactionsHelper = {
+            name: "work-for-factions.js",
+            args: () => options['autopilot-mode'] ? getAutopilotWorkForFactionsArgs() : defaultWorkForFactionsArgs,  // Singularity script to manage how we use our "focus" work.
+            shouldRun: shouldRunWorkForFactions,
+            restartOnArgsChange: true,
+            relaunchIfExited: true,
+            cooldownMs: shouldPrioritizeFactionWork() ? 60 * 1000 : 5 * 60 * 1000,
+            ignoreReservedRam: shouldPrioritizeFactionWork(),
+        };
         asynchronousHelpers = [
+            ...(shouldPrioritizeFactionWork() ? [workForFactionsHelper] : []),
             { name: "hack.js", args: () => getManagedHackArgs(ns), shouldTail: false, restartOnArgsChange: true, relaunchIfExited: true, ignoreReservedRam: false }, // Dedicated hacking/prep/targeting runner split out from daemon orchestration.
             { name: "stats.js", shouldRun: () => reqRam(64), shouldTail: false }, // Adds stats not usually in the HUD (nice to have)
-            {
-                name: "work-for-factions.js",
-                args: () => options['autopilot-mode'] ? getAutopilotWorkForFactionsArgs() : defaultWorkForFactionsArgs,  // Singularity script to manage how we use our "focus" work.
-                shouldRun: shouldRunWorkForFactions,
-                restartOnArgsChange: true,
-                relaunchIfExited: true,
-                cooldownMs: 5 * 60 * 1000,
-                ignoreReservedRam: false,
-            },
+            ...(!shouldPrioritizeFactionWork() ? [workForFactionsHelper] : []),
             { name: "go.js", shouldRun: async () => !isMoneyFocusSpendingLocked() && !(await isWorkForFactionsPending()) && reqRam(64) && homeServer.ramAvailable(/*ignoreReservedRam:*/true) >= 20, minRamReq: 20.2, shouldTail: options['tail-go'] }, // Play go.js (various multipliers, but large dynamic ram requirements)
             {
                 name: "stockmaster.js",

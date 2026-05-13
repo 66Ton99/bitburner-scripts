@@ -1006,7 +1006,11 @@ export async function main(ns) {
         const pursueNetburnersLateGame = player.money >= lateGameNetburnersMoneyThreshold;
         const pursueCompanyFactionsLateGame = player.money >= lateGameCompanyWorkMoneyThreshold;
         const facmanOutput = getFactionManagerOutput(ns);
-        const shouldForceSector12 = !installedAugmentations.includes(augCashRoot) &&
+        const bn3FirstInstall = resetInfo.currentNode == 3 &&
+            installedAugmentations.filter(aug => aug != "NeuroFlux Governor").length == 0;
+        const shouldForceSector12 = resetInfo.currentNode == 3 &&
+            installedAugmentations.filter(aug => aug != "NeuroFlux Governor").length > 0 &&
+            !installedAugmentations.includes(augCashRoot) &&
             !facmanOutput?.affordable_augs?.includes(augCashRoot) &&
             !facmanOutput?.awaiting_install_augs?.includes(augCashRoot);
         const moneyFocus = isMoneyFocusActive(runningScripts);
@@ -1083,6 +1087,7 @@ export async function main(ns) {
             daemonArgs.push('--autopilot-mode');
             if (ranCasino || options['disable-casino']) daemonArgs.push('--casino-complete');
             if (singularityAvailable) daemonArgs.push('--singularity-confirmed');
+            if (bn3FirstInstall) daemonArgs.push('--bn3-first-install');
             if (shouldForceSector12) daemonArgs.push('--cashroot-priority');
             if (options['disable-casino']) daemonArgs.push('--disable-casino');
             if (options['disable-corporation']) daemonArgs.push('--disable-corporation');
@@ -1095,6 +1100,8 @@ export async function main(ns) {
             if (moneyFocus) {
                 daemonArgs.push('--money-focus');
                 for (const script of moneyFocusBlockedScripts)
+                    if (shouldForceSector12 && script == 'work-for-factions.js')
+                        continue;
                     daemonArgs.push('--disable-script', getFilePath(script));
                 daemonArgs.push('--disable-grafting', '--disable-darknet', '--disable-bladeburner');
                 log_once(ns, `INFO: BN3 --money-focus mode is active. Prioritizing hacking income, stocks, and home RAM upgrades before side activities.`);

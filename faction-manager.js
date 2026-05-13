@@ -1,7 +1,7 @@
 import {
     log, getConfiguration, instanceCount, formatNumberShort, formatMoney,
     getNsDataThroughFile, getActiveSourceFiles, tryGetBitNodeMultipliers, getStocksValue, getFilePath,
-    formatDuration, getErrorInfo
+    formatDuration, getErrorInfo, devConsole
 } from './helpers.js'
 
 // PLAYER CONFIGURATION CONSTANTS
@@ -266,8 +266,9 @@ export async function main(ns) {
     if ((desiredStatsFilters?.length ?? 0) == 0) { // If the user does has not specified stats or augmentations to prioritize, use sane defaults
         // There are some situations where we will accept any augmentation whatsoever...
         const cashRootOwned = ownedAugmentations.includes(augCashRoot);
+        const cashRootPriorityEligible = bitNode == 3 && installedAugmentations.filter(a => a != strNF).length > 0;
         const cashRootOnlyMode = options['purchase-mode'] == "cashroot-only";
-        const forceOnlyCashRoot = cashRootOnlyMode || (!cashRootOwned && options['aug-desired'].length == 0);
+        const forceOnlyCashRoot = cashRootOnlyMode || (cashRootPriorityEligible && !cashRootOwned && options['aug-desired'].length == 0);
         const willTakeAnyAug = !forceOnlyCashRoot && cashRootOwned && ((ownedAugmentations.length > 40) || // Once we have more than N augs, switch to buying up anything and everything
             (bitNode == 6 || bitNode == 7 || playerData.factions.includes("Bladeburners")) || // If doing bladeburners, combat augs matter too, so just get everything
             ((Date.now() - resetInfo.lastAugReset) < 20 * 60 * 1000)); // If we've been in the bitnode for less than 20 minutes, autopilot is configured to "quick-install", any aug is worthwhile in this time window after CashRoot
@@ -530,6 +531,18 @@ async function manageAutomatedAugmentations(ns, resetInfo, ownedSourceFiles, sf1
         };
     }
 
+    const bn3FirstInstall = bitNode == 3 && installedAugmentations.filter(a => a != strNF).length == 0;
+    if (bn3FirstInstall) {
+        const nonNfAwaitingInstall = ownedAugmentations.slice(installedAugmentations.length).filter(a => a != strNF).length;
+        if (nonNfAwaitingInstall > 0)
+            purchaseableAugs = [];
+        else {
+            const firstNonNfAug = purchaseableAugs.find(aug => aug.name != strNF);
+            purchaseableAugs = firstNonNfAug ? [firstNonNfAug] : purchaseableAugs.filter(aug => aug.name == strNF);
+        }
+        [purchaseFactionRepCosts] = computeCosts(purchaseableAugs);
+    }
+
     const status = buildAugmentationStatus();
     const summary = getPendingAugmentationSummary(status);
     const totalCost = status.total_rep_cost + status.total_aug_cost;
@@ -537,16 +550,19 @@ async function manageAutomatedAugmentations(ns, resetInfo, ownedSourceFiles, sf1
     let reducedAugReq = Math.floor(options['reduced-aug-requirement-per-hour'] * (Date.now() - resetInfo.lastAugReset) / 3.6E6);
     if (inFirstBn9Aug)
         reducedAugReq = -2;
-    const augsNeeded = Math.max(1, options['install-at-aug-count'] + sf11Level - reducedAugReq);
-    const augsNeededInclNf = Math.max(1, options['install-at-aug-plus-nf-count'] + sf11Level - reducedAugReq);
+    const augsNeeded = bn3FirstInstall ? 1 : Math.max(1, options['install-at-aug-count'] + sf11Level - reducedAugReq);
+    const augsNeededInclNf = bn3FirstInstall ? 1 : Math.max(1, options['install-at-aug-plus-nf-count'] + sf11Level - reducedAugReq);
     const bn8FrequentInstall = bitNode == 8;
     const bn8TrpReady = status.affordable_augs.includes(augTRP) || status.awaiting_install_augs.includes(augTRP);
     const bn8DaedalusReady = playerData.factions.includes("Daedalus") ||
         (status.installed_count >= bitNodeMults.DaedalusAugsRequirement && playerData.skills.hacking >= (2500 * 0.9));
     const bn8RedPillMode = bn8FrequentInstall && !installedAugmentations.includes(augTRP) && (bn8DaedalusReady || bn8TrpReady);
-    const cashRootReady = !installedAugmentations.includes(augCashRoot) &&
+    const cashRootPriorityEligible = bitNode == 3 && status.installed_count_ex_nf > 0;
+    const cashRootReady = cashRootPriorityEligible && !installedAugmentations.includes(augCashRoot) &&
         (status.affordable_augs.includes(augCashRoot) || status.awaiting_install_augs.includes(augCashRoot));
-    const cashRootGateActive = !installedAugmentations.includes(augCashRoot) && !cashRootReady;
+    const cashRootGateActive = cashRootPriorityEligible && !installedAugmentations.includes(augCashRoot) && !cashRootReady;
+    const bn3FirstInstallNfFallback = bn3FirstInstall && status.affordable_count_ex_nf == 0 &&
+        status.awaiting_install_count_ex_nf == 0 && (status.affordable_count_nf > 0 || status.awaiting_install_count_nf > 0);
 
     if (bn8RedPillMode && playerData.factions.includes("Daedalus") && !bn8TrpReady) {
         const interval = 60 * 1000;
@@ -584,6 +600,13 @@ async function manageAutomatedAugmentations(ns, resetInfo, ownedSourceFiles, sf1
         options['install-for-augs'].some(a => status.affordable_augs.includes(a)) ||
         summary.pendingAugCount >= augsNeeded || summary.pendingAugInclNfCount >= augsNeededInclNf;
     let installCountdown = Number(options['install-countdown']) || 0;
+    if (bn3FirstInstall) {
+        resetStatus = (bn3FirstInstallNfFallback ?
+            `BN3 first-install mode: no non-NeuroFlux augmentation is ready; installing maximum affordable NeuroFlux Governor levels instead.` :
+            `BN3 first-install mode: installing after exactly one non-NeuroFlux augmentation is ready.`) +
+            `\n${resetStatus}`;
+        installCountdown = 0;
+    }
     if (cashRootReady) {
         resetStatus = `"${augCashRoot}" is ready. Installing early only after ascend.js spends practical available cash on current purchases/upgrades.\n${resetStatus}`;
         installCountdown = 0;
@@ -1203,13 +1226,18 @@ async function managePurchaseableAugs(ns, outputRows, accessibleAugs) {
     // NEXT STEP: Add as many NeuroFlux levels to our purchase as we can (unless disabled)
     if (options['neuroflux-disabled']) return;
     const remainingConcreteTargets = getConcreteTargetAugsNotInPurchaseOrder();
-    if (remainingConcreteTargets.length > 0) {
+    const bn3FirstInstall = bitNode == 3 && installedAugmentations.filter(a => a != strNF).length == 0;
+    const bn3FirstInstallNeedsNfFallback = bn3FirstInstall && !purchaseableAugs.some(aug => aug.name != strNF);
+    if (remainingConcreteTargets.length > 0 && !bn3FirstInstallNeedsNfFallback) {
         outputRows.push(`INFO: Not buying ${strNF} yet. ${remainingConcreteTargets.length} concrete target augmentation(s) remain, ` +
             `so ${strNF} is reserved for leftover cash after goals are complete: ` +
             remainingConcreteTargets.slice(0, 8).map(aug => `"${aug.name}"`).join(", ") +
             (remainingConcreteTargets.length > 8 ? `, ...` : ''));
         if (nextUpAug) outputRows.push(nextUpAug);
         return;
+    } else if (bn3FirstInstallNeedsNfFallback && remainingConcreteTargets.length > 0) {
+        outputRows.push(`INFO: BN3 first-install mode: no non-${strNF} augmentation is immediately purchasable, ` +
+            `so ${strNF} is allowed as the fast first-reset fallback.`);
     }
     const augNf = augmentationData[strNF];
     // We can reverse-engineer our current NeuroFlux level by looking at its current price, and knowing its cost scales at x1.14 per level.
@@ -1352,12 +1380,17 @@ async function purchaseDesiredAugs(ns) {
     // Purchase desired augs (using a ram-dodging script of course)
     const purchased = await getNsDataThroughFile(ns, 'JSON.parse(ns.args[0]).reduce((total, o) => total + (ns.singularity.purchaseAugmentation(o.faction, o.augmentation) ? 1 : 0), 0)',
         '/Temp/facman-purchase-augs.txt', [JSON.stringify(purchaseableAugs.map(aug => ({ faction: aug.getFromJoined(), augmentation: aug.name })))]);
+    const afterPurchasePlayer = await getPlayerInfo(ns);
+    const afterPurchaseStocks = await getStocksValue(ns);
+    devConsole('log', `[augs] bought ${purchased}/${purchaseableAugs.length}; ` +
+        `cash ${formatMoney(afterPurchasePlayer.money)}; stocks ${formatMoney(afterPurchaseStocks)}; ` +
+        `net ${formatMoney(afterPurchasePlayer.money + afterPurchaseStocks)}`);
     if (purchased == purchaseableAugs.length)
         log(ns, `SUCCESS: Purchased ${purchased} desired augmentations in optimal order!`, printToTerminal, 'success')
     else
         log(ns, `ERROR: We were only able to purchase ${purchased} of our ${purchaseableAugs.length} augmentations. ` +
             `Expected cost was ${getCostString(totalAugCost, totalRepCost)}. Player money was ${formatMoney(playerData.money)} right before purchase, ` +
-            `is now ${formatMoney((await getPlayerInfo(ns)).money)}`, printToTerminal, 'error');
+            `is now ${formatMoney(afterPurchasePlayer.money)}`, printToTerminal, 'error');
 }
 
 /** @param {NS} ns **/

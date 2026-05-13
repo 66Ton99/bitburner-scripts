@@ -4,7 +4,8 @@ import {
 } from './helpers.js'
 
 let options;
-const workForFactionsVersion = "2026-05-13-bn3-grafting-background.1";
+const workForFactionsVersion = "2026-05-13-bn3-first-install-sector12.1";
+const factionRepHashTargetFile = "/Temp/work-for-factions-rep-target.txt";
 const argsSchema = [
     ['first', []], // Grind rep with these factions first. Also forces a join of this faction if we normally wouldn't (e.g. no desired augs or all augs owned)
     ['skip', []], // Don't work for these factions
@@ -136,7 +137,7 @@ const maxOptionalCombatTrainingEtaMs = 8 * 60 * 60 * 1000;
 
 let shouldFocus; // Whether we should focus on work or let it be backgrounded (based on whether "Neuroreceptor Management Implant" is owned, or "--no-focus" is specified)
 // And a bunch of globals because managing state and encapsulation is hard.
-let hasFocusPenalty, hasSimulacrum, hasRedPillPurchased, fulcrumHackReq, playerInBladeburner, wasGrafting, currentBitnode;
+let hasFocusPenalty, hasSimulacrum, hasRedPillPurchased, fulcrumHackReq, playerInBladeburner, wasGrafting, currentBitnode, bn3FirstInstallPending;
 let dictSourceFiles, dictFactionFavors, playerGang, mainLoopStart, scope, numJoinedFactions, lastTravel, crimeCount;
 let firstFactions, skipFactions, completedFactions, softCompletedFactions, mostExpensiveAugByFaction, mostExpensiveDesiredAugByFaction, mostExpensiveDesiredAugCostByFaction;
 let scriptPid = "?";
@@ -261,6 +262,7 @@ function canPursueFaction(player, factionName) {
 }
 
 function shouldBypassPrioritizeInvitesForFaction(factionName) {
+    if (bn3FirstInstallPending && factionName == "Sector-12") return true;
     return currentBitnode == 3 && options['crime-focus'] && factionName == "Slum Snakes";
 }
 
@@ -286,6 +288,8 @@ export async function main(ns) {
     options = runOptions; // We don't set the global "options" until we're sure this is the only running instance
     scriptPid = ns.pid;
     disableLogs(ns, ['sleep']);
+    ns.rm(factionRepHashTargetFile);
+    ns.atExit(() => ns.rm(factionRepHashTargetFile));
     log(ns, `INFO: work-for-factions.js version ${workForFactionsVersion}`, true, 'info');
     if (!options['no-tail-windows']) {
         tail(ns);
@@ -295,7 +299,7 @@ export async function main(ns) {
 
     // Reset globals whose value can persist between script restarts in weird situations
     lastTravel = crimeCount = currentBitnode = 0;
-    playerInBladeburner = wasGrafting = false;
+    playerInBladeburner = wasGrafting = bn3FirstInstallPending = false;
     recentHospitalizedLocations = {};
     lastMoneyFallbackStatus = lastNoFactionInfiltrationTargetStatus = "";
     lastNoFactionInfiltrationTargetStatusUpdate = 0;
@@ -375,6 +379,7 @@ async function loadStartupData(ns) {
     const dictAugStats = await getNsDataThroughFile(ns, dictCommand('ns.singularity.getAugmentationStats(o)'), '/Temp/getAugmentationStats.txt', augmentationNames);
     const installedAugmentations = await getNsDataThroughFile(ns, `ns.singularity.getOwnedAugmentations()`, '/Temp/player-augs-installed.txt');
     const purchasedAugmentations = await getNsDataThroughFile(ns, `ns.singularity.getOwnedAugmentations(true)`, '/Temp/player-augs-purchased.txt');
+    bn3FirstInstallPending = currentBitnode == 3 && installedAugmentations.filter(aug => aug != strNF).length == 0;
     await refreshNetburnersEligibility(ns);
     // Based on what augmentations we own, we can change our own behaviour (e.g. whether to allow work to steal focus)
     hasFocusPenalty = !installedAugmentations.includes("Neuroreceptor Management Implant"); // Check if we have an augmentation that lets us not have to focus at work (always nicer if we can background it)
@@ -502,7 +507,9 @@ async function mainLoop(ns) {
     moneyGateStatus = null;
 
     // Remove Fulcrum from our "EarlyFactionOrder" if hack level is insufficient to backdoor their server
-    let priorityFactions = options['crime-focus'] ? preferredCrimeFactionOrder.slice() : preferredEarlyFactionOrder.slice();
+    let priorityFactions = bn3FirstInstallPending || !options['crime-focus'] ? preferredEarlyFactionOrder.slice() : preferredCrimeFactionOrder.slice();
+    if (bn3FirstInstallPending)
+        ns.print(`BN3 first-install mode: prioritizing Sector-12 for the fastest first augmentation before crime/gang faction setup.`);
     if (player.skills.hacking < fulcrumHackReq - 10) { // Assume that if we're within 10, we'll get there by the time we've earned the invite
         const fulcrumIdx = priorityFactions.findIndex(c => c == "Fulcrum Secret Technologies")
         if (fulcrumIdx !== -1) {
@@ -520,7 +527,8 @@ async function mainLoop(ns) {
         priorityFactions = priorityFactions.filter(f => f != "Silhouette");
 
     // Strategy 1: Tackle a consolidated list of desired faction order, interleaving simple factions and megacorporations
-    const pinnedFirstFactions = options['crime-focus'] || skipFactions.includes("Sector-12") ? firstFactions : ["Sector-12"].concat(firstFactions.filter(f => f != "Sector-12"));
+    const pinnedFirstFactions = bn3FirstInstallPending || (!options['crime-focus'] && !skipFactions.includes("Sector-12")) ?
+        ["Sector-12"].concat(firstFactions.filter(f => f != "Sector-12")) : firstFactions;
     const factionWorkOrder = pinnedFirstFactions.concat(priorityFactions.filter(f => // Remove factions from our initial "work order" if we've bought all desired augmentations.
         !pinnedFirstFactions.includes(f) && !skipFactions.includes(f) && !softCompletedFactions.includes(f) && canPursueFaction(player, f)));
     for (const faction of factionWorkOrder) {
@@ -1670,6 +1678,12 @@ export async function workForSingleFaction(ns, factionName, forceThroughInvitePr
     let lastSelectedInfiltrationTarget = "";
     let stickyInfiltrationTarget = "";
     while ((currentReputation = (await getFactionReputation(ns, factionName))) < factionRepRequired) {
+        ns.write(factionRepHashTargetFile, JSON.stringify({
+            factionName,
+            remainingRep: Math.max(0, factionRepRequired - currentReputation),
+            updated: Date.now(),
+        }), "w");
+        await tryBuyReputation(ns, true);
         if (breakToMainLoop()) {
             return ns.print('INFO: Interrupting infiltration to check on high-level priorities.');
         }
@@ -1770,7 +1784,7 @@ export async function workForSingleFaction(ns, factionName, forceThroughInvitePr
             ns.print(`${status} Currently at ${Math.round(currentReputation).toLocaleString('en')}, ` +
                 `estimated ${estimatedRep} rep per run.`);
         }
-        await tryBuyReputation(ns);
+        await tryBuyReputation(ns, true);
         await ns.sleep(loopSleepInterval);
         if (!forceBestAug && !forceRep) {
             let currentFavor = await getCurrentFactionFavour(ns, factionName);
@@ -2524,11 +2538,12 @@ async function trySpendHashes(ns, spendOn) {
         '/Temp/hacknet-spendHashes-returnSpent.txt', [spendOn]);
 }
 
-/** If we're wealthy, hashes have relatively little monetary value, spend hacknet-node hashes on contracts to gain rep faster
+/** If we're actively grinding faction rep, or we're wealthy enough that hashes have relatively little monetary value,
+ * spend hacknet-node hashes on contracts to gain rep faster.
  * @param {NS} ns */
-export async function tryBuyReputation(ns) {
+export async function tryBuyReputation(ns, force = false) {
     if (options['no-coding-contracts']) return;
-    if ((await getPlayerInfo(ns)).money > 100E9) { // If we're wealthy, hashes have relatively little monetary value, spend hacknet-node hashes on contracts to gain rep faster
+    if (force || (await getPlayerInfo(ns)).money > 100E9) {
         let spentHashes = await trySpendHashes(ns, "Generate Coding Contract");
         if (spentHashes > 0) {
             log(ns, `Generated a new coding contract for ${formatNumberShort(Math.round(spentHashes / 100) * 100)} hashes`, false, 'success');
