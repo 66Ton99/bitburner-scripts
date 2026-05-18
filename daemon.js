@@ -473,6 +473,12 @@ export async function main(ns) {
             return options['bn3-first-install'] || options['cashroot-priority'];
         }
 
+        function shouldUseRushGangFactionMode() {
+            return (bitNodeN == 2 || bitNodeN == 3) &&
+                !options['bn3-first-install'] && !options['cashroot-priority'] &&
+                !options['disable-rush-gangs'] && !playerInGang;
+        }
+
         function appendWorkTailArgs(args) {
             if (Number(options['work-tail-x']) >= 0) args.push("--tail-x", options['work-tail-x']);
             if (Number(options['work-tail-y']) >= 0) args.push("--tail-y", options['work-tail-y']);
@@ -493,7 +499,7 @@ export async function main(ns) {
             else
                 args.push("--disable-cross-city-background-training");
             if (options['no-tail-windows']) args.push("--no-tail-windows");
-            if (!options['bn3-first-install'] && !options['cashroot-priority'] && !options['disable-rush-gangs'] && !playerInGang) {
+            if (shouldUseRushGangFactionMode()) {
                 args.push("--crime-focus", "--training-stat-per-multi-threshold", 200, "--prioritize-invites");
             }
             return appendWorkTailArgs(args);

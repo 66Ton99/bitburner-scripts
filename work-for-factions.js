@@ -4,8 +4,9 @@ import {
 } from './helpers.js'
 
 let options;
-const workForFactionsVersion = "2026-05-13-bn3-first-install-sector12.1";
+const workForFactionsVersion = "2026-05-17-no-action-exit.1";
 const factionRepHashTargetFile = "/Temp/work-for-factions-rep-target.txt";
+const factionWorkIdleStatusFile = "/Temp/work-for-factions-idle-status.txt";
 const argsSchema = [
     ['first', []], // Grind rep with these factions first. Also forces a join of this faction if we normally wouldn't (e.g. no desired augs or all augs owned)
     ['skip', []], // Don't work for these factions
@@ -134,10 +135,11 @@ const bn8StockBackedTrainingReserve = 100e6;
 const stockBackedTrainingReserve = 10e6;
 const silhouetteStatDeferralMargin = 100;
 const maxOptionalCombatTrainingEtaMs = 8 * 60 * 60 * 1000;
+const maxCombatInviteTrainingEtaMs = 2 * 60 * 60 * 1000;
 
 let shouldFocus; // Whether we should focus on work or let it be backgrounded (based on whether "Neuroreceptor Management Implant" is owned, or "--no-focus" is specified)
 // And a bunch of globals because managing state and encapsulation is hard.
-let hasFocusPenalty, hasSimulacrum, hasRedPillPurchased, fulcrumHackReq, playerInBladeburner, wasGrafting, currentBitnode, bn3FirstInstallPending;
+let hasFocusPenalty, hasSimulacrum, hasRedPillPurchased, fulcrumHackReq, playerInBladeburner, wasGrafting, currentBitnode, bn3FirstInstallPending, shouldExitForBladeburner;
 let dictSourceFiles, dictFactionFavors, playerGang, mainLoopStart, scope, numJoinedFactions, lastTravel, crimeCount;
 let firstFactions, skipFactions, completedFactions, softCompletedFactions, mostExpensiveAugByFaction, mostExpensiveDesiredAugByFaction, mostExpensiveDesiredAugCostByFaction;
 let scriptPid = "?";
@@ -157,6 +159,7 @@ let observedInfiltrationRunTimeByLocation = {};
 let lastNothingToDoStatus = "";
 let lastNothingToDoStatusUpdate = 0;
 let loopHadDeferredInvite = false;
+let loopHadPrioritizeInviteSkippedRep = false;
 let lastLoopHadDeferredInvite = false;
 
 function shouldDeferSilhouette(player) {
@@ -199,10 +202,10 @@ function printNothingToDoStatus(ns, status, cooldownMs = statusUpdateInterval) {
 
 function exitAfterDeferredInviteOnlyPass(ns) {
     if (!loopHadDeferredInvite || breakToMainLoop()) return false;
-    lastLoopHadDeferredInvite = true;
-    printNothingToDoStatus(ns, `INFO: Faction work is blocked by deferred invite requirements. ` +
-        `Exiting so hacking/money automation can progress; daemon will retry faction work later.`);
-    return true;
+    if (loopHadPrioritizeInviteSkippedRep) return false;
+    printNothingToDoStatus(ns, `INFO: Some higher-priority faction invites are deferred. ` +
+        `Checking lower-priority faction work before idling.`, 5 * statusUpdateInterval);
+    return false;
 }
 
 function recordMoneyGateStatus(factionName, requirement, cash, stockValue) {
@@ -250,6 +253,8 @@ function shouldDeferCompanyFaction(player, factionName) {
 }
 
 function canPursueFaction(player, factionName) {
+    if (getPrecludingJoinedFaction(player.factions, factionName))
+        return false;
     if (isBn8() && factionName != "Daedalus" && (player.factions.includes("Daedalus") || hasRedPillPurchased))
         return false;
     if (isCompanyInviteFaction(factionName) && factionName !== "Silhouette")
@@ -261,8 +266,21 @@ function canPursueFaction(player, factionName) {
     return true;
 }
 
+function getPrecludingJoinedFaction(joinedFactions, factionName) {
+    if (["Aevum", "Sector-12"].includes(factionName))
+        return ["Chongqing", "New Tokyo", "Ishima", "Volhaven"].find(f => joinedFactions.includes(f));
+    if (["Chongqing", "New Tokyo", "Ishima"].includes(factionName))
+        return ["Aevum", "Sector-12", "Volhaven"].find(f => joinedFactions.includes(f));
+    if (factionName == "Volhaven")
+        return ["Aevum", "Sector-12", "Chongqing", "New Tokyo", "Ishima"].find(f => joinedFactions.includes(f));
+    return null;
+}
+
 function shouldBypassPrioritizeInvitesForFaction(factionName) {
     if (bn3FirstInstallPending && factionName == "Sector-12") return true;
+    if (currentBitnode == 3 && factionName == "Sector-12" && !skipFactions.includes("Sector-12") &&
+        (mostExpensiveAugByFaction["Sector-12"] || -1) > 0)
+        return true;
     return currentBitnode == 3 && options['crime-focus'] && factionName == "Slum Snakes";
 }
 
@@ -350,7 +368,8 @@ export async function main(ns) {
     scope = 0;
     while (true) { // After each loop, we will repeat all prevous work "strategies" to see if anything new has been unlocked, and add one more "strategy" to the queue
         try {
-            if (await mainLoop(ns) == "deferred-idle")
+            const loopResult = await mainLoop(ns);
+            if (loopResult == "deferred-idle" || loopResult == "bladeburner-idle" || loopResult == "nothing-actionable-idle")
                 return;
         } catch (err) {
             log(ns, 'WARNING: work-for-factions.js caught an unhandled error in its main loop. Trying again in 5 seconds...\n' + getErrorInfo(err), false, 'warning');
@@ -396,8 +415,11 @@ async function loadStartupData(ns) {
         const protectedGangAugs = new Set(options['desired-augs'].filter(aug => !installedAugmentations.includes(aug)));
         ns.print(`Your gang ${playerGang} provides easy access to ${gangAugs.length} augs. Ignoring these augs from the original factions that provide them` +
             (protectedGangAugs.size > 0 ? `, except uninstalled desired augs: ${[...protectedGangAugs].join(", ")}.` : `.`));
-        for (const faction of allKnownFactions.filter(f => f != playerGang))
+        for (const faction of allKnownFactions.filter(f => f != playerGang)) {
+            if (currentBitnode == 3 && faction == "Sector-12")
+                continue;
             dictFactionAugs[faction] = dictFactionAugs[faction].filter(a => !gangAugs.includes(a) || protectedGangAugs.has(a));
+        }
     }
 
     // Treat "awaiting install" augmentations as still relevant for faction progression in the current reset.
@@ -450,6 +472,8 @@ async function mainLoop(ns) {
     if (!breakToMainLoop() && !lastLoopHadDeferredInvite) scope++; // Increase scope only after a clean no-work pass.
     lastLoopHadDeferredInvite = false;
     loopHadDeferredInvite = false;
+    loopHadPrioritizeInviteSkippedRep = false;
+    shouldExitForBladeburner = false;
     scope = Math.min(scope, 9);
     mainLoopStart = Date.now();
     // If changing our loop scope, log a message
@@ -492,8 +516,11 @@ async function mainLoop(ns) {
         }
     }
     // If something outside of this script is stealing player focus, decide whether to allow it
-    if (await isValidInterruption(ns))
+    if (await isValidInterruption(ns)) {
+        if (shouldExitForBladeburner)
+            return "bladeburner-idle";
         return (await ns.sleep(loopSleepInterval));
+    }
     // If we recently grafted an augmentation, it might be one that changes our behaviour, so re-load startup data
     if (wasGrafting) {
         await loadStartupData(ns);
@@ -527,7 +554,9 @@ async function mainLoop(ns) {
         priorityFactions = priorityFactions.filter(f => f != "Silhouette");
 
     // Strategy 1: Tackle a consolidated list of desired faction order, interleaving simple factions and megacorporations
-    const pinnedFirstFactions = bn3FirstInstallPending || (!options['crime-focus'] && !skipFactions.includes("Sector-12")) ?
+    const shouldPinSector12 = currentBitnode == 3 && !skipFactions.includes("Sector-12") &&
+        (mostExpensiveAugByFaction["Sector-12"] || -1) > 0;
+    const pinnedFirstFactions = bn3FirstInstallPending || shouldPinSector12 || (!options['crime-focus'] && !skipFactions.includes("Sector-12")) ?
         ["Sector-12"].concat(firstFactions.filter(f => f != "Sector-12")) : firstFactions;
     const factionWorkOrder = pinnedFirstFactions.concat(priorityFactions.filter(f => // Remove factions from our initial "work order" if we've bought all desired augmentations.
         !pinnedFirstFactions.includes(f) && !skipFactions.includes(f) && !softCompletedFactions.includes(f) && canPursueFaction(player, f)));
@@ -624,8 +653,14 @@ async function mainLoop(ns) {
             printMoneyGateStatus(ns);
         else
             printNothingToDoStatus(ns, `INFO: Nothing actionable for faction work right now. Waiting 30 seconds for ` +
-                `background hacking/money/invite progress before rechecking.`);
-        await ns.sleep(30000);
+                `background hacking/money/invite progress before daemon retries.`);
+        ns.write(factionWorkIdleStatusFile, JSON.stringify({
+            reason: "nothing-actionable",
+            updated: Date.now(),
+            lastAugReset: resetInfo.lastAugReset,
+            currentBitnode,
+        }), "w");
+        return "nothing-actionable-idle";
     }
     if (scope <= 9) scope--; // Cap the 'scope' value from increasing perpetually when we're on our last strategy
 }
@@ -743,9 +778,7 @@ async function earnFactionInvite(ns, factionName) {
     // Can't join certain factions for various reasons
     let reasonPrefix = `Cannot join faction "${factionName}" because`;
     let precludingFaction;
-    if (["Aevum", "Sector-12"].includes(factionName) && (precludingFaction = ["Chongqing", "New Tokyo", "Ishima", "Volhaven"].find(f => joinedFactions.includes(f))) ||
-        ["Chongqing", "New Tokyo", "Ishima"].includes(factionName) && (precludingFaction = ["Aevum", "Sector-12", "Volhaven"].find(f => joinedFactions.includes(f))) ||
-        ["Volhaven"].includes(factionName) && (precludingFaction = ["Aevum", "Sector-12", "Chongqing", "New Tokyo", "Ishima"].find(f => joinedFactions.includes(f))))
+    if (precludingFaction = getPrecludingJoinedFaction(joinedFactions, factionName))
         return ns.print(`${reasonPrefix} precluding faction "${precludingFaction}"" has been joined.`);
     let requirement;
     // See if we can take action to earn an invite for the next faction under consideration
@@ -789,15 +822,24 @@ async function earnFactionInvite(ns, factionName) {
             ns.print(`Ignoring combat requirement for ${factionName} as we are more likely to unlock them via hacking stats.`);
     }
     else if (deficientStats.length > 0) {
-        ns.print(`${reasonPrefix} you have insufficient combat stats. Need: ${requirement} of each, Have ` +
-            physicalStats.map(s => `${s.slice(0, 3)}: ${player.skills[s]}`).join(", "));
         const needsKills = (requiredKillsByFaction[factionName] || 0) > player.numPeopleKilled;
         const needsKarma = (requiredKarmaByFaction[factionName] || 0) > currentNegativeKarma;
         const maxCombatGap = Math.max(...deficientStats.map(s => requirement - s.value));
         const deferCombatGap = Math.max(25, Math.floor(requirement * 0.15));
+        const combatTraining = getCombatTrainingAssessment(player, requirement);
+        const combatStatsSummary = physicalStats.map(s => `${s.slice(0, 3)}: ${player.skills[s]}`).join(", ");
+        if (!needsKills && !needsKarma && (!Number.isFinite(combatTraining.plan.sequentialEtaMs) ||
+            combatTraining.plan.sequentialEtaMs > maxCombatInviteTrainingEtaMs))
+            return deferFactionInvite(ns, factionName, `Deferring faction "${factionName}" invite because combat gym training is too early. ` +
+                `Need ${requirement} of each; have ${combatStatsSummary}; largest gap ${maxCombatGap}; ETA ` +
+                `${formatDuration(combatTraining.plan.sequentialEtaMs)} exceeds practical threshold ` +
+                `${formatDuration(maxCombatInviteTrainingEtaMs)}. Background hacking/augmentations should improve this.`);
+        ns.print(`${reasonPrefix} you have insufficient combat stats. Need: ${requirement} of each, Have ${combatStatsSummary}. ` +
+            `Gym ETA ${formatDuration(combatTraining.plan.sequentialEtaMs)}.`);
         if (options['prioritize-invites'] && !needsKills && !needsKarma && maxCombatGap > deferCombatGap)
             return ns.print(`Deferring faction "${factionName}" invite because only combat training remains and the gap is still large ` +
-                `(${maxCombatGap} levels, threshold ${deferCombatGap}) while --prioritize-invites is enabled.`);
+                `(${maxCombatGap} levels, threshold ${deferCombatGap}, gym ETA ${formatDuration(combatTraining.plan.sequentialEtaMs)}) ` +
+                `while --prioritize-invites is enabled.`);
         if (!needsKills && !needsKarma) {
             workedForInvite = await trainCombatStatsUpTo(ns, requirement, factionName);
         } else {
@@ -1599,20 +1641,19 @@ async function isValidInterruption(ns, currentWork = null) {
     }
     // If bladeburner is currently active, but we do not yet have The Blade's Simulacrum, we may choose to we pause working.
     else if (7 in dictSourceFiles && !hasSimulacrum && !options['no-bladeburner-check']) {
-        // Heuristic: If we're in a gang, its rep will give us access to most augs, we can take a break from working in favour of bladeburner progress
-        //       Also, if we're done all "priority" work (scope >= 2), consider letting Bladeburner take over
+        // Heuristic: If we're in a gang, its rep will give us access to most augs, we can take a break from working in favour of bladeburner progress.
+        // Otherwise only yield to active BlackOps. Long Bladeburner rank grinds should not keep faction work from running.
         // TODO: Are there other situations we want to prioritize bladeburner over normal work? Perhaps if we're in a Bladeburner BN? (6 or 7)
-        if (playerGang || scope >= 2) {
-            // Check if the player has joined bladeburner (can stop checking once we see they are)
-            playerInBladeburner = playerInBladeburner || await getNsDataThroughFile(ns, 'ns.bladeburner.inBladeburner()');
-            if (playerInBladeburner) {
-                if (playerGang)
-                    interruptionNotice = `Gang will give us most augs, so pausing work to allow Bladeburner to operate.`;
-                else
-                    interruptionNotice = `Decided that doing Bladeburner is more important that working right now.`;
-                if (currentWork.type)
-                    await stop(ns); // Stop working so bladeburner can run (bladeburner won't interrupt work for us)
-            }
+        // Check if the player has joined bladeburner (can stop checking once we see they are)
+        playerInBladeburner = playerInBladeburner || await getNsDataThroughFile(ns, 'ns.bladeburner.inBladeburner()');
+        if (playerInBladeburner && (playerGang || await shouldYieldToBladeburner(ns))) {
+            if (playerGang)
+                interruptionNotice = `Gang will give us most augs, so pausing work to allow Bladeburner to operate.`;
+            else
+                interruptionNotice = `Active BlackOp is more important than faction work right now.`;
+            shouldExitForBladeburner = true;
+            if (currentWork.type)
+                await stop(ns); // Stop working so bladeburner can run (bladeburner won't interrupt work for us)
         }
     }
 
@@ -1626,6 +1667,12 @@ async function isValidInterruption(ns, currentWork = null) {
         return true;
     }
     return false;
+}
+
+async function shouldYieldToBladeburner(ns) {
+    if (scope < 2) return false;
+    const currentAction = await getNsDataThroughFile(ns, 'ns.bladeburner.getCurrentAction()', '/Temp/bladeburner-current-action.txt');
+    return currentAction?.type == "Black Operations";
 }
 
 let lastFactionWorkStatus = "";
@@ -1672,8 +1719,10 @@ export async function workForSingleFaction(ns, factionName, forceThroughInvitePr
     if (options['invites-only'])
         return ns.print(`--invites-only Skipping working for faction...`);
     if (options['prioritize-invites'] && !shouldBypassPrioritizeInvitesForFaction(factionName) &&
-        !forceThroughInvitePriority && !forceBestAug && !forceRep)
+        !forceThroughInvitePriority && !forceBestAug && !forceRep) {
+        loopHadPrioritizeInviteSkippedRep = true;
         return ns.print(`--prioritize-invites Skipping working for faction for now...`);
+    }
     let lastStatusUpdateTime = 0;
     let lastSelectedInfiltrationTarget = "";
     let stickyInfiltrationTarget = "";

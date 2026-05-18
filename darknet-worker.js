@@ -100,7 +100,7 @@ async function crawlNeighbors(ns, script, origin, interval, maxAttempts, verbose
     for (const target of neighbors) {
         let details;
         try {
-            details = ns.dnet.getServerAuthDetails(target);
+            details = getDarknetServerDetails(ns, target);
         } catch (error) {
             ns.print(`WARN: Cannot inspect ${target}: ${formatError(error)}`);
             continue;
@@ -122,6 +122,36 @@ async function crawlNeighbors(ns, script, origin, interval, maxAttempts, verbose
 
         await spreadToNeighbor(ns, script, target, password, interval, verboseTerminal);
     }
+}
+
+function getDarknetServerDetails(ns, target) {
+    let details;
+    if (typeof ns.dnet.getServerDetails === "function") details = ns.dnet.getServerDetails(target);
+    else if (typeof ns.dnet.getServer === "function") details = ns.dnet.getServer(target);
+    else if (typeof ns.dnet.getServerAuthDetails === "function") details = ns.dnet.getServerAuthDetails(target);
+    else throw new Error("No compatible dnet server details API is available.");
+    return normalizeDarknetServerDetails(details);
+}
+
+function normalizeDarknetServerDetails(details) {
+    if (details == null || typeof details !== "object") throw new Error(`Invalid dnet server details: ${details}`);
+    return {
+        ...details,
+        blockedRam: details.blockedRam ?? 0,
+        depth: details.depth ?? -1,
+        difficulty: details.difficulty ?? 0,
+        hasSession: details.hasSession ?? false,
+        isConnectedToCurrentServer: details.isConnectedToCurrentServer ?? false,
+        isOnline: details.isOnline ?? true,
+        isStationary: details.isStationary ?? false,
+        logTrafficInterval: details.logTrafficInterval ?? 0,
+        modelId: details.modelId ?? "",
+        data: details.data ?? "",
+        passwordFormat: details.passwordFormat ?? "ASCII",
+        passwordHint: details.passwordHint ?? "",
+        passwordLength: details.passwordLength ?? 0,
+        requiredCharismaSkill: details.requiredCharismaSkill ?? 0,
+    };
 }
 
 async function solveAndAuthenticate(ns, target, details, maxAttempts, verboseTerminal) {

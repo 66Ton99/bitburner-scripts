@@ -4,7 +4,7 @@ import {
     formatMoney, formatDuration, formatRam, getErrorInfo, tail, jsonReplacer, scanAllServers
 } from './helpers.js'
 
-const autopilotVersion = "2026-05-12-bn3-money-focus-opt-in.1";
+const autopilotVersion = "2026-05-13-bn3-auto-ram-bootstrap.1";
 const stockValueHelperRam = 3.6;
 const ownedAugmentationsHelperRam = 6.6;
 const earlyBootstrapHelperRam = 12;
@@ -169,6 +169,7 @@ export async function main(ns) {
     ];
     const augTRP = "The Red Pill";
     const augCashRoot = "CashRoot Starter Kit";
+    const augSoaWksHarmonizer = "SoA - phyzical WKS harmonizer";
     const augStanek = `Stanek's Gift - Genesis`;
     const portCrackerCosts = {
         "BruteSSH.exe": 500e3,
@@ -1006,13 +1007,16 @@ export async function main(ns) {
         const pursueNetburnersLateGame = player.money >= lateGameNetburnersMoneyThreshold;
         const pursueCompanyFactionsLateGame = player.money >= lateGameCompanyWorkMoneyThreshold;
         const facmanOutput = getFactionManagerOutput(ns);
-        const bn3FirstInstall = resetInfo.currentNode == 3 &&
+        const bn3RamBootstrap = resetInfo.currentNode == 3 && homeRam < bn3EarlyHomeRamTarget;
+        const bn3FirstAugReset = resetInfo.currentNode == 3 &&
+            Math.abs(resetInfo.lastAugReset - resetInfo.lastNodeReset) < 1000;
+        const bn3FirstInstall = bn3FirstAugReset &&
             installedAugmentations.filter(aug => aug != "NeuroFlux Governor").length == 0;
-        const shouldForceSector12 = resetInfo.currentNode == 3 &&
+        const shouldPrioritizeSoa = resetInfo.currentNode == 3 && !bn3RamBootstrap &&
+            !installedAugmentations.includes(augSoaWksHarmonizer);
+        const shouldForceSector12 = resetInfo.currentNode == 3 && !bn3RamBootstrap && !shouldPrioritizeSoa &&
             installedAugmentations.filter(aug => aug != "NeuroFlux Governor").length > 0 &&
-            !installedAugmentations.includes(augCashRoot) &&
-            !facmanOutput?.affordable_augs?.includes(augCashRoot) &&
-            !facmanOutput?.awaiting_install_augs?.includes(augCashRoot);
+            !installedAugmentations.includes(augCashRoot);
         const moneyFocus = isMoneyFocusActive(runningScripts);
         const stockCashFraction = (resetInfo.currentNode == 8 || bn10SleevesIncomplete) ? 0.001 : 0.1;
         const stockBuyFraction = (resetInfo.currentNode == 8 || bn10SleevesIncomplete) ? 0.001 : 0.4;
@@ -1063,7 +1067,7 @@ export async function main(ns) {
                         daemonRelaunchMessage = `Time is up for "xp-mode", Relaunching daemon.js normally to focus on earning money for ${xpInterval} minutes (--xp-mode-interval-minutes)`;
                 } else if (!useXpOnlyMode && existingDaemon?.args.includes("--xp-only")) {
                     daemonRelaunchMessage = moneyFocus ?
-                        `BN3 --money-focus is active. Relaunching daemon.js normally to focus on earning money.` :
+                        `${getBn3MoneyFocusStatusPrefix()} is active. Relaunching daemon.js normally to focus on earning money.` :
                         `Hack level (${player.skills.hacking}) is already high enough that timed "xp-mode" is no longer useful. Relaunching daemon.js normally to focus on earning money.`;
                 }
                 if (useXpOnlyMode) {
@@ -1099,12 +1103,13 @@ export async function main(ns) {
             else daemonArgs.push('--disable-cross-city-background-training');
             if (moneyFocus) {
                 daemonArgs.push('--money-focus');
-                for (const script of moneyFocusBlockedScripts)
+                for (const script of moneyFocusBlockedScripts) {
                     if (shouldForceSector12 && script == 'work-for-factions.js')
                         continue;
                     daemonArgs.push('--disable-script', getFilePath(script));
+                }
                 daemonArgs.push('--disable-grafting', '--disable-darknet', '--disable-bladeburner');
-                log_once(ns, `INFO: BN3 --money-focus mode is active. Prioritizing hacking income, stocks, and home RAM upgrades before side activities.`);
+                log_once(ns, `INFO: ${getBn3MoneyFocusStatusPrefix()} is active. Prioritizing hacking income, stocks, and home RAM upgrades before side activities.`);
             }
             if (pursueNetburnersLateGame) daemonArgs.push('--late-netburners');
             if (pursueCompanyFactionsLateGame) daemonArgs.push('--late-company-work');
@@ -1380,8 +1385,16 @@ export async function main(ns) {
         return resetInfo.currentNode == 3 ? bn3EarlyHomeRamTarget : earlyHomeRamTarget;
     }
 
+    function isBn3RamBootstrapActive() {
+        return resetInfo.currentNode == 3 && homeRam < bn3EarlyHomeRamTarget;
+    }
+
     function isMoneyFocusActive(runningScripts = null) {
-        if (!options['money-focus'] || resetInfo.currentNode != 3)
+        if (resetInfo.currentNode != 3)
+            return false;
+        if (isBn3RamBootstrapActive())
+            return true;
+        if (!options['money-focus'])
             return false;
         if (homeRam < bn3EarlyHomeRamTarget)
             return true;
@@ -1389,6 +1402,10 @@ export async function main(ns) {
             return false;
         runningScripts ??= getRunningScriptsDirect(ns);
         return !findScriptHelper('corporation.js', runningScripts);
+    }
+
+    function getBn3MoneyFocusStatusPrefix() {
+        return isBn3RamBootstrapActive() ? "BN3 RAM bootstrap" : "BN3 --money-focus";
     }
 
     /** Retrieves the last faction manager output file, parses, and provides type-hints for it.
@@ -1404,6 +1421,8 @@ export async function main(ns) {
     }
 
     function getFactionManagerManageArgs() {
+        const shouldPrioritizeSoa = resetInfo.currentNode == 3 && !isBn3RamBootstrapActive() &&
+            !installedAugmentations.includes(augSoaWksHarmonizer);
         const args = [
             "--manage-installs",
             "--install-at-aug-count", options['install-at-aug-count'],
@@ -1416,6 +1435,8 @@ export async function main(ns) {
         ];
         for (const aug of options['install-for-augs'])
             args.push("--install-for-augs", aug);
+        if (shouldPrioritizeSoa)
+            args.push("--purchase-mode", "soa-only", "--install-for-augs", augSoaWksHarmonizer);
         if (options['disable-wait-for-4s'])
             args.push("--disable-wait-for-4s");
         if (isMoneyFocusActive())
@@ -1446,12 +1467,13 @@ export async function main(ns) {
         if (isMoneyFocusActive()) {
             const runningScripts = getRunningScriptsDirect(ns);
             const corporationRunning = !!findScriptHelper('corporation.js', runningScripts);
+            const statusPrefix = getBn3MoneyFocusStatusPrefix();
             if (homeRam < bn3EarlyHomeRamTarget)
-                return setStatus(ns, `BN3 --money-focus is active. Waiting for ${formatRam(bn3EarlyHomeRamTarget)} home RAM ` +
+                return setStatus(ns, `${statusPrefix} is active. Waiting for ${formatRam(bn3EarlyHomeRamTarget)} home RAM ` +
                     `before buying/installing augmentations. Current home RAM: ${formatRam(homeRam)}.`);
             if (!options['disable-corporation'] && !corporationRunning)
-                return setStatus(ns, `BN3 --money-focus is active. Waiting for corporation.js to start before buying/installing augmentations.`);
-            return setStatus(ns, `BN3 --money-focus is active. Waiting for money engine bootstrap before buying/installing augmentations.`);
+                return setStatus(ns, `${statusPrefix} is active. Waiting for corporation.js to start before buying/installing augmentations.`);
+            return setStatus(ns, `${statusPrefix} is active. Waiting for money engine bootstrap before buying/installing augmentations.`);
         }
 
         if (lastFactionManagerRefresh < resetInfo.lastAugReset || lastFactionManagerRefresh < Date.now() - factionManagerInstallRefreshInterval) {
