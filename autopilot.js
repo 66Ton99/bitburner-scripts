@@ -1561,7 +1561,9 @@ export async function main(ns) {
                 const requiredRam = ns.getScriptRam(scriptName, 'home');
                 const homeMaxRam = ns.getServerMaxRam('home');
                 const homeUsedRam = ns.getServerUsedRam('home');
-                ramDiagnostic = `\nRAM: needs ${formatRam(requiredRam)}, free ${formatRam(homeMaxRam - homeUsedRam)} / max ${formatRam(homeMaxRam)} on home.`;
+                ramDiagnostic = requiredRam <= 0 ?
+                    `\nScript RAM lookup returned 0 for "${scriptName}". The file is missing in Bitburner or failed to compile; sync/fix that script before retrying.` :
+                    `\nRAM: needs ${formatRam(requiredRam)}, free ${formatRam(homeMaxRam - homeUsedRam)} / max ${formatRam(homeMaxRam)} on home.`;
             } catch { }
             log(ns, `ERROR: Failed to launch ${baseScriptName} with args: [${args.join(", ")}]` +
                 ramDiagnostic +

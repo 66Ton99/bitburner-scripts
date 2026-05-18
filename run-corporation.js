@@ -8,7 +8,7 @@ import { disableLogs, formatMoney, formatRam, scanAllServers } from './helpers.j
  * @param {NS} ns
  */
 export async function main(ns) {
-    const version = '2026-05-17-corp-preflight-exit.1';
+    const version = '2026-05-18-corp-preflight-net-worth.1';
     ns.print(`run-corporation.js version ${version}`);
     disableLogs(ns, ['getServerMaxRam', 'getServerUsedRam', 'scp', 'exec', 'write', 'read', 'sleep', 'ps']);
 	const scriptName = 'corporation.js';
@@ -26,8 +26,9 @@ export async function main(ns) {
 			let freeRam = getFreeRam(ns, hostname);
 			if (freeRam > scriptSize) {
                 const status = await getCorporationStartupStatus(ns, hostname);
-                if (status && !status.hasCorporation && status.currentNode !== 3 && status.playerMoney < 150e9) {
-                    ns.tprint(`No corporation exists and self-funding is not affordable. Need ${formatMoney(150e9)}, have ${formatMoney(status.playerMoney)}.`);
+                if (status && !status.hasCorporation && status.currentNode !== 3 && status.playerMoney + status.stockValue < 150e9) {
+                    ns.tprint(`No corporation exists and self-funding is not affordable. Need ${formatMoney(150e9)}, ` +
+                        `have cash ${formatMoney(status.playerMoney)}, stocks ${formatMoney(status.stockValue)}, net ${formatMoney(status.playerMoney + status.stockValue)}.`);
                     ns.tprint(`Exiting before launching '${scriptName}' (${formatRam(scriptSize)}) to free RAM.`);
                     ns.exit();
                 }
@@ -60,10 +61,19 @@ async function getCorporationStartupStatus(ns, hostname) {
         catch (e) { error = typeof e == "string" ? e : e?.message ?? JSON.stringify(e); }
         const player = ns.getPlayer();
         const resetInfo = ns.getResetInfo();
+        let stockValue = 0;
+        try {
+            for (const sym of ns.stock.getSymbols()) {
+                const [sharesLong, , sharesShort, avgShortCost] = ns.stock.getPosition(sym);
+                if (sharesLong > 0) stockValue += sharesLong * ns.stock.getBidPrice(sym) - 100000;
+                if (sharesShort > 0) stockValue += sharesShort * (2 * avgShortCost - ns.stock.getAskPrice(sym)) - 100000;
+            }
+        } catch { stockValue = 0; }
         ns.write(ns.args[0], JSON.stringify({
             hasCorporation: !!corporation,
             error,
             playerMoney: player.money,
+            stockValue,
             currentNode: resetInfo.currentNode,
         }), "w");
     }`;

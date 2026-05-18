@@ -5,7 +5,7 @@
  */
 
 import { argsSchema } from './corporation-options.js';
-import { formatMoney, formatNumberShort, getActiveSourceFiles } from './helpers.js';
+import { formatMoney, formatNumberShort, getActiveSourceFiles, getStocksValue, getFilePath } from './helpers.js';
 
 // Formatting for money and big numbers.
 const mf = (n) => formatMoney(n, 6, 2);
@@ -589,13 +589,28 @@ async function doInitialCorporateSetup(ns) {
         if (verbose) log(ns, `Seed-funded corporation creation unavailable: ${err}`);
     }
     if (!created) {
-        const playerMoney = ns.getPlayer().money;
+        let playerMoney = ns.getPlayer().money;
+        let stockValue = await getStocksValue(ns);
+        if (playerMoney < 150e9 && playerMoney + stockValue >= 150e9) {
+            const pid = ns.run(getFilePath('stockmaster.js'), 1, '--liquidate');
+            if (!pid) {
+                ns.tprint(`ERROR: Could not launch stockmaster.js --liquidate to fund corporation. ` +
+                    `Need ${mf(150e9)}, cash ${mf(playerMoney)}, stocks ${mf(stockValue)}.`);
+                ns.exit();
+            }
+            log(ns, `Liquidating stocks to found self-funded corporation. Need ${mf(150e9)}, cash ${mf(playerMoney)}, stocks ${mf(stockValue)}.`, 'info', true);
+            while (ns.isRunning(pid))
+                await ns.sleep(100);
+            playerMoney = ns.getPlayer().money;
+            stockValue = await getStocksValue(ns);
+        }
         if (playerMoney >= 150e9) {
             created = ns.corporation.createCorporation(options['corporation-name'], true);
             if (created)
                 log(ns, `Founded self-funded corporation ${options['corporation-name']} for ${mf(150e9)}!`, 'info', true);
         } else {
-            ns.tprint(`No corporation exists and self-funding is not affordable. Need ${mf(150e9)}, have ${mf(playerMoney)}.`);
+            ns.tprint(`No corporation exists and self-funding is not affordable. Need ${mf(150e9)}, ` +
+                `have cash ${mf(playerMoney)}, stocks ${mf(stockValue)}, net ${mf(playerMoney + stockValue)}.`);
             ns.tprint(`Exiting to free corporation API RAM; rerun when funding is available.`);
             ns.exit();
         }

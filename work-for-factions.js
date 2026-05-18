@@ -136,6 +136,7 @@ const stockBackedTrainingReserve = 10e6;
 const silhouetteStatDeferralMargin = 100;
 const maxOptionalCombatTrainingEtaMs = 8 * 60 * 60 * 1000;
 const maxCombatInviteTrainingEtaMs = 2 * 60 * 60 * 1000;
+const maxFinalNeuroFluxRepTopUp = 25000;
 
 let shouldFocus; // Whether we should focus on work or let it be backgrounded (based on whether "Neuroreceptor Management Implant" is owned, or "--no-focus" is specified)
 // And a bunch of globals because managing state and encapsulation is hard.
@@ -198,6 +199,16 @@ function printNothingToDoStatus(ns, status, cooldownMs = statusUpdateInterval) {
     lastNothingToDoStatus = status;
     lastNothingToDoStatusUpdate = now;
     ns.print(status);
+}
+
+function writeFactionWorkIdleStatus(ns, resetInfo, reason, detail = "") {
+    ns.write(factionWorkIdleStatusFile, JSON.stringify({
+        reason,
+        detail,
+        updated: Date.now(),
+        lastAugReset: resetInfo.lastAugReset,
+        currentBitnode,
+    }), "w");
 }
 
 function exitAfterDeferredInviteOnlyPass(ns) {
@@ -517,8 +528,10 @@ async function mainLoop(ns) {
     }
     // If something outside of this script is stealing player focus, decide whether to allow it
     if (await isValidInterruption(ns)) {
-        if (shouldExitForBladeburner)
+        if (shouldExitForBladeburner) {
+            writeFactionWorkIdleStatus(ns, resetInfo, "bladeburner-active", "Faction work yielded to active Bladeburner work.");
             return "bladeburner-idle";
+        }
         return (await ns.sleep(loopSleepInterval));
     }
     // If we recently grafted an augmentation, it might be one that changes our behaviour, so re-load startup data
@@ -646,6 +659,15 @@ async function mainLoop(ns) {
             foundWork = await workForSingleFaction(ns, mostFavorFaction, false, false, targetRep);
         }
     }
+    if (!foundWork) {
+        const nfTopUp = await getFinalNeuroFluxRepTopUp(ns, factionsWeCanWorkFor);
+        if (nfTopUp) {
+            ns.print(`INFO: No concrete faction work remains. Doing short final ${strNF} rep top-up with ` +
+                `${nfTopUp.faction}: ${formatNumberShort(nfTopUp.currentRep)} -> ${formatNumberShort(nfTopUp.targetRep)} ` +
+                `(missing ${formatNumberShort(nfTopUp.repGap)}, cap ${formatNumberShort(maxFinalNeuroFluxRepTopUp)}).`);
+            foundWork = await workForSingleFaction(ns, nfTopUp.faction, true, false, nfTopUp.targetRep);
+        }
+    }
     if (!foundWork) { // If our hands are tied, wait and re-check later rather than farming money with no explicit target.
         if (allIncompleteFactions.length == 0 && factionsNeedingMoreRep.length == 0)
             ns.print(`INFO: Nothing to do. All relevant factions are already complete or intentionally skipped. Sleeping for 30 seconds.`);
@@ -654,15 +676,25 @@ async function mainLoop(ns) {
         else
             printNothingToDoStatus(ns, `INFO: Nothing actionable for faction work right now. Waiting 30 seconds for ` +
                 `background hacking/money/invite progress before daemon retries.`);
-        ns.write(factionWorkIdleStatusFile, JSON.stringify({
-            reason: "nothing-actionable",
-            updated: Date.now(),
-            lastAugReset: resetInfo.lastAugReset,
-            currentBitnode,
-        }), "w");
+        writeFactionWorkIdleStatus(ns, resetInfo, "nothing-actionable", "No actionable faction work remains right now.");
         return "nothing-actionable-idle";
     }
     if (scope <= 9) scope--; // Cap the 'scope' value from increasing perpetually when we're on our last strategy
+}
+
+async function getFinalNeuroFluxRepTopUp(ns, candidateFactions) {
+    if (currentBitnode == 8 || options['crime-focus'] || options['invites-only']) return null;
+    const nfRepReq = dictAugRepReqs[strNF];
+    if (!Number.isFinite(nfRepReq) || nfRepReq <= 0) return null;
+    const candidates = [];
+    for (const faction of candidateFactions) {
+        if (!dictFactionAugs[faction]?.includes(strNF)) continue;
+        const currentRep = await getFactionReputation(ns, faction);
+        const repGap = nfRepReq - currentRep;
+        if (repGap <= 0 || repGap > maxFinalNeuroFluxRepTopUp) continue;
+        candidates.push({ faction, currentRep, targetRep: nfRepReq, repGap, favor: dictFactionFavors[faction] || 0 });
+    }
+    return candidates.sort((a, b) => a.repGap - b.repGap || b.favor - a.favor || a.faction.localeCompare(b.faction))[0] || null;
 }
 
 async function workForFirstActionableFaction(ns, factionOrder, workFn) {

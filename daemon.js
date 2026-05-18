@@ -135,6 +135,7 @@ export async function main(ns) {
     // The name of the server to try running scripts on if home RAM is <= 16GB (early BN1)
     const backupServerName = 'harakiri-sushi'; // Somewhat arbitrarily chosen. It's one of several servers with 16GB which requires no open ports to crack.
     const corporationMinHomeRam = 4096;
+    const corporationSelfFundingCost = 150e9;
     const darknetMinHomeRam = 8192;
     const helperBurstRam = {
         stats: 3.6,
@@ -181,6 +182,8 @@ export async function main(ns) {
     let _cachedPlayerInfo = (/**@returns{Player}*/() => undefined)(); // stores multipliers for player abilities and other player info
     let moneySources = (/**@returns{MoneySources}*/() => undefined)(); // Cache of player income/expenses by category
     let playerInGang = false;
+    let corporationLaunchGateStatus = null;
+    let corporationLaunchGateStatusTime = 0;
 
     // Property to avoid log churn if our status hasn't changed since the last loop
     let lastUpdate = "";
@@ -427,6 +430,45 @@ export async function main(ns) {
             return options['money-focus'] && bitNodeN == 3;
         }
 
+        async function shouldRunCorporationAutomation(ns) {
+            if (!options['casino-complete'] || options['disable-corporation']) return false;
+            if (!(bitNodeN == 3 || (dictSourceFiles[3] ?? 0) >= 3)) return false;
+            if (whichServerIsRunning(ns, 'corporation.js', false)[0] != null) return false;
+            if (!shouldBypassCorporationHomeRamGate() && !reqRam(corporationMinHomeRam)) return false;
+            if (!hasFreeRamForScript(ns, getFilePath('corporation.js'), shouldBypassCorporationHomeRamGate())) return false;
+            if (bitNodeN == 3) return true; // BN3 can seed-fund a corporation.
+            const status = await getCorporationLaunchGateStatus(ns);
+            if (!status) return true; // If the lightweight preflight fails, let run-corporation.js perform its own startup checks.
+            return status.hasCorporation || status.netWorth >= corporationSelfFundingCost;
+        }
+
+        async function getCorporationLaunchGateStatus(ns) {
+            if (corporationLaunchGateStatus && Date.now() - corporationLaunchGateStatusTime < 60 * 1000)
+                return corporationLaunchGateStatus;
+            try {
+                corporationLaunchGateStatus = await getNsDataThroughFile(ns, `(() => {
+                    let corporation = null;
+                    try { corporation = ns.corporation.getCorporation(); } catch { corporation = null; }
+                    const player = ns.getPlayer();
+                    let stockValue = 0;
+                    try {
+                        for (const sym of ns.stock.getSymbols()) {
+                            const [sharesLong, , sharesShort, avgShortCost] = ns.stock.getPosition(sym);
+                            if (sharesLong > 0) stockValue += sharesLong * ns.stock.getBidPrice(sym) - 100000;
+                            if (sharesShort > 0) stockValue += sharesShort * (2 * avgShortCost - ns.stock.getAskPrice(sym)) - 100000;
+                        }
+                    } catch { stockValue = 0; }
+                    return { hasCorporation: !!corporation, playerMoney: player.money, stockValue, netWorth: player.money + stockValue };
+                })()`, '/Temp/daemon-corporation-launch-gate-v1.txt', [], false, 1, 0, true);
+                corporationLaunchGateStatusTime = Date.now();
+                return corporationLaunchGateStatus;
+            } catch {
+                corporationLaunchGateStatus = null;
+                corporationLaunchGateStatusTime = Date.now();
+                return null;
+            }
+        }
+
         function getEffectiveSf4Level() {
             if (bitNodeN == 4) return 3;
             return Math.max(0, dictSourceFiles[4] || (options['singularity-confirmed'] ? 3 : 0));
@@ -453,7 +495,7 @@ export async function main(ns) {
                         return ["--liquidate"];
                 } catch { }
             }
-            return ["--fracH", options['stock-cash-frac'], "--fracB", options['stock-buy-frac'], "--reserve", 0];
+            return ["--fracH", options['stock-cash-frac'], "--fracB", options['stock-buy-frac']];
         }
 
         function getAutopilotSleeveArgs() {
@@ -640,7 +682,9 @@ export async function main(ns) {
             {
                 name: "bladeburner.js", // Script to manage bladeburner for us. Run automatically if not disabled and bladeburner API is available
                 shouldRun: () => !isMoneyFocusSpendingLocked() && !options['disable-bladeburner'] && !options['disable-script'].includes('bladeburner.js') && reqRam(64)
-                    && 7 in dictSourceFiles && bitNodeMults.BladeburnerRank != 0 // Don't run bladeburner in BN's where it can't rank up (currently just BN8)
+                    && 7 in dictSourceFiles && bitNodeMults.BladeburnerRank != 0, // Don't run bladeburner in BN's where it can't rank up (currently just BN8)
+                shouldTail: true,
+                tailLayout: "work",
             },
         ];
         asynchronousHelpers = asynchronousHelpers.filter(helper => !isMoneyFocusBlockedHelper(helper));
@@ -649,11 +693,7 @@ export async function main(ns) {
                 {
                     name: "run-corporation.js",
                     args: () => !openTailWindows ? ['--no-tail-windows'] : [],
-                    shouldRun: () => options['casino-complete'] && !options['disable-corporation'] &&
-                        (bitNodeN == 3 || (dictSourceFiles[3] ?? 0) >= 3) &&
-                        whichServerIsRunning(ns, 'corporation.js', false)[0] == null &&
-                        (shouldBypassCorporationHomeRamGate() || reqRam(corporationMinHomeRam)) &&
-                        hasFreeRamForScript(ns, getFilePath('corporation.js'), shouldBypassCorporationHomeRamGate()),
+                    shouldRun: async () => await shouldRunCorporationAutomation(ns),
                     cooldownMs: 60 * 1000,
                     relaunchIfExited: true,
                     ignoreReservedRam: shouldBypassCorporationHomeRamGate(),
@@ -856,6 +896,7 @@ export async function main(ns) {
                 await ns.sleep(50);
             } else {
                 if (verbose) log(ns, `INFO: Tool ${tool.name} is already running on server ${runningOnServer} as pid ${runningPid}.`);
+                tailToolIfNeeded(ns, tool, runningPid, args, runningOnServer);
                 return true;
             }
         }
@@ -879,11 +920,7 @@ export async function main(ns) {
             if (verbose)
                 log(ns, `INFO: Ran tool: ${tool.name} ` + (args.length > 0 ? `with args ${JSON.stringify(args)} ` : '') +
                     (runningPid ? `on server ${runningOnServer} (pid ${runningPid}).` : 'but it shut down right away.'));
-            if (tool.shouldTail == true && runningPid) {
-                log(ns, `Tailing Tool: ${tool.name}` + (args.length > 0 ? ` with args ${JSON.stringify(args)}` : '') + ` on server ${runningOnServer} (pid ${runningPid})`);
-                tail(ns, runningPid);
-                //tool.shouldTail = false; // Avoid popping open additional tail windows in the future
-            }
+            tailToolIfNeeded(ns, tool, runningPid, args, runningOnServer);
             return true;
         } else {
             const errHost = getServerByName(daemonHost);
@@ -891,6 +928,26 @@ export async function main(ns) {
                 (lowHomeRam ? '' : `FREE: ${formatRam(errHost.ramAvailable(/*ignoreReservedRam:*/true))})`) + `: ${tool.name} [${args}]`, false, lowHomeRam ? undefined : 'warning');
         }
         return false;
+    }
+
+    function tailToolIfNeeded(ns, tool, runningPid, args = [], runningOnServer = daemonHost) {
+        if (tool.shouldTail != true || !runningPid || tool.lastTailedPid == runningPid) return;
+        log(ns, `Tailing Tool: ${tool.name}` + (args.length > 0 ? ` with args ${JSON.stringify(args)}` : '') + ` on server ${runningOnServer} (pid ${runningPid})`);
+        tail(ns, runningPid);
+        applyToolTailLayout(ns, tool, runningPid);
+        tool.lastTailedPid = runningPid;
+    }
+
+    function applyToolTailLayout(ns, tool, pid) {
+        if (tool.tailLayout != "work") return;
+        const width = Number(options['work-tail-width']);
+        const height = Number(options['work-tail-height']);
+        const x = Number(options['work-tail-x']);
+        const y = Number(options['work-tail-y']);
+        if (Number.isFinite(width) && Number.isFinite(height) && width > 0 && height > 0)
+            ns.ui.resizeTail(width, height, pid);
+        if (Number.isFinite(x) && Number.isFinite(y) && x >= 0 && y >= 0)
+            ns.ui.moveTail(x, y, pid);
     }
 
     /** Wrapper for ns.exec which automatically retries if there is a failure.
@@ -1322,6 +1379,8 @@ export async function main(ns) {
             this.relaunchIfExited = toolConfig.relaunchIfExited === true;
             this.cooldownMs = toolConfig.cooldownMs ?? 0;
             this.lastLaunchAttempt = 0;
+            this.tailLayout = toolConfig.tailLayout;
+            this.lastTailedPid = 0;
         }
         /** @param {Server} server
          * @returns {Promise<boolean>} true if the server has a copy of this tool. */
