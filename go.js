@@ -199,6 +199,10 @@ export async function main(ns) {
                 results = await movePiece(ns, getOpeningMove(ns))
 
             if (turn >= 3) {
+                if (results = await movePiece(ns, getPriorityTacticalMove())) {
+                    checkNewGame(ns, results)
+                    continue
+                }
                 switch (playStyle) {
                     case 0:  //Netburners
                         if (results = await movePiece(ns, getRandomCounterLib())) break
@@ -623,6 +627,19 @@ export async function main(ns) {
             coords: moveOptions[randomIndex],
             msg: "Lib Attack"
         } : []
+    }
+    /** @returns {{coords?: number[]; msg?: string;}} */
+    function getPriorityTacticalMove() {
+        for (const getMove of [
+            getRandomCounterLib,
+            () => getRandomLibAttack(1),
+            () => getRandomLibDefend(2),
+            () => getRandomLibDefend(1),
+        ]) {
+            const move = getMove();
+            if (move?.coords !== undefined) return move;
+        }
+        return []
     }
     /** @param {NS} ns
      * @returns {{coords: number[]; msg: string;}} */
@@ -1074,7 +1091,7 @@ export async function main(ns) {
 
         if (x > 0 && y > 0 && board[x - 1][y - 1] === "O") surround += getChainValue(x - 1, y - 1, "O")
         if (x < size - 1 && y > 0 && board[x + 1][y - 1] === "O") surround += getChainValue(x + 1, y - 1, "O")
-        if (y < size - 1 && x > 0 && board[x - 1][y + 1] === "O") surround += getChainValue(x - 1, y - 1, "O")
+        if (y < size - 1 && x > 0 && board[x - 1][y + 1] === "O") surround += getChainValue(x - 1, y + 1, "O")
         if (y < size - 1 && x < size - 1 && board[x + 1][y + 1] === "O") surround += getChainValue(x + 1, y + 1, "O")
 
         return surround
@@ -1134,7 +1151,7 @@ export async function main(ns) {
                 (x > 0 && board[x - 1][y] === "O" && validLibMoves[x - 1][y] >= libsMin && validLibMoves[x - 1][y] <= libsMax) ||
                 (x < size - 1 && board[x + 1][y] === "O" && validLibMoves[x + 1][y] >= libsMin && validLibMoves[x + 1][y] <= libsMax) ||
                 (y > 0 && board[x][y - 1] === "O" && validLibMoves[x][y - 1] >= libsMin && validLibMoves[x][y - 1] <= libsMax) ||
-                (y < size - 1 && board[x][y + 1] === "O" && validLibMoves[x][y + 1] >= libsMin && validLibMoves <= libsMax)) ? true : false
+                (y < size - 1 && board[x][y + 1] === "O" && validLibMoves[x][y + 1] >= libsMin && validLibMoves[x][y + 1] <= libsMax)) ? true : false
             const surround = getSurroundLibs(x, y, "X")
             const freeSpace = getFreeSpace(x, y)
             if (freeSpace < minFreeSpace) continue
@@ -1182,7 +1199,7 @@ export async function main(ns) {
                 (x > 0 && board[x - 1][y] === "O" && validLibMoves[x - 1][y] >= libsMin && validLibMoves[x - 1][y] <= libsMax) ||
                 (x < size - 1 && board[x + 1][y] === "O" && validLibMoves[x + 1][y] >= libsMin && validLibMoves[x + 1][y] <= libsMax) ||
                 (y > 0 && board[x][y - 1] === "O" && validLibMoves[x][y - 1] >= libsMin && validLibMoves[x][y - 1] <= libsMax) ||
-                (y < size - 1 && board[x][y + 1] === "O" && validLibMoves[x][y + 1] >= libsMin && validLibMoves <= libsMax)) ? true : false
+                (y < size - 1 && board[x][y + 1] === "O" && validLibMoves[x][y + 1] >= libsMin && validLibMoves[x][y + 1] <= libsMax)) ? true : false
             const surround = getSurroundLibs(x, y, "X")
             const freeSpace = getFreeSpace(x, y)
             if (freeSpace < minFreeSpace) continue
@@ -1338,13 +1355,20 @@ export async function main(ns) {
                 }
             }
 
-        //Moves contains a randomized array of x,y
-        moves = moves.sort(() => Math.random() - Math.random())
-        contestedMoves = contestedMoves.sort(() => Math.random() - Math.random())
+        // Moves contains randomized x/y pairs. Fisher-Yates avoids comparator bias from random sort.
+        shuffleMoves(moves)
+        shuffleMoves(contestedMoves)
         currentValidMoves = moves
         currentValidContestedMoves = contestedMoves
         currentValidMovesTurn = turn
         return notMine ? currentValidContestedMoves : currentValidMoves
+    }
+    function shuffleMoves(moves) {
+        for (let i = moves.length - 1; i > 0; i--) {
+            const j = Math.floor(Math.random() * (i + 1));
+            [moves[i], moves[j]] = [moves[j], moves[i]];
+        }
+        return moves
     }
     function createsLib(x, y, player) {
         const size = board[0].length
