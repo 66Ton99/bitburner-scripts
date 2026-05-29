@@ -9,6 +9,7 @@ import {
 
 // These parameters are meant to let you tweak the script's behaviour from the command line (without altering source code)
 let options;
+const bladeburnerJoinStatRequirement = 100;
 const argsSchema = [
     // Behaviour-changing flags
     ['spend-hashes-for-money-when-under', 10E6], // (Default 10m) Convert 4 hashes to money whenever we're below this amount
@@ -184,6 +185,8 @@ export async function main(ns) {
     let playerInGang = false;
     let corporationLaunchGateStatus = null;
     let corporationLaunchGateStatusTime = 0;
+    let hacknetHashStatus = null;
+    let hacknetHashStatusTime = 0;
 
     // Property to avoid log churn if our status hasn't changed since the last loop
     let lastUpdate = "";
@@ -317,6 +320,36 @@ export async function main(ns) {
         return shouldReserve;
     }
 
+    async function getHacknetHashStatus(ns) {
+        if (hacknetHashStatus && Date.now() - hacknetHashStatusTime < 30 * 1000)
+            return hacknetHashStatus;
+        try {
+            hacknetHashStatus = await getNsDataThroughFile(ns, `(() => {
+                try {
+                    return {
+                        nodes: ns.hacknet.numNodes(),
+                        hashes: ns.hacknet.numHashes(),
+                        capacity: ns.hacknet.hashCapacity(),
+                    };
+                } catch {
+                    return { nodes: 0, hashes: 0, capacity: 0, unavailable: true };
+                }
+            })()`, '/Temp/daemon-hacknet-hash-status-v1.txt', [], false, 1, 0, true);
+            hacknetHashStatusTime = Date.now();
+            return hacknetHashStatus;
+        } catch {
+            hacknetHashStatus = null;
+            hacknetHashStatusTime = Date.now();
+            return null;
+        }
+    }
+
+    async function hasHacknetHashCapacity(ns) {
+        if (!(9 in dictSourceFiles) || bitNodeMults.HacknetNodeMoney <= 0) return false;
+        const status = await getHacknetHashStatus(ns);
+        return (status?.nodes ?? 0) > 0 && (status?.capacity ?? 0) > 0;
+    }
+
     /** @param {NS} ns **/
     async function startup(ns) {
         daemonHost = "home"; // ns.getHostname(); // get the name of this node (realistically, will always be home)
@@ -424,6 +457,24 @@ export async function main(ns) {
             return ['work-for-factions.js', 'go.js', 'gangs.js', 'sleeve.js', 'bladeburner.js',
                 'graft-manager.js', 'darknet-manager.js', 'faction-manager.js', 'backdoor-all-servers.js']
                 .includes(String(helper.name || '').split('/').pop());
+        }
+
+        function hasBladeburnerJoinStats() {
+            const skills = _cachedPlayerInfo?.skills ?? {};
+            return (skills.strength ?? 0) >= bladeburnerJoinStatRequirement &&
+                (skills.defense ?? 0) >= bladeburnerJoinStatRequirement &&
+                (skills.dexterity ?? 0) >= bladeburnerJoinStatRequirement &&
+                (skills.agility ?? 0) >= bladeburnerJoinStatRequirement;
+        }
+
+        function shouldRunBladeburnerAutomation() {
+            if (isMoneyFocusSpendingLocked() || options['disable-bladeburner'] || options['disable-script'].includes('bladeburner.js'))
+                return false;
+            if (!reqRam(64) || !(7 in dictSourceFiles) || bitNodeMults.BladeburnerRank == 0)
+                return false;
+            if (bitNodeN == 6 || bitNodeN == 7)
+                return true;
+            return hasBladeburnerJoinStats();
         }
 
         function shouldBypassCorporationHomeRamGate() {
@@ -590,6 +641,11 @@ export async function main(ns) {
             return args;
         }
 
+        async function shouldRunSpendHashes(ns) {
+            if (!(await hasHacknetHashCapacity(ns))) return false;
+            return options['autopilot-mode'] ? getAutopilotSpendHashesArgs() != null : reqRam(64);
+        }
+
         function hasFreeRamForScript(ns, scriptName, ignoreHomeReserve = false) {
             const scriptRam = ns.getScriptRam(scriptName, "home");
             if (!Number.isFinite(scriptRam) || scriptRam <= 0) return false;
@@ -657,7 +713,7 @@ export async function main(ns) {
             { name: "hacknet-upgrade-manager.js", shouldRun: () => shouldUpgradeHacknet(), args: () => ["--continuous", "--max-payoff-time", "1h", "--interval", "0", "--reserve", hacknetReserve(ns)], shouldTail: false }, // One-time kickstart of hash income by buying everything with up to 1h payoff time immediately
             {
                 name: "spend-hacknet-hashes.js",
-                shouldRun: () => options['autopilot-mode'] ? getAutopilotSpendHashesArgs() != null : reqRam(64) && 9 in dictSourceFiles,
+                shouldRun: async () => await shouldRunSpendHashes(ns),
                 args: () => options['autopilot-mode'] ? getAutopilotSpendHashesArgs() : [],
                 restartOnArgsChange: true,
                 relaunchIfExited: true,
@@ -681,8 +737,7 @@ export async function main(ns) {
             }, // Script to create manage our gang for us
             {
                 name: "bladeburner.js", // Script to manage bladeburner for us. Run automatically if not disabled and bladeburner API is available
-                shouldRun: () => !isMoneyFocusSpendingLocked() && !options['disable-bladeburner'] && !options['disable-script'].includes('bladeburner.js') && reqRam(64)
-                    && 7 in dictSourceFiles && bitNodeMults.BladeburnerRank != 0, // Don't run bladeburner in BN's where it can't rank up (currently just BN8)
+                shouldRun: shouldRunBladeburnerAutomation, // Don't run bladeburner in BN's where it can't rank up (currently just BN8), or too early outside BN6/BN7.
                 shouldTail: true,
                 tailLayout: "work",
             },
@@ -852,7 +907,7 @@ export async function main(ns) {
 
         // Hack: this doesn't really belong here, but is essentially a "temp script" we periodically run when needed
         // Super-early aug, if we are poor, spend hashes as soon as we get them for a quick cash injection. (Only applies if we have hacknet servers)
-        if (9 in dictSourceFiles && !options['disable-spend-hashes']) { // See if we have a hacknet, and spending hashes for money isn't disabled
+        if (!options['disable-spend-hashes'] && await hasHacknetHashCapacity(ns)) { // See if we have hash-producing hacknet servers, and spending hashes for money isn't disabled
             if (homeServer.getMoney() < options['spend-hashes-for-money-when-under'] // Only if money is below the configured threshold
                 && homeServer.ramAvailable(/*ignoreReservedRam:*/true) >= 5.6) { // Ensure we have spare RAM to run this temp script
                 await runCommand(ns, `0; if(ns.hacknet.spendHashes("Sell for Money")) ns.toast('Sold 4 hashes for \$1M', 'success')`, '/Temp/sell-hashes-for-money.js');

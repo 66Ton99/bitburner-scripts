@@ -141,8 +141,9 @@ const maxFinalNeuroFluxRepTopUp = 25000;
 let shouldFocus; // Whether we should focus on work or let it be backgrounded (based on whether "Neuroreceptor Management Implant" is owned, or "--no-focus" is specified)
 // And a bunch of globals because managing state and encapsulation is hard.
 let hasFocusPenalty, hasSimulacrum, hasRedPillPurchased, fulcrumHackReq, playerInBladeburner, wasGrafting, currentBitnode, bn3FirstInstallPending, shouldExitForBladeburner;
-let dictSourceFiles, dictFactionFavors, playerGang, mainLoopStart, scope, numJoinedFactions, lastTravel, crimeCount;
+let dictSourceFiles, dictFactionFavors, dictFactionAugs, playerGang, mainLoopStart, scope, numJoinedFactions, lastTravel, crimeCount;
 let firstFactions, skipFactions, completedFactions, softCompletedFactions, mostExpensiveAugByFaction, mostExpensiveDesiredAugByFaction, mostExpensiveDesiredAugCostByFaction;
+let neuroFluxRepReq = 0;
 let scriptPid = "?";
 let recentHospitalizedLocations = {};
 let recentFactionInviteDeferrals = {};
@@ -400,13 +401,14 @@ async function loadStartupData(ns) {
 
     // Get some faction and augmentation information to decide what remains to be purchased
     dictFactionFavors = await getNsDataThroughFile(ns, dictCommand('ns.singularity.getFactionFavor(o)'), '/Temp/getFactionFavors.txt', allKnownFactions);
-    const dictFactionAugs = await getNsDataThroughFile(ns, dictCommand('ns.singularity.getAugmentationsFromFaction(o)'), '/Temp/getAugmentationsFromFactions.txt', allKnownFactions);
+    dictFactionAugs = await getNsDataThroughFile(ns, dictCommand('ns.singularity.getAugmentationsFromFaction(o)'), '/Temp/getAugmentationsFromFactions.txt', allKnownFactions);
     if (dictFactionAugs[shadowsOfAnarchy])
         dictFactionAugs[shadowsOfAnarchy] = dictFactionAugs[shadowsOfAnarchy].filter(a => a == soaWksHarmonizer);
     const augmentationNames = [...new Set(Object.values(dictFactionAugs).flat())];
     const dictAugRepReqs = await getNsDataThroughFile(ns, dictCommand('ns.singularity.getAugmentationRepReq(o)'), '/Temp/getAugmentationRepReqs.txt', augmentationNames);
     const dictAugPrices = await getNsDataThroughFile(ns, dictCommand('ns.singularity.getAugmentationPrice(o)'), '/Temp/getAugmentationPrices.txt', augmentationNames);
     const dictAugStats = await getNsDataThroughFile(ns, dictCommand('ns.singularity.getAugmentationStats(o)'), '/Temp/getAugmentationStats.txt', augmentationNames);
+    neuroFluxRepReq = Number(dictAugRepReqs[strNF]) || 0;
     const installedAugmentations = await getNsDataThroughFile(ns, `ns.singularity.getOwnedAugmentations()`, '/Temp/player-augs-installed.txt');
     const purchasedAugmentations = await getNsDataThroughFile(ns, `ns.singularity.getOwnedAugmentations(true)`, '/Temp/player-augs-purchased.txt');
     bn3FirstInstallPending = currentBitnode == 3 && installedAugmentations.filter(aug => aug != strNF).length == 0;
@@ -684,7 +686,7 @@ async function mainLoop(ns) {
 
 async function getFinalNeuroFluxRepTopUp(ns, candidateFactions) {
     if (currentBitnode == 8 || options['crime-focus'] || options['invites-only']) return null;
-    const nfRepReq = dictAugRepReqs[strNF];
+    const nfRepReq = neuroFluxRepReq;
     if (!Number.isFinite(nfRepReq) || nfRepReq <= 0) return null;
     const candidates = [];
     for (const faction of candidateFactions) {

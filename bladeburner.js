@@ -3,6 +3,8 @@ import { log, disableLogs, getConfiguration, instanceCount, getNsDataThroughFile
 const cityNames = ["Sector-12", "Aevum", "Volhaven", "Chongqing", "New Tokyo", "Ishima"];
 const antiChaosOperation = "Stealth Retirement Operation"; // Note: Faster and more effective than Diplomacy at reducing city chaos
 const simulacrumAugName = "The Blade's Simulacrum"; // This augmentation lets you do bladeburner actions while busy
+const bladeburnerJoinStatRequirement = 100;
+const bladeburnerJoinWaitLogInterval = 60 * 1000;
 
 // In general, we will buy the skill upgrade with the next highest cost, but to tweak the priority of various skills,
 // we use the following configuration to change their relative cost. Higher number means lower priority
@@ -64,7 +66,7 @@ export async function main(ns) {
     if (resetInfo.currentNode == 8)
         return log(ns, "ERROR: Bladeburner is completely disabled in Bitnode 8 :`(\nHappy stonking", true, 'error');
     // Ensure we've joined bladeburners before proceeding further
-    await beingInBladeburner(ns);
+    if (!(await beingInBladeburner(ns))) return;
     // Gather one-time info such as contract and operation names
     await gatherBladeburnerInfo(ns);
     // Start the main loop which monitors stats and changes activities as needed
@@ -460,16 +462,43 @@ async function canDoBladeburnerWork(ns) {
     return lastCanWorkCheckIdle = false;
 }
 
+function hasBladeburnerJoinStats() {
+    return player.skills.strength >= bladeburnerJoinStatRequirement &&
+        player.skills.defense >= bladeburnerJoinStatRequirement &&
+        player.skills.dexterity >= bladeburnerJoinStatRequirement &&
+        player.skills.agility >= bladeburnerJoinStatRequirement;
+}
+
+function bladeburnerJoinStatsStatus() {
+    return `Str: ${player.skills.strength}, Def: ${player.skills.defense}, ` +
+        `Dex: ${player.skills.dexterity}, Agi: ${player.skills.agility}`;
+}
+
+function shouldWaitForBladeburnerJoinStats() {
+    return resetInfo.currentNode == 6 || resetInfo.currentNode == 7;
+}
+
 /** @param {NS} ns
- * Ensure we're in the Bladeburner division */
+ * Ensure we're in the Bladeburner division.
+ * @returns {Promise<boolean>} true if Bladeburner is ready to manage */
 async function beingInBladeburner(ns) {
     // Ensure we're in the Bladeburner division. If not, wait until we've joined it.
+    let lastJoinWaitLog = 0;
     while (!(await getNsDataThroughFile(ns, 'ns.bladeburner.inBladeburner()'))) {
         try {
-            if (player.skills.strength < 100 || player.skills.defense < 100 || player.skills.dexterity < 100 || player.skills.agility < 100)
-                log(ns, `Waiting for physical stats >100 to join bladeburner ` +
-                    `(Currently Str: ${player.skills.strength}, Def: ${player.skills.defense}, Dex: ${player.skills.dexterity}, Agi: ${player.skills.agility})`);
-            else if (await getBBInfo(ns, 'joinBladeburnerDivision()')) {
+            if (!hasBladeburnerJoinStats()) {
+                const status = bladeburnerJoinStatsStatus();
+                if (!shouldWaitForBladeburnerJoinStats()) {
+                    log(ns, `INFO: Not starting Bladeburner yet in BN${resetInfo.currentNode}; physical stats must reach ` +
+                        `${bladeburnerJoinStatRequirement} before joining. Current ${status}. Exiting to free RAM.`, true, 'info');
+                    return false;
+                }
+                if (Date.now() - lastJoinWaitLog >= bladeburnerJoinWaitLogInterval) {
+                    log(ns, `Waiting for physical stats >=${bladeburnerJoinStatRequirement} to join bladeburner ` +
+                        `(Currently ${status})`);
+                    lastJoinWaitLog = Date.now();
+                }
+            } else if (await getBBInfo(ns, 'joinBladeburnerDivision()')) {
                 let message = `SUCCESS: Joined Bladeburner (At ${formatDuration(getTimeInBitnode())} into BitNode)`;
                 if (9 in ownedSourceFiles && options['disable-spending-hashes'])
                     message += ' --disable-spending-hashes is set, but consider running the following command to give it a boost:\n' +
@@ -488,13 +517,14 @@ async function beingInBladeburner(ns) {
     }
     log(ns, "INFO: We are in Bladeburner. Starting main loop...")
     // If not disabled, launch an external script to spend hashes on bladeburner rank
-    if (!(9 in ownedSourceFiles)) return; // Hacknet not unlocked
+    if (!(9 in ownedSourceFiles)) return true; // Hacknet not unlocked
     if (options['disable-spending-hashes'])
-        return log(ns, `INFO: Not spending hashes on bladeburner (--disable-spending-hashes flag is set)`);
+        return !!log(ns, `INFO: Not spending hashes on bladeburner (--disable-spending-hashes flag is set)`) || true;
     const fPath = getFilePath('spend-hacknet-hashes.js');
     const args = ['--spend-on', 'Exchange_for_Bladeburner_Rank', '--spend-on', 'Exchange_for_Bladeburner_SP', '--liquidate'];
     if (ns.run(fPath, { preventDuplicates: true }, ...args))
         log(ns, `INFO: Launched '${fPath}' to gain Bladeburner Rank and Skill Points more quickly (Can be disabled with --disable-spending-hashes)`)
     else
         log(ns, `WARNING: Failed to launch '${fPath}' (already running?)`)
+    return true;
 }

@@ -1,6 +1,6 @@
 import {
     formatDuration, formatMoney, getActiveSourceFiles, getConfiguration, getNsDataThroughFile,
-    getStocksValue, instanceCount, log, tryGetBitNodeMultipliers
+    getStocksValue, instanceCount, log, parseShortNumber, tryGetBitNodeMultipliers
 } from './helpers.js'
 
 const statusFile = "/Temp/graft-manager-status.txt";
@@ -18,7 +18,7 @@ const priorityAugs = {
 const argsSchema = [
     ["interval", 60000],
     ["reserve", 0],
-    ["min-net-worth", 0],
+    ["min-net-worth", null],
     ["max-spend-frac", 0.20],
     ["max-time", 90 * 60 * 1000],
     ["max-entropy", 1],
@@ -43,6 +43,7 @@ export async function main(ns) {
         ns.tprint([
             "Conservative automation for augmentation grafting.",
             `Usage: run ${ns.getScriptName()} [--bn8-stock-mode] [--min-net-worth 250b] [--max-spend-frac 0.15]`,
+            "--min-net-worth null uses the conservative automatic threshold; 0 disables the net-worth gate.",
             "Only grafts strategic augmentations and respects reserve.txt. BN8 mode prioritizes stock/cash acceleration.",
         ].join("\n"));
         return;
@@ -83,7 +84,7 @@ async function maybeStartGrafting(ns, options) {
 
     const stocksValue = await safeGetStocksValue(ns);
     const netWorth = player.money + stocksValue;
-    const minNetWorth = Number(options["min-net-worth"]) || (options["bn8-stock-mode"] ? 250e9 : 1e12);
+    const minNetWorth = getMinNetWorth(options);
     if (netWorth < minNetWorth)
         return { status: `INFO: Waiting to graft until net worth reaches ${formatMoney(minNetWorth)} (now ${formatMoney(netWorth)}).` };
 
@@ -108,6 +109,16 @@ async function maybeStartGrafting(ns, options) {
 
     log(ns, `SUCCESS: Started grafting ${target.name}: ${target.reason}. Cost ${formatMoney(target.price)}, time ${formatDuration(target.time)}.`, true, "success");
     return { started: true };
+}
+
+function getMinNetWorth(options) {
+    const configured = options["min-net-worth"];
+    if (configured == null || configured === "")
+        return options["bn8-stock-mode"] ? 250e9 : 1e12;
+    const parsed = parseShortNumber(String(configured));
+    if (!Number.isFinite(parsed))
+        return options["bn8-stock-mode"] ? 250e9 : 1e12;
+    return Math.max(0, parsed);
 }
 
 async function getGraftingCandidates(ns, options, player, resetInfo, reserve, netWorth) {

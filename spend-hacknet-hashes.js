@@ -86,10 +86,9 @@ export async function main(ns) {
             //log(ns, `INFO: Waking up, last hash balance has changed from ${lastHashBalance} to ${currentHashes}`);
             // Compute the total income rate of all hacknet nodes. We have to spend faster than this when near capacity.
             const nodes = ns.hacknet.numNodes();
-            if (nodes == 0) {
-                log(ns, 'WARN: Hacknet is empty, no hashes to spend yet...');
-                continue; // Nothing to do until at least one node is purchased.
-            } else if (capacity == 0)
+            if (nodes == 0)
+                return log(ns, 'INFO: Hacknet is empty, no hashes can be spent. Exiting to free RAM.');
+            else if (capacity == 0)
                 return log(ns, 'INFO: You have hacknet nodes, not hacknet servers, so spending hashes is not applicable.');
             // Helper function to get total hash production across all nodes
             let globalProduction = Array.from({ length: nodes }, (_, i) => ns.hacknet.getNodeStats(i))
