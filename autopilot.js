@@ -11,9 +11,12 @@ const earlyBootstrapHelperRam = 12;
 const factionManagerInstallRefreshInterval = 60 * 1000;
 const preCasinoInfiltrationFile = "/Temp/autopilot-pre-casino-infiltration.txt";
 const preCasinoInfiltrationResultFile = "/Temp/autopilot-pre-casino-infiltration-result.txt";
+const casinoCompleteFile = "/Temp/autopilot-casino-complete.txt";
 const earlyBootstrapPurchasesFile = `/Temp/early-bootstrap-purchases-${autopilotVersion}.txt`;
 const earlyHomeRamTarget = 1024;
 const bn3EarlyHomeRamTarget = 4096;
+const casinoEarningsLimit = 10e9;
+const casinoSkipMoneyThreshold = 10e9;
 
 const preCasinoBlockedScripts = [
     'daemon.js',
@@ -184,7 +187,7 @@ export async function main(ns) {
     let playerInGang = false, rushGang = false; // Tells us whether we're should be trying to work towards getting into a gang
     let playerInBladeburner = false; // Whether we've joined bladeburner
     let wdHack = (/**@returns{null|number}*/() => null)(); // If the WD server is available (i.e. TRP is installed), caches the required hack level
-    let ranCasino = false; // Flag to indicate whether we've stolen 10b from the casino yet
+    let ranCasino = false; // Flag to indicate whether we've finished the casino bootstrap for this reset.
     let alreadyJoinedDaedalus = false, autoJoinDaedalusUnavailable = false, reservingMoneyForDaedalus = false, disableStockmasterForDaedalus = false; // Flags to indicate that we should be keeping 100b cash on hand to earn an invite to Daedalus
     let prioritizeHackForDaedalus = false, prioritizeHackForWd = false;
     let lastScriptsCheck = 0; // Last time we got a listing of all running scripts
@@ -425,7 +428,23 @@ export async function main(ns) {
         if (earlyResetInfo.currentNode == 8)
             return false;
         resetInfo = earlyResetInfo;
+        if (isCasinoMarkedComplete(ns)) {
+            log(ns, `INFO: Skipping early casino handoff; casino completion marker is current.`, true, 'info');
+            ranCasino = true;
+            return false;
+        }
         const cash = ns.getServerMoneyAvailable("home");
+        const casinoEarnings = ns.getMoneySources().sinceInstall.casino;
+        if (casinoEarnings >= casinoEarningsLimit) {
+            log(ns, `INFO: Skipping early casino handoff; casino earnings already ${formatMoney(casinoEarnings)}.`, true, 'info');
+            ranCasino = true;
+            return false;
+        }
+        if (cash >= casinoSkipMoneyThreshold) {
+            log(ns, `INFO: Skipping early casino handoff; cash ${formatMoney(cash)} already meets ${formatMoney(casinoSkipMoneyThreshold)} threshold.`, true, 'info');
+            ranCasino = true;
+            return false;
+        }
         if (cash < 300000) {
             const infiltrationMarker = `${resetInfo.lastAugReset}:Joe's Guns:cash`;
             ns.write(preCasinoInfiltrationFile, infiltrationMarker, "w");
@@ -1246,24 +1265,29 @@ export async function main(ns) {
         acceptedStanek = true;
     }
 
-    /** Logic to steal 10b from the casino
+    /** Logic to steal bounded bootstrap cash from the casino
      * @param {NS} ns
      * @param {Player} player
      * @returns {Promise<boolean>} true when casino handling should block the rest of this autopilot loop. */
     async function maybeDoCasino(ns, player) {
         if (ranCasino || options['disable-casino']) return false;
-        // Figure out whether we've already been kicked out of the casino for earning more than 10b there
-        const moneySources = await getPlayerMoneySources(ns);
-        const casinoEarnings = moneySources.sinceInstall.casino;
-        if (casinoEarnings >= 1e10) {
-            log(ns, `INFO: Skipping running casino.js, as we've previously earned ${formatMoney(casinoEarnings)} and been kicked out.`);
+        if (isCasinoMarkedComplete(ns)) {
+            log(ns, `INFO: Skipping running casino.js; casino completion marker is current.`);
             ranCasino = true;
             return false;
         }
-        // If we already have more than 1t money but hadn't run casino.js yet, don't bother. Another 10b won't move the needle much.
+        // Figure out whether we've already reached our casino earnings cap.
+        const moneySources = await getPlayerMoneySources(ns);
+        const casinoEarnings = moneySources.sinceInstall.casino;
+        if (casinoEarnings >= casinoEarningsLimit) {
+            log(ns, `INFO: Skipping running casino.js, as we've previously earned ${formatMoney(casinoEarnings)} from the casino.`);
+            ranCasino = true;
+            return false;
+        }
+        // If we already have enough wealth, don't bother. Another bounded casino run won't move the needle much.
         const playerWealth = player.money + (await getStocksValueIfRamAvailable(ns));
-        if (playerWealth >= 1e12) {
-            log(ns, `INFO: Skipping running casino.js, since we're already ridiculously wealthy (${formatMoney(playerWealth)} > 1t).`);
+        if (playerWealth >= casinoSkipMoneyThreshold) {
+            log(ns, `INFO: Skipping running casino.js, since we already have ${formatMoney(playerWealth)} >= ${formatMoney(casinoSkipMoneyThreshold)}.`);
             ranCasino = true;
             return false;
         }
@@ -1312,6 +1336,11 @@ export async function main(ns) {
         launchSpawnHandoff(ns, casinoDispatcherScript, ['--game', 'roulette',
             '--kill-all-scripts', true, '--on-completion-script', ns.getScriptName()]);
         return true;
+    }
+
+    function isCasinoMarkedComplete(ns) {
+        const marker = parseJsonSafe(ns.read(casinoCompleteFile));
+        return marker?.lastAugReset == resetInfo.lastAugReset && marker?.currentNode == resetInfo.currentNode;
     }
 
     /** Buy the permanent early-game basics before daemon/host-manager can spend casino cash on temporary servers.

@@ -339,6 +339,10 @@ const argsSchema = [
   ['on-completion-script-args', []],
 ];
 
+const CASINO_EARNINGS_LIMIT = 10e9;
+const ROULETTE_STRAIGHT_BET_PAYOUT = 36;
+const casinoCompleteFile = "/Temp/autopilot-casino-complete.txt";
+
 let doc = eval("document");
 let options;
 let verbose = false;
@@ -363,6 +367,12 @@ async function main(ns) {
 async function startAutoRoulette(ns) {
   await navigateToRoulette(ns);
   const clickElement = async (button) => await click(ns, button);
+  const checkRouletteKickedOut = async (retries = 10) =>
+    await checkForKickedOut(
+      async (xpath, retryCount) => await tryfindElement(ns, xpath, retryCount),
+      clickElement,
+      ns,
+      retries);
   if (options['kill-all-scripts'] && ns.ls("home", "Temp/").length > 0) {
     await killAllOtherScripts(ns, !options['no-deleting-remote-files']);
   }
@@ -373,20 +383,23 @@ async function startAutoRoulette(ns) {
   );
   const playthrough = new RoulettePlaythrough();
   while (true) {
-    if (await checkForKickedOut(tryfindElement, clickElement, ns) || hasReachedCasinoLimit(ns))
+    if (await checkRouletteKickedOut() || hasReachedCasinoLimit(ns))
       return await onCompletion(ns, true);
     const wagerInput = await findRequiredElement(ns, "//input[@type='number']");
     const guess = playthrough.predictedWinner >= 0 ? playthrough.predictedWinner : 0;
+    const maxSafeBet = Math.floor(getCasinoEarningsRemaining(ns) / ROULETTE_STRAIGHT_BET_PAYOUT);
+    if (maxSafeBet <= 0)
+      return await onCompletion(ns, true);
     const bet = playthrough.predictedWinner >= 0 ?
-      Math.min(1e7, Math.floor(ns.getPlayer().money * 0.9)) :
-      options['training-bet'];
+      Math.min(1e7, maxSafeBet, Math.floor(ns.getPlayer().money * 0.9)) :
+      Math.min(options['training-bet'], maxSafeBet);
     if (bet <= 0) {
       log(ns, "WARNING: Not enough money to continue roulette automation. Reloading previous save...", true, 'warning');
       return await reloadGame(ns);
     }
     await setText(ns, wagerInput, `${bet}`);
     await click(ns, await findRequiredElement(ns, `//button[normalize-space(text())='${guess}']`));
-    const result = await waitForRoundResult(ns, guess);
+    const result = await waitForRoundResult(ns, guess, checkRouletteKickedOut);
     if (result === null)
       return await onCompletion(ns, true);
     playthrough.addRound({ guess, result });
@@ -428,7 +441,7 @@ async function navigateToRoulette(ns) {
   await findRequiredElement(ns, "//input[@type='number']", 25);
 }
 
-async function waitForRoundResult(ns, guess) {
+async function waitForRoundResult(ns, guess, checkRouletteKickedOut) {
   let sawPlaying = false;
   const buttonXpath = `//button[normalize-space(text())='${guess}']`;
   const clickElement = async (button) => await click(ns, button);
@@ -440,15 +453,23 @@ async function waitForRoundResult(ns, guess) {
       const result = getCurrentNumber();
       if (result !== null) return result;
     }
-    if (await checkForKickedOut(tryfindElement, clickElement, ns) || hasReachedCasinoLimit(ns)) return null;
+    if (await checkRouletteKickedOut(1) || hasReachedCasinoLimit(ns)) return null;
     await ns.sleep(50);
   }
+  if (await checkRouletteKickedOut(10)) return null;
   if (hasReachedCasinoLimit(ns)) return null;
-  throw new Error("Timed out waiting for roulette round result.");
+  log(ns, "WARNING: Timed out waiting for roulette round result. Reloading previous save...", true, 'warning');
+  await reloadGame(ns);
+  return null;
 }
 
 function hasReachedCasinoLimit(ns) {
-  return ns.getMoneySources().sinceInstall.casino > 10e9;
+  return getCasinoEarningsRemaining(ns) <= 0;
+}
+
+function getCasinoEarningsRemaining(ns) {
+  const casinoEarnings = ns.getMoneySources().sinceInstall.casino;
+  return Math.max(0, CASINO_EARNINGS_LIMIT - casinoEarnings);
 }
 
 function getStatusText() {
@@ -470,10 +491,14 @@ function getCurrentNumber() {
 }
 
 async function onCompletion(ns, kickedOutAfterPlaying = true) {
-  if (kickedOutAfterPlaying)
+  if (hasReachedCasinoLimit(ns))
+    log(ns, "SUCCESS: Casino earnings limit reached. Stopping roulette before exceeding $10.000b.", true);
+  else if (kickedOutAfterPlaying)
     log(ns, "SUCCESS: We've been kicked out of roulette.", true);
   else
     log(ns, "INFO: We appear to have been previously kicked out of roulette. Continuing without playing...", true);
+  markCasinoComplete(ns, hasReachedCasinoLimit(ns) ? 'earnings-limit' :
+    kickedOutAfterPlaying ? 'kicked-out' : 'previously-kicked-out');
   dismissFactionInvitationModal(ns);
   const completionScript = options['on-completion-script'];
   if (!completionScript) return;
@@ -483,6 +508,18 @@ async function onCompletion(ns, kickedOutAfterPlaying = true) {
     threads: 1,
     spawnDelay: 100,
   }, ...completionArgs);
+}
+
+function markCasinoComplete(ns, reason) {
+  const resetInfo = ns.getResetInfo();
+  const casinoEarnings = ns.getMoneySources().sinceInstall.casino;
+  ns.write(casinoCompleteFile, JSON.stringify({
+    lastAugReset: resetInfo.lastAugReset,
+    currentNode: resetInfo.currentNode,
+    reason,
+    casinoEarnings,
+    timestamp: Date.now(),
+  }), "w");
 }
 
 function dismissFactionInvitationModal(ns) {

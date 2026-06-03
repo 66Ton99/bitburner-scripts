@@ -2,6 +2,11 @@ const SUCCESS = 200;
 const AUTH_FAILURE = 401;
 const SERVICE_UNAVAILABLE = 503;
 const STATE_FILE = "/Temp/darknet-passwords.txt";
+const TOPOLOGY_FILE = "/Temp/darknet-topology.txt";
+const STASIS_FILE = "stasis.js";
+const STORM_FILE = "darknet-storm.js";
+const STORM_SEED_PROGRAM = "STORM_SEED.exe";
+const skippedSpreadForRam = new Set();
 
 const COMMON_PASSWORDS = [
     "123456", "password", "12345678", "qwerty", "123456789", "12345", "1234", "111111", "1234567",
@@ -35,7 +40,10 @@ const LARGE_PRIMES = [
 export async function main(ns) {
     const options = parseOptions(ns.args);
     if (options.help) {
-        ns.tprint(`Usage: run ${ns.getScriptName()} [--origin home] [--interval 15000] [--disable-phishing] [--verbose-terminal] [--self-test]`);
+        ns.tprint([
+            `Usage: run ${ns.getScriptName()} [--origin home] [--interval 15000] [--disable-phishing]`,
+            `       [--verbose-terminal] [--self-test]`,
+        ].join("\n"));
         return;
     }
     if (options["self-test"]) {
@@ -54,6 +62,8 @@ export async function main(ns) {
     while (true) {
         try {
             await openLocalCaches(ns);
+            await syncKnownPasswords(ns, String(options.origin));
+            await syncDarknetCacheFile(ns, TOPOLOGY_FILE, String(options.origin));
             await freeLocalBlockedRam(ns);
             if (!options["disable-phishing"]) await tryPhishing(ns);
             await crawlNeighbors(ns, script, String(options.origin), interval, maxAttempts, options["verbose-terminal"]);
@@ -96,6 +106,7 @@ async function crawlNeighbors(ns, script, origin, interval, maxAttempts, verbose
     const host = ns.getHostname();
     const knownPasswords = readKnownPasswords(ns);
     const neighbors = ns.dnet.probe(false).filter(server => server !== origin && server !== host);
+    if (recordDarknetTopology(ns, host, neighbors)) await syncDarknetCacheFile(ns, TOPOLOGY_FILE, origin);
 
     for (const target of neighbors) {
         let details;
@@ -107,6 +118,8 @@ async function crawlNeighbors(ns, script, origin, interval, maxAttempts, verbose
         }
         if (!details.isOnline) continue;
 
+        tryLinkStasisNearLabyrinth(ns, target, details);
+
         let password = knownPasswords[target];
         if (password != null) {
             const session = ns.dnet.connectToSession(target, password);
@@ -117,7 +130,7 @@ async function crawlNeighbors(ns, script, origin, interval, maxAttempts, verbose
             password = await solveAndAuthenticate(ns, target, details, maxAttempts, verboseTerminal);
             if (password == null) continue;
             knownPasswords[target] = password;
-            writeKnownPasswords(ns, knownPasswords);
+            if (writeKnownPasswords(ns, knownPasswords)) await syncKnownPasswords(ns, origin);
         }
 
         await spreadToNeighbor(ns, script, target, password, interval, verboseTerminal);
@@ -155,6 +168,12 @@ function normalizeDarknetServerDetails(details) {
 }
 
 async function solveAndAuthenticate(ns, target, details, maxAttempts, verboseTerminal) {
+    if (details.modelId === "NIL") return await solveYesntAndAuthenticate(ns, target, details, verboseTerminal);
+    if (details.modelId === "OpenWebAccessPoint")
+        return await solvePacketSnifferAndAuthenticate(ns, target, details, verboseTerminal);
+    if (details.modelId === "2G_cellular") return await solveTimingAndAuthenticate(ns, target, details, verboseTerminal);
+    if (details.modelId === "RateMyPix.Auth") return await solvePepperAndAuthenticate(ns, target, details, verboseTerminal);
+
     const candidates = buildCandidates(details).slice(0, maxAttempts);
     if (candidates.length === 0) {
         ns.print(`INFO: No solver yet for ${target} model=${details.modelId}`);
@@ -174,12 +193,279 @@ async function solveAndAuthenticate(ns, target, details, maxAttempts, verboseTer
     return null;
 }
 
+async function solvePacketSnifferAndAuthenticate(ns, target, details, verboseTerminal) {
+    const probe = getProbeCandidate(details);
+    const probeResult = await ns.dnet.authenticate(target, probe, 0);
+    if (probeResult.code === SUCCESS) {
+        terminalLog(ns, verboseTerminal, `SUCCESS: Darknet authenticated ${target} (OpenWebAccessPoint).`);
+        return probe;
+    }
+    if (probeResult.code === SERVICE_UNAVAILABLE) return null;
+    if (probeResult.code !== AUTH_FAILURE) {
+        ns.print(`INFO: Auth ${target} failed: ${probeResult.message} (${probeResult.code})`);
+        return null;
+    }
+
+    const candidates = parsePacketSnifferCandidates(target, details, probeResult)
+        .filter(candidate => candidate !== probe);
+    for (const candidate of await getPacketSnifferCandidatesFromLogs(ns, target, details, probe)) {
+        candidates.push(candidate);
+    }
+    for (const candidate of candidates) {
+        const result = await ns.dnet.authenticate(target, candidate, 0);
+        if (result.code === SUCCESS) {
+            terminalLog(ns, verboseTerminal, `SUCCESS: Darknet authenticated ${target} (OpenWebAccessPoint).`);
+            return candidate;
+        }
+        if (result.code === SERVICE_UNAVAILABLE) return null;
+        if (result.code !== AUTH_FAILURE) ns.print(`INFO: Auth ${target} failed: ${result.message} (${result.code})`);
+    }
+
+    ns.print(`INFO: OpenWebAccessPoint solver failed for ${target}; packet dump gave ${candidates.length} candidate(s).`);
+    return null;
+}
+
+async function getPacketSnifferCandidatesFromLogs(ns, target, details, expectedAttempt) {
+    let result;
+    try {
+        result = await ns.dnet.heartbleed(target, { peek: true, logsToCapture: 16 });
+    } catch (error) {
+        ns.print(`WARN: Could not heartbleed packet dump from ${target}: ${formatError(error)}`);
+        return [];
+    }
+    if (!result.success) {
+        ns.print(`INFO: Could not heartbleed packet dump from ${target}: ${result.message} (${result.code})`);
+        return [];
+    }
+    const candidates = [];
+    for (const log of result.logs ?? []) {
+        const parsed = parsePasswordResponseLog(log);
+        if (parsed?.passwordAttempted != null && parsed.passwordAttempted !== expectedAttempt) continue;
+        candidates.push(...parsePacketSnifferCandidates(target, details, parsed ?? log));
+    }
+    return unique(candidates);
+}
+
+function getProbeCandidate(details) {
+    const passwordLength = Math.max(1, Number(details.passwordLength) || 1);
+    if (details.passwordFormat === "numeric") return "0".repeat(passwordLength);
+    if (details.passwordFormat === "alphabetic") return "a".repeat(passwordLength);
+    if (details.passwordFormat === "alphanumeric") return "0".repeat(passwordLength);
+    return "!".repeat(passwordLength);
+}
+
+async function solveTimingAndAuthenticate(ns, target, details, verboseTerminal) {
+    const passwordLength = Math.max(1, Number(details.passwordLength) || 0);
+    const charset = getCharsetForPasswordFormat(details.passwordFormat);
+    if (!charset) {
+        ns.print(`INFO: No 2G_cellular charset solver for ${target} passwordFormat=${details.passwordFormat}`);
+        return null;
+    }
+
+    const filler = getNeverInPasswordFiller();
+    const solved = [];
+    for (let pos = 0; pos < passwordLength; pos++) {
+        let found = false;
+        for (const char of charset) {
+            const candidate = solved.join("") + char + filler.repeat(passwordLength - pos - 1);
+            const result = await ns.dnet.authenticate(target, candidate, 0);
+            if (result.code === SUCCESS) {
+                terminalLog(ns, verboseTerminal, `SUCCESS: Darknet authenticated ${target} (2G_cellular).`);
+                return candidate;
+            }
+            if (result.code === SERVICE_UNAVAILABLE) return null;
+            if (result.code !== AUTH_FAILURE) {
+                ns.print(`INFO: Auth ${target} failed: ${result.message} (${result.code})`);
+                continue;
+            }
+
+            const mismatchIndex = await getLatestTimingMismatchIndex(ns, target, candidate);
+            if (mismatchIndex == null) continue;
+            if (mismatchIndex > pos || mismatchIndex < 0) {
+                solved.push(char);
+                found = true;
+                break;
+            }
+        }
+        if (!found) {
+            ns.print(`INFO: 2G_cellular solver could not identify position ${pos} for ${target}.`);
+            return null;
+        }
+    }
+
+    const password = solved.join("");
+    const result = await ns.dnet.authenticate(target, password, 0);
+    if (result.code === SUCCESS) {
+        terminalLog(ns, verboseTerminal, `SUCCESS: Darknet authenticated ${target} (2G_cellular).`);
+        return password;
+    }
+    ns.print(`INFO: 2G_cellular solver produced ${password} for ${target}, but auth failed: ${result.message} (${result.code})`);
+    return null;
+}
+
+async function solvePepperAndAuthenticate(ns, target, details, verboseTerminal) {
+    const passwordLength = Math.max(1, Number(details.passwordLength) || 0);
+    const charset = getCharsetForPasswordFormat(details.passwordFormat);
+    if (!charset) {
+        ns.print(`INFO: No RateMyPix.Auth charset solver for ${target} passwordFormat=${details.passwordFormat}`);
+        return null;
+    }
+
+    const filler = getNeverInPasswordFiller();
+    const solved = [];
+    for (let pos = 0; pos < passwordLength; pos++) {
+        let found = false;
+        for (const char of charset) {
+            const candidate = solved.join("") + char + filler.repeat(passwordLength - pos - 1);
+            const result = await ns.dnet.authenticate(target, candidate, 0);
+            if (result.code === SUCCESS) {
+                terminalLog(ns, verboseTerminal, `SUCCESS: Darknet authenticated ${target} (RateMyPix.Auth).`);
+                return candidate;
+            }
+            if (result.code === SERVICE_UNAVAILABLE) return null;
+            if (result.code !== AUTH_FAILURE) {
+                ns.print(`INFO: Auth ${target} failed: ${result.message} (${result.code})`);
+                continue;
+            }
+
+            const pepperCount = await getLatestPepperCount(ns, target, candidate);
+            if (pepperCount == null) continue;
+            if (pepperCount > pos) {
+                solved.push(char);
+                found = true;
+                break;
+            }
+        }
+        if (!found) {
+            ns.print(`INFO: RateMyPix.Auth solver could not identify position ${pos} for ${target}.`);
+            return null;
+        }
+    }
+
+    const password = solved.join("");
+    const result = await ns.dnet.authenticate(target, password, 0);
+    if (result.code === SUCCESS) {
+        terminalLog(ns, verboseTerminal, `SUCCESS: Darknet authenticated ${target} (RateMyPix.Auth).`);
+        return password;
+    }
+    ns.print(`INFO: RateMyPix.Auth solver produced ${password} for ${target}, but auth failed: ${result.message} (${result.code})`);
+    return null;
+}
+
+function getNeverInPasswordFiller() {
+    return "_";
+}
+
+async function getLatestTimingMismatchIndex(ns, target, expectedAttempt) {
+    const parsed = await getLatestAuthFeedback(ns, target, expectedAttempt, parseTimingFeedback, "2G_cellular");
+    return parsed?.mismatchIndex ?? null;
+}
+
+async function getLatestPepperCount(ns, target, expectedAttempt) {
+    const parsed = await getLatestAuthFeedback(ns, target, expectedAttempt, parsePepperFeedback, "RateMyPix.Auth");
+    return parsed?.pepperCount ?? null;
+}
+
+async function solveYesntAndAuthenticate(ns, target, details, verboseTerminal) {
+    const passwordLength = Math.max(1, Number(details.passwordLength) || 0);
+    const charset = getCharsetForPasswordFormat(details.passwordFormat);
+    if (!charset) {
+        ns.print(`INFO: No NIL charset solver for ${target} passwordFormat=${details.passwordFormat}`);
+        return null;
+    }
+
+    const solved = Array(passwordLength).fill(null);
+    for (const char of charset) {
+        if (solved.every(value => value != null)) break;
+        const candidate = char.repeat(passwordLength);
+        const result = await ns.dnet.authenticate(target, candidate, 0);
+        if (result.code === SUCCESS) {
+            terminalLog(ns, verboseTerminal, `SUCCESS: Darknet authenticated ${target} (NIL).`);
+            return candidate;
+        }
+        if (result.code === SERVICE_UNAVAILABLE) return null;
+        if (result.code !== AUTH_FAILURE) {
+            ns.print(`INFO: Auth ${target} failed: ${result.message} (${result.code})`);
+            continue;
+        }
+
+        const feedback = await getLatestYesntFeedback(ns, target, passwordLength, candidate);
+        if (!feedback) continue;
+        for (let i = 0; i < Math.min(passwordLength, feedback.length); i++) {
+            if (feedback[i] === "yes") solved[i] = char;
+        }
+    }
+
+    if (!solved.every(value => value != null)) {
+        ns.print(`INFO: NIL solver did not get enough feedback for ${target}: ${solved.map(value => value ?? "?").join("")}`);
+        return null;
+    }
+
+    const password = solved.join("");
+    const result = await ns.dnet.authenticate(target, password, 0);
+    if (result.code === SUCCESS) {
+        terminalLog(ns, verboseTerminal, `SUCCESS: Darknet authenticated ${target} (NIL).`);
+        return password;
+    }
+    ns.print(`INFO: NIL solver produced ${password} for ${target}, but auth failed: ${result.message} (${result.code})`);
+    return null;
+}
+
+async function getLatestYesntFeedback(ns, target, passwordLength, expectedAttempt) {
+    const parsed = await getLatestAuthFeedback(ns, target, expectedAttempt, parseYesntFeedback, "NIL");
+    if (parsed?.feedback?.length === passwordLength) return parsed.feedback;
+    return null;
+}
+
+async function getLatestAuthFeedback(ns, target, expectedAttempt, parser, label) {
+    let result;
+    try {
+        result = await ns.dnet.heartbleed(target, { peek: true, logsToCapture: 8 });
+    } catch (error) {
+        ns.print(`WARN: Could not heartbleed ${label} feedback from ${target}: ${formatError(error)}`);
+        return null;
+    }
+    if (!result.success) {
+        ns.print(`INFO: Could not heartbleed ${label} feedback from ${target}: ${result.message} (${result.code})`);
+        return null;
+    }
+
+    for (const log of result.logs ?? []) {
+        const parsed = parser(log);
+        if (parsed && (parsed.passwordAttempted == null || parsed.passwordAttempted === expectedAttempt)) return parsed;
+    }
+    return null;
+}
+
+function getCharsetForPasswordFormat(format) {
+    if (format === "numeric") return "0123456789";
+    if (format === "alphabetic") return "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ";
+    if (format === "alphanumeric") return "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ";
+    return null;
+}
+
 async function spreadToNeighbor(ns, script, target, password, interval, verboseTerminal) {
     try {
         const session = ns.dnet.connectToSession(target, password);
         if (!session.success) return;
+        const requiredRam = ns.getScriptRam(script, ns.getHostname());
+        const maxRam = ns.getServerMaxRam(target);
+        const freeRam = maxRam - ns.getServerUsedRam(target);
+        if (requiredRam <= 0 || maxRam < requiredRam || freeRam < requiredRam) {
+            const key = `${target}:${requiredRam}:${maxRam}`;
+            if (!skippedSpreadForRam.has(key)) {
+                skippedSpreadForRam.add(key);
+                ns.print(`INFO: Not spreading ${script} to ${target}; needs ${formatRam(requiredRam)}, ` +
+                    `target has ${formatRam(freeRam)} free / ${formatRam(maxRam)} max.`);
+            }
+            return;
+        }
         await ns.scp(script, target, ns.getHostname());
+        if (ns.fileExists(STASIS_FILE, ns.getHostname())) await ns.scp(STASIS_FILE, target, ns.getHostname());
+        if (ns.fileExists(STORM_FILE, ns.getHostname())) await ns.scp(STORM_FILE, target, ns.getHostname());
         if (ns.fileExists(STATE_FILE, ns.getHostname())) await ns.scp(STATE_FILE, target, ns.getHostname());
+        if (ns.fileExists(TOPOLOGY_FILE, ns.getHostname())) await ns.scp(TOPOLOGY_FILE, target, ns.getHostname());
+        await launchStormHelperIfPossible(ns, target, verboseTerminal);
         const args = ["--origin", ns.getHostname(), "--interval", interval];
         if (verboseTerminal) args.push("--verbose-terminal");
         const pid = ns.exec(script, target, { threads: 1, preventDuplicates: true }, ...args);
@@ -189,10 +475,26 @@ async function spreadToNeighbor(ns, script, target, password, interval, verboseT
     }
 }
 
+async function launchStormHelperIfPossible(ns, target, verboseTerminal) {
+    if (!ns.fileExists(STORM_FILE, target) || isScriptRunning(ns, target, STORM_FILE)) return;
+    if (!ns.fileExists(STORM_SEED_PROGRAM, target)) return;
+    const requiredRam = ns.getScriptRam(STORM_FILE, target);
+    const freeRam = ns.getServerMaxRam(target) - ns.getServerUsedRam(target);
+    if (requiredRam <= 0 || freeRam < requiredRam) return;
+    const args = [];
+    if (verboseTerminal) args.push("--verbose-terminal");
+    ns.exec(STORM_FILE, target, { threads: 1, preventDuplicates: true }, ...args);
+}
+
+function isScriptRunning(ns, host, script) {
+    return ns.ps(host).some(process => process.filename === script || process.filename.endsWith(`/${script}`));
+}
+
 function buildCandidates(details) {
     const model = details.modelId;
     const data = String(details.data ?? "");
     const hint = String(details.passwordHint ?? "");
+    const passwordLength = Number(details.passwordLength ?? 0);
     if (model === "ZeroLogon") return [""];
     if (model === "DeskMemo_3.1") return [lastHintToken(hint)];
     if (model === "FreshInstall_1.0") return ["admin", "password", "0000", "12345"];
@@ -207,6 +509,9 @@ function buildCandidates(details) {
     if (model === "OctantVoxel") return [String(Math.round(parseBaseN(data)))];
     if (model === "MathML") return [String(parseArithmeticExpression(data))];
     if (model === "Pr0verFl0") return ["A".repeat(Math.max(1, details.passwordLength * 2))];
+    if (model === "PHP 5.4") return permuteString(data.replace(/\D/g, ""));
+    if (model === "AccountsManager_4.2") return sequentialNumericPasswords(passwordLength);
+    if (model === "Factori-Os") return solveFactoriOs(hint, passwordLength);
     return [];
 }
 
@@ -216,6 +521,22 @@ export function __testBuildCandidates(details) {
 
 export function __testRunSelfTest() {
     return runSelfTest();
+}
+
+export function __testParseYesntFeedback(log) {
+    return parseYesntFeedback(log);
+}
+
+export function __testParsePacketSnifferCandidates(target, details, authResult) {
+    return parsePacketSnifferCandidates(target, details, authResult);
+}
+
+export function __testParseTimingFeedback(log) {
+    return parseTimingFeedback(log);
+}
+
+export function __testParsePepperFeedback(log) {
+    return parsePepperFeedback(log);
 }
 
 function runSelfTest() {
@@ -233,19 +554,265 @@ function runSelfTest() {
         ["OctantVoxel", { modelId: "OctantVoxel", data: "16,2A" }, ["42"]],
         ["MathML", { modelId: "MathML", data: "6 * (7 + 1)" }, ["48"]],
         ["Pr0verFl0", { modelId: "Pr0verFl0", passwordLength: 4 }, ["AAAAAAAA"]],
+        ["PHP 5.4", { modelId: "PHP 5.4", data: "1[]2╬3" }, ["123", "132", "213", "231", "312", "321"]],
+        ["AccountsManager_4.2 len1", { modelId: "AccountsManager_4.2", passwordLength: 1 }, ["0", "1", "2"], actual =>
+            actual.length === 10 && actual.at(-1) === "9" && !actual.includes("10") ? "" :
+                `expected 10 one-digit candidates ending at 9, got ${actual.length} ending at ${actual.at(-1)}`],
+        ["AccountsManager_4.2 len2", { modelId: "AccountsManager_4.2", passwordLength: 2 }, ["00", "01", "02"], actual =>
+            actual.length === 100 && actual.at(-1) === "99" && !actual.includes("100") ? "" :
+                `expected 100 two-digit candidates ending at 99, got ${actual.length} ending at ${actual.at(-1)}`],
+        ["Factori-Os divisible by 1 len2", { modelId: "Factori-Os", passwordHint: "The password is divisible by 1 ;)", passwordLength: 2 }, ["00", "01", "02"], actual =>
+            actual.length === 100 && actual.at(-1) === "99" ? "" :
+                `expected 100 two-digit candidates ending at 99, got ${actual.length} ending at ${actual.at(-1)}`],
+        ["Factori-Os divisible by 7 len2", { modelId: "Factori-Os", passwordHint: "The password is divisible by 7 ;)", passwordLength: 2 }, ["00", "07", "14"], actual =>
+            actual.every(candidate => Number(candidate) % 7 === 0) && actual.includes("98") ? "" :
+                `expected divisible-by-7 candidates including 98, got ${JSON.stringify(actual.slice(0, 20))}`],
+        ["NIL feedback parser", { modelId: "ZeroLogon" }, [""], () => {
+            const parsed = parseYesntFeedback(JSON.stringify({
+                message: { data: "yes,yesn't,yes", message: "that wasn't right" },
+                pid: 1,
+            }));
+            return parsed?.feedback?.join("|") === "yes|yesn't|yes" ? "" : `unexpected feedback ${JSON.stringify(parsed)}`;
+        }],
+        ["NIL top-level feedback parser", { modelId: "ZeroLogon" }, [""], () => {
+            const parsed = parseYesntFeedback(JSON.stringify({
+                message: "that wasn't right",
+                data: "yesn't,yes,yes",
+                passwordAttempted: "878",
+                code: 401,
+            }));
+            return parsed?.feedback?.join("|") === "yesn't|yes|yes" && parsed.passwordAttempted === "878" ?
+                "" : `unexpected feedback ${JSON.stringify(parsed)}`;
+        }],
+        ["NIL text feedback parser", { modelId: "ZeroLogon" }, [""], () => {
+            const parsed = parseYesntFeedback("message: that wasn't right\n" +
+                "data: yesn't,yesn't,yes,yes,yesn't\n" +
+                "passwordAttempted: 99999\n" +
+                "code: 401");
+            return parsed?.feedback?.join("|") === "yesn't|yesn't|yes|yes|yesn't" &&
+                parsed.passwordAttempted === "99999" ? "" : `unexpected feedback ${JSON.stringify(parsed)}`;
+        }],
+        ["OpenWebAccessPoint target packet parser", { modelId: "ZeroLogon" }, [""], () => {
+            const actual = parsePacketSnifferCandidates("crypto::tech",
+                { passwordLength: 5, passwordFormat: "numeric" },
+                { data: "GET / cafe wifi crypto::tech:12345 trailing noise" });
+            return actual[0] === "12345" ? "" : `unexpected packet candidates ${JSON.stringify(actual)}`;
+        }],
+        ["OpenWebAccessPoint passcode parser", { modelId: "ZeroLogon" }, [""], () => {
+            const actual = parsePacketSnifferCandidates("coffee-router",
+                { passwordLength: 5, passwordFormat: "numeric" },
+                { data: "Logging in with passcode: 54321 ..." });
+            return actual[0] === "54321" ? "" : `unexpected packet candidates ${JSON.stringify(actual)}`;
+        }],
+        ["OpenWebAccessPoint JSON log parser", { modelId: "ZeroLogon" }, [""], () => {
+            const log = JSON.stringify({ message: { data: "noise crypto::tech:13579 noise", passwordAttempted: "00000" } });
+            const actual = parsePacketSnifferCandidates("crypto::tech",
+                { passwordLength: 5, passwordFormat: "numeric" },
+                parsePasswordResponseLog(log));
+            return actual[0] === "13579" ? "" : `unexpected packet candidates ${JSON.stringify(actual)}`;
+        }],
+        ["OpenWebAccessPoint JSON noise parser", { modelId: "ZeroLogon" }, [""], () => {
+            const log = JSON.stringify({ message: "Logging in with passcode: 24680 ...", pid: -1 });
+            const actual = parsePacketSnifferCandidates("crypto::tech",
+                { passwordLength: 5, passwordFormat: "numeric" },
+                parsePasswordResponseLog(log));
+            return actual[0] === "24680" ? "" : `unexpected packet candidates ${JSON.stringify(actual)}`;
+        }],
+        ["2G_cellular feedback parser", { modelId: "ZeroLogon" }, [""], () => {
+            const parsed = parseTimingFeedback(JSON.stringify({
+                message: {
+                    message: "Found a mismatch while checking each character (3)",
+                    passwordAttempted: "12300",
+                },
+            }));
+            return parsed?.mismatchIndex === 3 && parsed.passwordAttempted === "12300" ?
+                "" : `unexpected timing feedback ${JSON.stringify(parsed)}`;
+        }],
+        ["RateMyPix.Auth feedback parser", { modelId: "ZeroLogon" }, [""], () => {
+            const parsed = parsePepperFeedback(JSON.stringify({
+                message: { data: "🌶️🌶️/5", passwordAttempted: "12000" },
+            }));
+            return parsed?.pepperCount === 2 && parsed.passwordAttempted === "12000" ?
+                "" : `unexpected pepper feedback ${JSON.stringify(parsed)}`;
+        }],
     ];
     const failures = [];
-    for (const [name, details, expectedPrefix] of tests) {
+    for (const [name, details, expectedPrefix, validate] of tests) {
         const actual = buildCandidates(details);
         for (let i = 0; i < expectedPrefix.length; i++) {
             if (actual[i] !== expectedPrefix[i]) failures.push(`${name}: expected candidate[${i}]=${expectedPrefix[i]}, got ${actual[i]}`);
         }
+        const validationFailure = validate?.(actual);
+        if (validationFailure) failures.push(`${name}: ${validationFailure}`);
     }
     return { total: tests.length, passed: tests.length - failures.length, failures };
 }
 
 function lastHintToken(hint) {
     return hint.trim().split(/\s+/).at(-1) ?? "";
+}
+
+function sequentialNumericPasswords(passwordLength) {
+    if (passwordLength >= 1 && passwordLength <= 4)
+        return Array.from({ length: 10 ** passwordLength }, (_, value) => String(value).padStart(passwordLength, "0"));
+    return [];
+}
+
+function solveFactoriOs(hint, passwordLength) {
+    const divisor = Number(String(hint).match(/divisible by\s+(\d+)/i)?.[1] ?? 1);
+    const candidates = sequentialNumericPasswords(passwordLength);
+    if (!Number.isFinite(divisor) || divisor <= 1) return candidates;
+    return candidates.filter(candidate => Number(candidate) % divisor === 0);
+}
+
+function permuteString(value) {
+    if (value.length <= 1) return [value];
+    const results = new Set();
+    for (let i = 0; i < value.length; i++) {
+        const char = value[i];
+        const remaining = value.slice(0, i) + value.slice(i + 1);
+        for (const permutation of permuteString(remaining)) results.add(char + permutation);
+    }
+    return [...results];
+}
+
+function parseYesntFeedback(log) {
+    const parsed = parsePasswordResponseLog(log);
+    const data = parsed?.data ?? parsed?.message?.data;
+    if (typeof data !== "string") return null;
+    const feedback = data.split(",");
+    if (!feedback.every(value => value === "yes" || value === "yesn't")) return null;
+    return {
+        feedback,
+        passwordAttempted: parsed?.passwordAttempted ?? parsed?.message?.passwordAttempted,
+    };
+}
+
+function parseTimingFeedback(log) {
+    const parsed = parsePasswordResponseLog(log);
+    const message = String(parsed?.message ?? "");
+    const match = message.match(/mismatch while checking each character \((-?\d+)\)/i);
+    if (!match) return null;
+    return {
+        mismatchIndex: Number(match[1]),
+        passwordAttempted: parsed?.passwordAttempted,
+    };
+}
+
+function parsePepperFeedback(log) {
+    const parsed = parsePasswordResponseLog(log);
+    const data = String(parsed?.data ?? "");
+    const match = data.match(/^(0|(?:🌶️)+)\/(\d+)$/u);
+    if (!match) return null;
+    return {
+        pepperCount: match[1] === "0" ? 0 : [...match[1].matchAll(/🌶️/gu)].length,
+        passwordAttempted: parsed?.passwordAttempted,
+    };
+}
+
+function parsePacketSnifferCandidates(target, details, authResult) {
+    const passwordLength = Math.max(0, Number(details.passwordLength) || 0);
+    const pattern = getPasswordPattern(details.passwordFormat, passwordLength);
+    if (!pattern) return [];
+
+    const candidates = [];
+    const targetPattern = escapeRegExp(target);
+    const targetPasswordRegex = new RegExp(`${targetPattern}\\s*:\\s*(${pattern})`, "g");
+    const passcodeRegex = new RegExp(`passcode\\s*[:=]\\s*(${pattern})`, "gi");
+    const tokenRegex = new RegExp(`(?:^|[^0-9A-Za-z])(${pattern})(?=$|[^0-9A-Za-z])`, "g");
+    for (const text of collectPacketSnifferTexts(details, authResult)) {
+        collectRegexMatches(candidates, text, targetPasswordRegex);
+        collectRegexMatches(candidates, text, passcodeRegex);
+
+        const fallbackText = text
+            .split(/\r?\n/)
+            .filter(line => !/passwordAttempted/i.test(line))
+            .join("\n");
+        collectRegexMatches(candidates, fallbackText, tokenRegex);
+    }
+    return unique(candidates).filter(candidate => isPasswordFormatMatch(candidate, details.passwordFormat, passwordLength)).slice(0, 64);
+}
+
+function collectPacketSnifferTexts(details, authResult) {
+    const texts = [];
+    collectStringValues(details?.data, texts);
+    collectStringValues(authResult?.data, texts);
+    collectStringValues(authResult?.message, texts);
+    collectStringValues(authResult?.message?.data, texts);
+    return texts;
+}
+
+function collectStringValues(value, texts) {
+    if (typeof value === "string") {
+        if (value) texts.push(value);
+        return;
+    }
+    if (value == null || typeof value !== "object") return;
+    for (const child of Object.values(value)) collectStringValues(child, texts);
+}
+
+function collectRegexMatches(results, text, regex) {
+    regex.lastIndex = 0;
+    for (const match of String(text).matchAll(regex)) {
+        if (match[1]) results.push(match[1]);
+    }
+}
+
+function getPasswordPattern(format, passwordLength) {
+    const length = passwordLength > 0 ? `{${passwordLength}}` : "+";
+    if (format === "numeric") return `\\d${length}`;
+    if (format === "alphabetic") return `[A-Za-z]${length}`;
+    if (format === "alphanumeric") return `[0-9A-Za-z]${length}`;
+    return `\\S${length}`;
+}
+
+function isPasswordFormatMatch(candidate, format, passwordLength) {
+    if (passwordLength > 0 && candidate.length !== passwordLength) return false;
+    if (format === "numeric") return /^\d+$/.test(candidate);
+    if (format === "alphabetic") return /^[A-Za-z]+$/.test(candidate);
+    if (format === "alphanumeric") return /^[0-9A-Za-z]+$/.test(candidate);
+    return candidate.length > 0;
+}
+
+function escapeRegExp(value) {
+    return String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function parsePasswordResponseLog(log) {
+    let parsed;
+    try {
+        parsed = typeof log === "string" ? JSON.parse(log) : log;
+    } catch {
+        parsed = parseKeyValueLog(log);
+    }
+    if (parsed?.message && typeof parsed.message === "object") return parsed.message;
+    if (parsed?.data != null || parsed?.passwordAttempted != null) return parsed;
+    if (typeof parsed?.message === "string") return parsed;
+    return parseKeyValueLog(log);
+}
+
+function parseKeyValueLog(log) {
+    const result = {};
+    for (const line of String(log).split(/\r?\n/)) {
+        const match = line.match(/^\s*([A-Za-z]+):\s*(.*)\s*$/);
+        if (match) result[match[1]] = match[2];
+    }
+    return result;
+}
+
+function tryLinkStasisNearLabyrinth(ns, target, details) {
+    if (details.modelId !== "(The Labyrinth)") return;
+    const host = ns.getHostname();
+    if (!ns.fileExists(STASIS_FILE, host)) return;
+    try {
+        const freeRam = ns.getServerMaxRam(host) - ns.getServerUsedRam(host);
+        const neededRam = ns.getScriptRam(STASIS_FILE, host);
+        if (neededRam <= 0 || freeRam < neededRam) return;
+        const pid = ns.exec(STASIS_FILE, host, { threads: 1, preventDuplicates: true }, true);
+        if (pid > 0) ns.print(`INFO: Started stasis link helper near ${target} (pid ${pid}).`);
+    } catch (error) {
+        ns.print(`WARN: Cannot start stasis link helper near ${target}: ${formatError(error)}`);
+    }
 }
 
 function solveRoman(data) {
@@ -399,8 +966,68 @@ function readKnownPasswords(ns) {
 function writeKnownPasswords(ns, passwords) {
     try {
         ns.write(STATE_FILE, JSON.stringify(passwords), "w");
+        return true;
     } catch {
         // State persistence is best-effort. The crawler can still rediscover passwords.
+        return false;
+    }
+}
+
+async function syncKnownPasswords(ns, origin) {
+    await syncDarknetCacheFile(ns, STATE_FILE, origin);
+}
+
+async function syncDarknetCacheFile(ns, file, origin) {
+    const host = ns.getHostname();
+    for (const destination of unique(["home", origin]).filter(server => server && server !== host)) {
+        try {
+            await ns.scp(file, destination, host);
+        } catch {
+            // Best-effort visibility cache for scan.js; exploration should not depend on it.
+        }
+    }
+}
+
+function readDarknetTopology(ns) {
+    try {
+        const text = ns.read(TOPOLOGY_FILE);
+        if (!text) return { parents: {}, children: {} };
+        const parsed = JSON.parse(text);
+        return {
+            parents: parsed?.parents && typeof parsed.parents === "object" ? parsed.parents : {},
+            children: parsed?.children && typeof parsed.children === "object" ? parsed.children : {},
+        };
+    } catch {
+        return { parents: {}, children: {} };
+    }
+}
+
+function recordDarknetTopology(ns, host, neighbors) {
+    const topology = readDarknetTopology(ns);
+    const children = new Set(topology.children[host] ?? []);
+    let changed = false;
+    for (const neighbor of neighbors) {
+        if (!neighbor || neighbor === host) continue;
+        if (!children.has(neighbor)) {
+            children.add(neighbor);
+            changed = true;
+        }
+        if (topology.parents[neighbor] == null) {
+            topology.parents[neighbor] = host;
+            changed = true;
+        }
+    }
+    const nextChildren = [...children].sort();
+    if (JSON.stringify(topology.children[host] ?? []) !== JSON.stringify(nextChildren)) {
+        topology.children[host] = nextChildren;
+        changed = true;
+    }
+    if (!changed) return false;
+    try {
+        ns.write(TOPOLOGY_FILE, JSON.stringify(topology), "w");
+        return true;
+    } catch {
+        return false;
     }
 }
 
@@ -416,4 +1043,10 @@ function terminalLog(ns, verboseTerminal, message) {
 function formatError(error) {
     if (typeof error === "string") return error;
     return error?.message ?? JSON.stringify(error);
+}
+
+function formatRam(gb) {
+    if (!Number.isFinite(gb)) return `${gb}`;
+    if (gb >= 1024) return `${(gb / 1024).toFixed(2)}TB`;
+    return `${gb.toFixed(2)}GB`;
 }

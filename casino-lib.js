@@ -5,6 +5,12 @@ export async function checkForKickedOut(tryfindElement, click, ns = null, retrie
             "//*[contains(normalize-space(.), 'Alright cheater get out of here') and contains(normalize-space(.), 'not allowed here anymore')]",
             retries);
         if (kickedOut !== null) return true;
+        closeModal = await tryfindElement("//button[normalize-space(.)='Decide later']", retries);
+        if (closeModal) {
+            if (ns) ns.print("Found a faction invitation modal that needs to be closed.");
+            await click(closeModal);
+            continue;
+        }
         closeModal = await tryfindElement("//button[contains(@class,'closeButton')]", retries);
         if (!closeModal) break;
         if (ns) ns.print("Found a modal that needs to be closed.");

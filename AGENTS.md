@@ -120,6 +120,17 @@ Project-specific guidance for coding agents working in `bitburner-scripts`.
 - `daemon.js` must not pass `--reserve 0` to `stockmaster.js` in autopilot mode. Omit the flag so stockmaster reads `reserve.txt` dynamically and respects concrete short-term reserves written by managers.
 - `daemon.js` should not launch `spend-hacknet-hashes.js` or emergency hash-spend temp helpers unless Hacknet hash spending is actually available: SF9 active, hacknet not disabled by bitnode multipliers, at least one node/server exists, and hash capacity is above zero.
 - `spend-hacknet-hashes.js` should exit after one clear status if no hacknet nodes/servers exist, rather than waiting in RAM and repeatedly warning that Hacknet is empty.
+- Darknet automation must check target max/free RAM before copying and executing `darknet-worker.js` on discovered darknet hosts. If the target cannot run the worker, keep the authenticated password cached but skip `scp`/`exec` and log the RAM skip at most once per worker process.
+- Darknet `NIL` / `Yesn_t` servers should be solved with authenticate + heartbleed feedback (`yes` / `yesn't` per character position), not with a fixed low candidate cap. Numeric NIL passwords may require position-wise solving beyond `--max-attempts-per-host`.
+- Darknet `Factori-Os` numeric servers should parse the divisibility hint and generate fixed-width numeric candidates for the reported password length.
+- Darknet `OpenWebAccessPoint` servers should use the `dnet.authenticate()` failure packet dump to recover candidates (`target:password`, `passcode: ...`, or a length/format-matching token) before trying brute force. This model is packet-sniffer based, not a hint-only numeric puzzle.
+- `ns.dnet.authenticate()` returns only generic success/failure for normal darknet servers. Model-specific failure details are written to darknet logs; solvers for `OpenWebAccessPoint`, `NIL`, `2G_cellular`, `RateMyPix.Auth`, and similar feedback models should read them via `ns.dnet.heartbleed(..., { peek: true })`.
+- Keep `darknet-worker.js` as the low-RAM core crawler. Expensive optional dnet APIs such as `dnet.induceServerMigration()` and `dnet.promoteStock()` belong in separate helper scripts so their static RAM costs do not prevent the crawler from starting on `darkweb`.
+- Darknet `stormSeed` / “mysterious executable” handling should use a separate `darknet-storm.js` helper that calls `dnet.unleashStormSeed()` on darknet hosts; do not fold this into the low-RAM core crawler.
+- Only launch `darknet-storm.js` on hosts that actually have `STORM_SEED.exe`. `dnet.unleashStormSeed()` logs its own NotFound message before returning, so callers must preflight with `ns.fileExists("STORM_SEED.exe", host)` to avoid terminal spam.
+- Darknet migration and stock promotion helpers must stay throttled. Migration should target at most one online non-stationary neighboring darknet server per interval, and stock promotion should use an explicit `--promote-stock` list or the stock symbol cache rather than hard-coding symbols.
+- Darknet password and topology cache writes from `darknet-worker.js` should be synced back to `home`, because crawler state may be written on `darkweb` or deeper darknet hosts while launchers and diagnostics usually read local text files from `home`.
+- Do not spread or enumerate full `ns.getServer()` return objects in display scripts. Bitburner 3.0 exposes deprecated properties such as `isStationary` on that object, and object iteration can trigger warnings even when the property is not explicitly referenced.
 
 ## Work / Install Behavior
 
@@ -297,6 +308,10 @@ Project-specific guidance for coding agents working in `bitburner-scripts`.
 ## Known Fresh-Save Runtime Outcomes
 
 - `casino.js` may fail only because the player lacks the minimum money needed to travel to the casino.
+- Casino automation must not intentionally earn more than $10b from `sinceInstall.casino`. `autopilot.js` should treat the casino bootstrap as complete at that cap, and game scripts such as `casino-roulette.js` / `casino-blackjack.js` should cap per-round bets so a likely win does not cross it.
+- `autopilot.js` early low-RAM casino handoff must respect the same practical skip gates as the normal casino path. Do not launch casino when `sinceInstall.casino` already reached the bounded cap or current cash/net worth is already at least the casino cap, because the bounded casino run is no longer useful.
+- Casino kickout detection must close blocking faction invitation modals such as `Decide later` before treating a missing round result as a real timeout; the game's "Alright cheater get out of here" modal can be hidden behind other UI.
+- Casino completion state must survive `ns.spawn(autopilot.js)` handoffs. Casino scripts should write a current-augmentation completion marker, and `autopilot.js` should read it before launching casino again.
 - `ascend.js` is safe to run without `--reset` / `--install-augmentations`; by default it should not perform a reset.
 - `crime.js`, `stanek.js`, and `stanek.js.create.js` may encounter temp-helper RAM limits on low-RAM saves.
 

@@ -2,7 +2,16 @@
 export async function main(ns) {
     const options = ns.flags([
         ["worker", "darknet-worker.js"],
+        ["migration-worker", "darknet-migration.js"],
+        ["stock-worker", "darknet-stock.js"],
+        ["storm-worker", "darknet-storm.js"],
+        ["stasis", "stasis.js"],
         ["interval", 30000],
+        ["migration-interval", 60000],
+        ["stock-promotion-interval", 60000],
+        ["promote-stock", ""],
+        ["disable-migration", false],
+        ["disable-stock-promotion", false],
         ["no-tail-windows", false],
         ["verbose-terminal", false],
         ["help", false],
@@ -11,7 +20,9 @@ export async function main(ns) {
     if (options.help) {
         ns.tprint([
             "Automates initial Bitburner 3.0 darknet exploration.",
-            `Usage: run ${ns.getScriptName()} [--worker darknet-worker.js] [--interval 30000] [--verbose-terminal]`,
+            `Usage: run ${ns.getScriptName()} [--worker darknet-worker.js] [--stasis stasis.js] [--interval 30000]`,
+            `       [--disable-migration] [--disable-stock-promotion] [--promote-stock SYM[,SYM...]] [--verbose-terminal]`,
+            `       [--storm-worker darknet-storm.js]`,
             "Requires DarkscapeNavigator.exe / ns.dnet access.",
         ].join("\n"));
         return;
@@ -28,8 +39,15 @@ export async function main(ns) {
     }
 
     const worker = String(options.worker);
+    const migrationWorker = String(options["migration-worker"]);
+    const stockWorker = String(options["stock-worker"]);
+    const stormWorker = String(options["storm-worker"]);
+    const stasis = String(options.stasis);
     const interval = Math.max(1000, Number(options.interval) || 30000);
     const darkweb = "darkweb";
+    let loggedWorkerAlreadyRunning = false;
+    let loggedWorkerLaunchFailed = false;
+    const loggedHelperStatus = {};
 
     while (true) {
         try {
@@ -46,11 +64,35 @@ export async function main(ns) {
             }
 
             await ns.scp(worker, darkweb, "home");
-            const workerArgs = ["--origin", "home"];
+            if (!options["disable-migration"] && ns.fileExists(migrationWorker, "home")) await ns.scp(migrationWorker, darkweb, "home");
+            if (!options["disable-stock-promotion"] && ns.fileExists(stockWorker, "home")) await ns.scp(stockWorker, darkweb, "home");
+            if (stormWorker && ns.fileExists(stormWorker, "home")) await ns.scp(stormWorker, darkweb, "home");
+            if (stasis && ns.fileExists(stasis, "home")) await ns.scp(stasis, darkweb, "home");
+            if (ns.fileExists("/Temp/stock-symbols.txt", "home")) await ns.scp("/Temp/stock-symbols.txt", darkweb, "home");
+            if (isRunning(ns, darkweb, worker)) {
+                if (!loggedWorkerAlreadyRunning)
+                    terminalLog(ns, options, `INFO: ${worker} is already running on ${darkweb}.`);
+                loggedWorkerAlreadyRunning = true;
+                loggedWorkerLaunchFailed = false;
+                await launchOptionalHelpers(ns, options, darkweb, migrationWorker, stockWorker, stormWorker, loggedHelperStatus);
+                await ns.sleep(interval);
+                continue;
+            }
+            const workerArgs = [
+                "--origin", "home",
+            ];
             if (options["verbose-terminal"]) workerArgs.push("--verbose-terminal");
             const pid = ns.exec(worker, darkweb, { threads: 1, preventDuplicates: true }, ...workerArgs);
-            if (pid > 0) terminalLog(ns, options, `INFO: Started ${worker} on ${darkweb} (pid ${pid}).`);
-            else ns.print(`INFO: ${worker} is already running on ${darkweb}, or there is not enough RAM.`);
+            if (pid > 0) {
+                loggedWorkerAlreadyRunning = true;
+                loggedWorkerLaunchFailed = false;
+                terminalLog(ns, options, `INFO: Started ${worker} on ${darkweb} (pid ${pid}).`);
+                await launchOptionalHelpers(ns, options, darkweb, migrationWorker, stockWorker, stormWorker, loggedHelperStatus);
+            } else {
+                if (!loggedWorkerLaunchFailed)
+                    ns.print(`WARN: Failed to start ${worker} on ${darkweb}; not enough RAM or exec was rejected.`);
+                loggedWorkerLaunchFailed = true;
+            }
         } catch (error) {
             ns.print(`WARN: Darknet launcher failed: ${formatError(error)}`);
         }
@@ -63,7 +105,55 @@ function terminalLog(ns, options, message) {
     else ns.print(message);
 }
 
+async function launchOptionalHelpers(ns, options, host, migrationWorker, stockWorker, stormWorker, loggedStatus) {
+    await launchHelperIfPossible(ns, options, host, stormWorker, [
+        ...(options["verbose-terminal"] ? ["--verbose-terminal"] : []),
+    ], loggedStatus);
+    if (!options["disable-migration"])
+        await launchHelperIfPossible(ns, options, host, migrationWorker, [
+            "--origin", "home",
+            "--interval", options["migration-interval"],
+            ...(options["verbose-terminal"] ? ["--verbose-terminal"] : []),
+        ], loggedStatus);
+    if (!options["disable-stock-promotion"])
+        await launchHelperIfPossible(ns, options, host, stockWorker, [
+            "--origin", "home",
+            "--interval", options["stock-promotion-interval"],
+            ...(options["promote-stock"] ? ["--promote-stock", String(options["promote-stock"])] : []),
+            ...(options["verbose-terminal"] ? ["--verbose-terminal"] : []),
+        ], loggedStatus);
+}
+
+async function launchHelperIfPossible(ns, options, host, script, args, loggedStatus) {
+    if (!script || !ns.fileExists(script, host) || isRunning(ns, host, script)) return;
+    const requiredRam = ns.getScriptRam(script, host);
+    const freeRam = ns.getServerMaxRam(host) - ns.getServerUsedRam(host);
+    const key = `${host}:${script}`;
+    if (requiredRam <= 0 || freeRam < requiredRam) {
+        if (!loggedStatus[key]) {
+            ns.print(`INFO: Skipping ${script} on ${host}; needs ${formatRam(requiredRam)}, free ${formatRam(freeRam)}.`);
+            loggedStatus[key] = "skipped";
+        }
+        return;
+    }
+    const pid = ns.exec(script, host, { threads: 1, preventDuplicates: true }, ...args);
+    if (pid > 0) {
+        loggedStatus[key] = "started";
+        terminalLog(ns, options, `INFO: Started ${script} on ${host} (pid ${pid}).`);
+    }
+}
+
+function isRunning(ns, host, script) {
+    return ns.ps(host).some(process => process.filename === script || process.filename.endsWith(`/${script}`));
+}
+
 function formatError(error) {
     if (typeof error === "string") return error;
     return error?.message ?? JSON.stringify(error);
+}
+
+function formatRam(gb) {
+    if (!Number.isFinite(gb)) return `${gb}`;
+    if (gb >= 1024) return `${(gb / 1024).toFixed(2)}TB`;
+    return `${gb.toFixed(2)}GB`;
 }

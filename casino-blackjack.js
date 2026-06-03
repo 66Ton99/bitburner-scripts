@@ -4,6 +4,10 @@ import {
 } from './helpers.js'
 import { ensureInAevum, findCasinoSaveButton, navigateToCasino, openCasinoGame, saveCasinoGame } from './casino-lib.js'
 
+const CASINO_EARNINGS_LIMIT = 10e9;
+const BLACKJACK_MAX_PROFIT_PAYOUT = 2;
+const casinoCompleteFile = "/Temp/autopilot-casino-complete.txt";
+
 const argsSchema = [
     ['game', 'blackjack'], // Dispatcher hint used by casino.js. Ignored by blackjack logic.
     ['save-sleep-time', 10], // Time to sleep in milliseconds before and after saving. If you are having trouble with your automatic saves not "taking effect" try increasing this.
@@ -43,13 +47,16 @@ export async function main(ns) {
         else
             ns.disableLog("ALL");
 
+        if (hasReachedCasinoLimit())
+            return await onCompletion(false);
+
         let abort = false;
         /*// TODO:
         // Let the user know what's going on and give them an easy way to kill casino.js
         function showDialog(onCancel) {
             const dlg = doc.createElement('div');
             dlg.style.cssText = 'position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);padding:20px;';
-            dlg.innerHTML = `<p>casino.js is running until it wins \$10b. It will reload the save if it loses too much.<br/>` +
+            dlg.innerHTML = `<p>casino.js is running until it wins up to \$10b. It will reload the save if it loses too much.<br/>` +
                 `It should only take a minute or two, but you can cancel by clicking the button below.</p>` +
                 `<button>Cancel</button>`;
             dlg.querySelector('button').onclick = () => { onCancel(); doc.body.removeChild(dlg); };
@@ -145,7 +152,7 @@ export async function main(ns) {
                         // Step 2.6.1: Test that we aren't already kicked out of the casino before doing drastic things like killing scripts
                         const moneySources = await getNsDataThroughFile(ns, 'ns.getMoneySources()'); // NEW (2022): We can use money sources to see what our casino earnings have been
                         const priorCasinoEarnings = moneySources.sinceInstall.casino;
-                        if (priorCasinoEarnings >= 1e10)
+                        if (priorCasinoEarnings >= CASINO_EARNINGS_LIMIT)
                             log(ns, `INFO: We've previously earned ${formatMoney(priorCasinoEarnings)} from the casino, which should mean we've already been kicked out, ` +
                                 `but we can double-check anyway by attempting to play a game, since you bothered running this script, and I've bothered scripting the check :)`, true)
                         await setText(inputWager, `1`); // Bet just a dollar and quick the game right away, no big deal
@@ -192,7 +199,12 @@ export async function main(ns) {
             while (true) {
                 if (abort) return;
                 // Step 4.1: Bet the maximum amount (we save scum to avoid losing, so no risk of going broke)
-                const bet = Math.min(1E8, ns.getPlayer().money * 0.9 /* Avoid timing issues with other scripts spending money */);
+                if (hasReachedCasinoLimit())
+                    return await onCompletion(true);
+                const maxSafeBet = Math.floor(getCasinoEarningsRemaining() / BLACKJACK_MAX_PROFIT_PAYOUT);
+                if (maxSafeBet <= 0)
+                    return await onCompletion(true);
+                const bet = Math.min(1E8, maxSafeBet, ns.getPlayer().money * 0.9 /* Avoid timing issues with other scripts spending money */);
                 if (bet < 0) return await reload(); // If somehow we have no money, we can't continue
                 await setText(inputWager, `${bet}`); // Set our bet amount
 
@@ -389,10 +401,14 @@ export async function main(ns) {
      *  @param {boolean} kickedOutAfterPlaying (default: true) set to false if we detected having been kicked out before we even started.
      *  Run when we can no longer gamble at the casino (presumably because we've been kicked out) **/
     async function onCompletion(kickedOutAfterPlaying = true) {
-        if (kickedOutAfterPlaying)
+        if (hasReachedCasinoLimit())
+            log(ns, "SUCCESS: Casino earnings limit reached. Stopping blackjack before exceeding $10.000b.", true);
+        else if (kickedOutAfterPlaying)
             log(ns, "SUCCESS: We've been kicked out of the casino.", true);
         else
             log(ns, "INFO: We appear to have been previously kicked out of the casino. Continuing without playing...", true);
+        markCasinoComplete(hasReachedCasinoLimit() ? 'earnings-limit' :
+            kickedOutAfterPlaying ? 'kicked-out' : 'previously-kicked-out');
 
         // For convenience, route to the terminal (but no stress if it doesn't work)
         try {
@@ -408,6 +424,27 @@ export async function main(ns) {
             log(ns, `INFO: casino.js shutting down and launching ${completionScript}...`, false, 'info');
         else
             log(ns, `WARNING: casino.js shutting down, but failed to launch ${completionScript}...`, false, 'warning');
+    }
+
+    function markCasinoComplete(reason) {
+        const resetInfo = ns.getResetInfo();
+        const casinoEarnings = ns.getMoneySources().sinceInstall.casino;
+        ns.write(casinoCompleteFile, JSON.stringify({
+            lastAugReset: resetInfo.lastAugReset,
+            currentNode: resetInfo.currentNode,
+            reason,
+            casinoEarnings,
+            timestamp: Date.now(),
+        }), "w");
+    }
+
+    function hasReachedCasinoLimit() {
+        return getCasinoEarningsRemaining() <= 0;
+    }
+
+    function getCasinoEarningsRemaining() {
+        const casinoEarnings = ns.getMoneySources().sinceInstall.casino;
+        return Math.max(0, CASINO_EARNINGS_LIMIT - casinoEarnings);
     }
 
     // Some DOM helpers (partial credit to @ShamesBond)
