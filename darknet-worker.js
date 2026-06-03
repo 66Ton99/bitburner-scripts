@@ -35,6 +35,8 @@ const LARGE_PRIMES = [
     7867, 8053, 8081, 8221, 8329, 8599, 8677, 8761, 8839, 8963, 9103, 9199, 9343, 9467, 9551, 9601,
     9739, 9749, 9859,
 ];
+const SMALL_PRIMES = primesUpTo(100);
+const FACTORI_OS_PRIMES = [...SMALL_PRIMES, ...LARGE_PRIMES];
 
 /** @param {NS} ns */
 export async function main(ns) {
@@ -173,6 +175,8 @@ async function solveAndAuthenticate(ns, target, details, maxAttempts, verboseTer
         return await solvePacketSnifferAndAuthenticate(ns, target, details, verboseTerminal);
     if (details.modelId === "2G_cellular") return await solveTimingAndAuthenticate(ns, target, details, verboseTerminal);
     if (details.modelId === "RateMyPix.Auth") return await solvePepperAndAuthenticate(ns, target, details, verboseTerminal);
+    if (details.modelId === "Factori-Os") return await solveFactoriOsAndAuthenticate(ns, target, details, verboseTerminal);
+    if (details.modelId === "DeepGreen") return await solveLogLeakAndAuthenticate(ns, target, details, verboseTerminal);
 
     const candidates = buildCandidates(details).slice(0, maxAttempts);
     if (candidates.length === 0) {
@@ -191,6 +195,95 @@ async function solveAndAuthenticate(ns, target, details, maxAttempts, verboseTer
     }
     ns.print(`INFO: Solver failed for ${target} model=${details.modelId} after ${candidates.length} attempts.`);
     return null;
+}
+
+async function solveLogLeakAndAuthenticate(ns, target, details, verboseTerminal) {
+    const candidates = await getLogLeakCandidates(ns, target, details);
+    for (const candidate of candidates) {
+        const result = await ns.dnet.authenticate(target, candidate, 0);
+        if (result.code === SUCCESS) {
+            terminalLog(ns, verboseTerminal, `SUCCESS: Darknet authenticated ${target} (${details.modelId}, log leak).`);
+            return candidate;
+        }
+        if (result.code === SERVICE_UNAVAILABLE) return null;
+        if (result.code !== AUTH_FAILURE) ns.print(`INFO: Auth ${target} failed: ${result.message} (${result.code})`);
+    }
+    ns.print(`INFO: No usable leaked password found for ${target} model=${details.modelId}; full solver not implemented yet.`);
+    return null;
+}
+
+async function getLogLeakCandidates(ns, target, details) {
+    let result;
+    try {
+        result = await ns.dnet.heartbleed(target, { peek: true, logsToCapture: 32 });
+    } catch (error) {
+        ns.print(`WARN: Could not heartbleed log leaks from ${target}: ${formatError(error)}`);
+        return [];
+    }
+    if (!result.success) {
+        ns.print(`INFO: Could not heartbleed log leaks from ${target}: ${result.message} (${result.code})`);
+        return [];
+    }
+    const candidates = [];
+    for (const log of result.logs ?? []) {
+        candidates.push(...parseLeakedPasswordCandidates(target, details, parsePasswordResponseLog(log)));
+    }
+    return unique(candidates);
+}
+
+async function solveFactoriOsAndAuthenticate(ns, target, details, verboseTerminal) {
+    const passwordLength = Math.max(0, Number(details.passwordLength) || 0);
+    const maxValue = getMaxNumericPasswordValue(passwordLength);
+    let factorProduct = 1n;
+
+    for (const prime of FACTORI_OS_PRIMES) {
+        const primeBigInt = BigInt(prime);
+        if (primeBigInt > maxValue) break;
+        let testedPower = primeBigInt;
+        let matchedPower = 1n;
+        while (testedPower <= maxValue && factorProduct * testedPower <= maxValue) {
+            const candidate = testedPower.toString();
+            const result = await testFactoriOsDivisor(ns, target, candidate);
+            if (result.success) {
+                terminalLog(ns, verboseTerminal, `SUCCESS: Darknet authenticated ${target} (Factori-Os).`);
+                return candidate;
+            }
+            if (result.unavailable) return null;
+            if (!result.divisible) break;
+            matchedPower = testedPower;
+            testedPower *= primeBigInt;
+        }
+        factorProduct *= matchedPower;
+    }
+
+    const password = factorProduct.toString();
+    const result = await ns.dnet.authenticate(target, password, 0);
+    if (result.code === SUCCESS) {
+        terminalLog(ns, verboseTerminal, `SUCCESS: Darknet authenticated ${target} (Factori-Os).`);
+        return password;
+    }
+    if (result.code === SERVICE_UNAVAILABLE) return null;
+    ns.print(`INFO: Factori-Os solver produced ${password} for ${target}, but auth failed: ${result.message} (${result.code})`);
+    return null;
+}
+
+async function testFactoriOsDivisor(ns, target, candidate) {
+    const result = await ns.dnet.authenticate(target, candidate, 0);
+    if (result.code === SUCCESS) return { success: true, divisible: true, unavailable: false };
+    if (result.code === SERVICE_UNAVAILABLE) return { success: false, divisible: false, unavailable: true };
+    if (result.code !== AUTH_FAILURE) return { success: false, divisible: false, unavailable: false };
+
+    const feedback = await getLatestAuthFeedback(ns, target, candidate, parseFactoriOsFeedback, "Factori-Os");
+    return {
+        success: false,
+        divisible: feedback?.divisible === true,
+        unavailable: false,
+    };
+}
+
+function getMaxNumericPasswordValue(passwordLength) {
+    if (passwordLength > 0 && passwordLength <= 15) return BigInt(10 ** passwordLength - 1);
+    return BigInt(Number.MAX_SAFE_INTEGER);
 }
 
 async function solvePacketSnifferAndAuthenticate(ns, target, details, verboseTerminal) {
@@ -531,12 +624,20 @@ export function __testParsePacketSnifferCandidates(target, details, authResult) 
     return parsePacketSnifferCandidates(target, details, authResult);
 }
 
+export function __testParseLeakedPasswordCandidates(target, details, log) {
+    return parseLeakedPasswordCandidates(target, details, log);
+}
+
 export function __testParseTimingFeedback(log) {
     return parseTimingFeedback(log);
 }
 
 export function __testParsePepperFeedback(log) {
     return parsePepperFeedback(log);
+}
+
+export function __testParseFactoriOsFeedback(log) {
+    return parseFactoriOsFeedback(log);
 }
 
 function runSelfTest() {
@@ -618,6 +719,18 @@ function runSelfTest() {
                 parsePasswordResponseLog(log));
             return actual[0] === "24680" ? "" : `unexpected packet candidates ${JSON.stringify(actual)}`;
         }],
+        ["DeepGreen target leak parser", { modelId: "ZeroLogon" }, [""], () => {
+            const actual = parseLeakedPasswordCandidates("crypto::tech",
+                { passwordLength: 5, passwordFormat: "numeric" },
+                { message: "Connecting to crypto::tech:12345 ..." });
+            return actual[0] === "12345" ? "" : `unexpected leaked candidates ${JSON.stringify(actual)}`;
+        }],
+        ["DeepGreen storm leak parser", { modelId: "ZeroLogon" }, [""], () => {
+            const actual = parseLeakedPasswordCandidates("crypto::tech",
+                { passwordLength: 5, passwordFormat: "numeric" },
+                { message: "--54321--" });
+            return actual[0] === "54321" ? "" : `unexpected leaked candidates ${JSON.stringify(actual)}`;
+        }],
         ["2G_cellular feedback parser", { modelId: "ZeroLogon" }, [""], () => {
             const parsed = parseTimingFeedback(JSON.stringify({
                 message: {
@@ -635,6 +748,25 @@ function runSelfTest() {
             return parsed?.pepperCount === 2 && parsed.passwordAttempted === "12000" ?
                 "" : `unexpected pepper feedback ${JSON.stringify(parsed)}`;
         }],
+        ["Factori-Os text feedback parser", { modelId: "ZeroLogon" }, [""], () => {
+            const parsed = parseFactoriOsFeedback("message: Password IS divisible by '031'\n" +
+                "data: true\n" +
+                "passwordAttempted: 031\n" +
+                "code: 401");
+            return parsed?.divisible === true && parsed.passwordAttempted === "031" ?
+                "" : `unexpected Factori-Os feedback ${JSON.stringify(parsed)}`;
+        }],
+        ["Factori-Os JSON feedback parser", { modelId: "ZeroLogon" }, [""], () => {
+            const parsed = parseFactoriOsFeedback(JSON.stringify({
+                message: { message: "Password is not divisible by '141'", data: "false", passwordAttempted: "141" },
+            }));
+            return parsed?.divisible === false && parsed.passwordAttempted === "141" ?
+                "" : `unexpected Factori-Os feedback ${JSON.stringify(parsed)}`;
+        }],
+        ["small prime generator", { modelId: "ZeroLogon" }, [""], () => {
+            const expected = "2,3,5,7,11,13,17,19,23,29,31,37,41,43,47,53,59,61,67,71,73,79,83,89,97";
+            return SMALL_PRIMES.join(",") === expected ? "" : `unexpected SMALL_PRIMES ${SMALL_PRIMES.join(",")}`;
+        }],
     ];
     const failures = [];
     for (const [name, details, expectedPrefix, validate] of tests) {
@@ -650,6 +782,18 @@ function runSelfTest() {
 
 function lastHintToken(hint) {
     return hint.trim().split(/\s+/).at(-1) ?? "";
+}
+
+function primesUpTo(limit) {
+    return Array.from({ length: Math.max(0, Math.floor(limit) - 1) }, (_, index) => index + 2).filter(isPrime);
+}
+
+function isPrime(value) {
+    if (value < 2 || !Number.isInteger(value)) return false;
+    for (let divisor = 2; divisor * divisor <= value; divisor++) {
+        if (value % divisor === 0) return false;
+    }
+    return true;
 }
 
 function sequentialNumericPasswords(passwordLength) {
@@ -710,6 +854,16 @@ function parsePepperFeedback(log) {
     };
 }
 
+function parseFactoriOsFeedback(log) {
+    const parsed = parsePasswordResponseLog(log);
+    const data = parsed?.data;
+    if (data !== true && data !== false && data !== "true" && data !== "false") return null;
+    return {
+        divisible: data === true || data === "true",
+        passwordAttempted: parsed?.passwordAttempted,
+    };
+}
+
 function parsePacketSnifferCandidates(target, details, authResult) {
     const passwordLength = Math.max(0, Number(details.passwordLength) || 0);
     const pattern = getPasswordPattern(details.passwordFormat, passwordLength);
@@ -731,6 +885,24 @@ function parsePacketSnifferCandidates(target, details, authResult) {
         collectRegexMatches(candidates, fallbackText, tokenRegex);
     }
     return unique(candidates).filter(candidate => isPasswordFormatMatch(candidate, details.passwordFormat, passwordLength)).slice(0, 64);
+}
+
+function parseLeakedPasswordCandidates(target, details, log) {
+    const passwordLength = Math.max(0, Number(details.passwordLength) || 0);
+    const pattern = getPasswordPattern(details.passwordFormat, passwordLength);
+    if (!pattern) return [];
+
+    const candidates = [];
+    const targetPattern = escapeRegExp(target);
+    const targetPasswordRegex = new RegExp(`${targetPattern}\\s*:\\s*(${pattern})`, "g");
+    const passcodeRegex = new RegExp(`passcode\\s*[:=]\\s*(${pattern})`, "gi");
+    const doubleDashRegex = new RegExp(`--(${pattern})--`, "g");
+    for (const text of collectPacketSnifferTexts(null, log)) {
+        collectRegexMatches(candidates, text, targetPasswordRegex);
+        collectRegexMatches(candidates, text, passcodeRegex);
+        collectRegexMatches(candidates, text, doubleDashRegex);
+    }
+    return unique(candidates).filter(candidate => isPasswordFormatMatch(candidate, details.passwordFormat, passwordLength)).slice(0, 32);
 }
 
 function collectPacketSnifferTexts(details, authResult) {
