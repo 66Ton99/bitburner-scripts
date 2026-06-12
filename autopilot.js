@@ -490,14 +490,8 @@ export async function main(ns) {
         }
 
         const preCasinoResult = parseJsonSafe(ns.read(preCasinoInfiltrationResultFile));
-        const preCasinoResultReason = String(preCasinoResult?.reason ?? '');
-        const retryStalePreCasinoResult = preCasinoResultReason.startsWith('exception:') &&
-            preCasinoResultReason.includes('/Temp/infiltration-');
         const shouldStartPreCasinoInfiltration = ns.read(preCasinoInfiltrationFile) != infiltrationMarker ||
-            !preCasinoResult ||
-            retryStalePreCasinoResult ||
-            !preCasinoResult?.success && ['launching', 'started', 'hospitalized-retrying',
-                'infiltrate.js-start-failed', 'start-failed', 'button-not-found'].includes(preCasinoResult?.reason);
+            isRetryablePreCasinoInfiltrationResult(preCasinoResult);
         if (shouldStartPreCasinoInfiltration) {
             ns.write(preCasinoInfiltrationFile, infiltrationMarker, "w");
             ns.write(preCasinoInfiltrationResultFile, JSON.stringify({ success: false, reason: 'launching' }), "w");
@@ -517,6 +511,17 @@ export async function main(ns) {
             `${killedCount > 0 ? `; stopped ${killedCount} existing background script${killedCount == 1 ? '' : 's'}` : ''}.`,
             true, 'info');
         return true;
+    }
+
+    function isRetryablePreCasinoInfiltrationResult(result) {
+        if (!result) return true;
+        if (result.success) return false;
+        const reason = String(result.reason ?? '');
+        if (reason.startsWith('exception:') && reason.includes('/Temp/infiltration-'))
+            return true;
+        return ['launching', 'started', 'hospitalized-retrying', 'travel-failed',
+            'go-to-location-failed', 'infiltrate.js-start-failed', 'start-failed',
+            'button-not-found', 'timeout', 'reward-click-failed'].includes(reason);
     }
 
     /** Read player info directly. Temp-helper overhead is too high immediately after roulette on 8GB home.
@@ -943,14 +948,8 @@ export async function main(ns) {
                 return;
             }
             const preCasinoResult = parseJsonSafe(ns.read(preCasinoInfiltrationResultFile));
-            const preCasinoResultReason = String(preCasinoResult?.reason ?? '');
-            const retryStalePreCasinoResult = preCasinoResultReason.startsWith('exception:') &&
-                preCasinoResultReason.includes('/Temp/infiltration-');
             const shouldStartPreCasinoInfiltration = ns.read(preCasinoInfiltrationFile) != infiltrationMarker ||
-                !preCasinoResult ||
-                retryStalePreCasinoResult ||
-                !preCasinoResult?.success && ['launching', 'started', 'hospitalized-retrying',
-                    'infiltrate.js-start-failed', 'start-failed', 'button-not-found'].includes(preCasinoResult?.reason);
+                isRetryablePreCasinoInfiltrationResult(preCasinoResult);
             if (shouldStartPreCasinoInfiltration) {
                 ns.write(preCasinoInfiltrationFile, infiltrationMarker, "w");
                 ns.write(preCasinoInfiltrationResultFile, JSON.stringify({ success: false, reason: 'launching' }), "w");
