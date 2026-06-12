@@ -383,7 +383,7 @@ async function startAutoRoulette(ns) {
   );
   const playthrough = new RoulettePlaythrough();
   while (true) {
-    if (await checkRouletteKickedOut() || hasReachedCasinoLimit(ns))
+    if (checkRouletteKickedOutFast(ns) || hasReachedCasinoLimit(ns))
       return await onCompletion(ns, true);
     const wagerInput = await findRequiredElement(ns, "//input[@type='number']");
     const guess = playthrough.predictedWinner >= 0 ? playthrough.predictedWinner : 0;
@@ -444,7 +444,6 @@ async function navigateToRoulette(ns) {
 async function waitForRoundResult(ns, guess, checkRouletteKickedOut) {
   let sawPlaying = false;
   const buttonXpath = `//button[normalize-space(text())='${guess}']`;
-  const clickElement = async (button) => await click(ns, button);
   for (let i = 0; i < 80; i++) {
     const guessButton = await tryfindElement(ns, buttonXpath, 1);
     const status = getStatusText();
@@ -453,7 +452,7 @@ async function waitForRoundResult(ns, guess, checkRouletteKickedOut) {
       const result = getCurrentNumber();
       if (result !== null) return result;
     }
-    if (await checkRouletteKickedOut(1) || hasReachedCasinoLimit(ns)) return null;
+    if (checkRouletteKickedOutFast(ns) || hasReachedCasinoLimit(ns)) return null;
     await ns.sleep(50);
   }
   if (await checkRouletteKickedOut(10)) return null;
@@ -465,6 +464,20 @@ async function waitForRoundResult(ns, guess, checkRouletteKickedOut) {
 
 function hasReachedCasinoLimit(ns) {
   return getCasinoEarningsRemaining(ns) <= 0;
+}
+
+function checkRouletteKickedOutFast(ns) {
+  const bodyText = doc.body?.innerText || doc.body?.textContent || "";
+  if (bodyText.includes("Alright cheater get out of here") && bodyText.includes("not allowed here anymore"))
+    return true;
+
+  const modalButton = Array.from(doc.querySelectorAll("button"))
+    .find(button => button.textContent?.trim() == "Decide later" || button.className?.includes("closeButton"));
+  if (modalButton) {
+    modalButton.click();
+    log(ns, `INFO: Dismissed blocking modal during roulette hot loop.`, false, 'info');
+  }
+  return false;
 }
 
 function getCasinoEarningsRemaining(ns) {

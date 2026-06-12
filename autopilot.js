@@ -1039,6 +1039,7 @@ export async function main(ns) {
         const moneyFocus = isMoneyFocusActive(runningScripts);
         const stockCashFraction = (resetInfo.currentNode == 8 || bn10SleevesIncomplete) ? 0.001 : 0.1;
         const stockBuyFraction = (resetInfo.currentNode == 8 || bn10SleevesIncomplete) ? 0.001 : 0.4;
+        const bladeburnerRepBlocked = isBladeburnerRepBlocked(facmanOutput);
         if (pursueNetburnersLateGame || pursueCompanyFactionsLateGame) {
             const enabledFeatures = [];
             if (pursueNetburnersLateGame) enabledFeatures.push("hacknet progression for Netburners");
@@ -1079,7 +1080,10 @@ export async function main(ns) {
                     const xpDuration = Number(options['xp-mode-duration-minutes']);
                     const minutesInAug = getTimeInAug() / 60.0 / 1000.0;
                     const xpPhase = minutesInAug % (xpInterval + xpDuration);
-                    if (xpInterval > 0 && xpDuration > 0 && xpPhase >= xpInterval)
+                    if (bladeburnerRepBlocked) {
+                        if (existingDaemon?.args.includes("--xp-only"))
+                            daemonRelaunchMessage = `Bladeburner faction reputation is the next augmentation blocker, so relaunching daemon.js normally instead of timed hack xp-mode.`;
+                    } else if (xpInterval > 0 && xpDuration > 0 && xpPhase >= xpInterval)
                         useXpOnlyMode = true; // We're in the time window where we should focus hack exp
                     // If daemon.js was previously running in hack exp mode, prepare a message indicating that we 're switching back
                     else if (existingDaemon?.args.includes("--xp-only"))
@@ -1447,6 +1451,12 @@ export async function main(ns) {
     function getFactionManagerOutput(ns) {
         const facmanOutput = ns.read(factionManagerOutputFile)
         return !facmanOutput ? null : JSON.parse(facmanOutput)
+    }
+
+    function isBladeburnerRepBlocked(facmanOutput) {
+        const status = String(facmanOutput?.install_status?.status || "");
+        return status.includes("Bladeburner augmentation blocker") ||
+            (status.includes('Next concrete desired aug by rep') && status.includes('from "Bladeburners"'));
     }
 
     function getFactionManagerManageArgs() {

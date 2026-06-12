@@ -705,6 +705,7 @@ export async function main(ns) {
                 shouldRun: () => options['money-focus'] && (options['autopilot-mode'] ? options['casino-complete'] : true) &&
                     whichServerIsRunning(ns, getFilePath('infiltration-runner.js'), false)[0] == null &&
                     reqRam(64),
+                args: () => ["--run-once"],
                 restartOnArgsChange: true,
                 relaunchIfExited: true,
                 cooldownMs: 30 * 1000,

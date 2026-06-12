@@ -4,8 +4,9 @@ import {
 } from './helpers.js'
 
 let options;
-const workForFactionsVersion = "2026-05-17-no-action-exit.1";
+const workForFactionsVersion = "2026-06-05-rep-target-history.1";
 const factionRepHashTargetFile = "/Temp/work-for-factions-rep-target.txt";
+const factionRepTargetHistoryFile = "/Temp/work-for-factions-rep-target-history.txt";
 const factionWorkIdleStatusFile = "/Temp/work-for-factions-idle-status.txt";
 const argsSchema = [
     ['first', []], // Grind rep with these factions first. Also forces a join of this faction if we normally wouldn't (e.g. no desired augs or all augs owned)
@@ -123,6 +124,8 @@ const loopSleepInterval = 5000; // 5 seconds
 const infiltrationHospitalizedRetryDelay = 250;
 const statusUpdateInterval = 60 * 1000; // 1 minute (outside of this, minor updates in e.g. stats aren't logged)
 const checkForNewPrioritiesInterval = 10 * 60 * 1000; // 10 minutes. Interrupt whatever we're doing and check whether we could be doing something more useful.
+const shortFactionRepTargetRefreshBypassEta = 15 * 60 * 1000;
+const shortFactionRepTargetRefreshBypassRuns = 12;
 const waitForFactionInviteTime = 30 * 1000; // The game will only issue one new invite every 25 seconds, so if you earned two by travelling to one city, might have to wait a while
 const infiltrationTravelFailedLocationCooldown = 60 * 1000; // Avoid spam-retrying a location we currently cannot travel to.
 const infiltrationActiveLockFile = "/Temp/work-for-factions-infiltration-active.txt";
@@ -142,6 +145,7 @@ let shouldFocus; // Whether we should focus on work or let it be backgrounded (b
 // And a bunch of globals because managing state and encapsulation is hard.
 let hasFocusPenalty, hasSimulacrum, hasRedPillPurchased, fulcrumHackReq, playerInBladeburner, wasGrafting, currentBitnode, bn3FirstInstallPending, shouldExitForBladeburner;
 let dictSourceFiles, dictFactionFavors, dictFactionAugs, playerGang, mainLoopStart, scope, numJoinedFactions, lastTravel, crimeCount;
+let currentLastAugReset = 0;
 let firstFactions, skipFactions, completedFactions, softCompletedFactions, mostExpensiveAugByFaction, mostExpensiveDesiredAugByFaction, mostExpensiveDesiredAugCostByFaction;
 let neuroFluxRepReq = 0;
 let scriptPid = "?";
@@ -210,6 +214,30 @@ function writeFactionWorkIdleStatus(ns, resetInfo, reason, detail = "") {
         lastAugReset: resetInfo.lastAugReset,
         currentBitnode,
     }), "w");
+}
+
+function writeFactionRepTargetStatus(ns, status) {
+    const entry = {
+        ...status,
+        updated: Date.now(),
+        lastAugReset: currentLastAugReset,
+        currentBitnode,
+        pid: ns.pid,
+    };
+    ns.write(factionRepHashTargetFile, JSON.stringify(entry), "w");
+
+    let history = [];
+    try {
+        const parsed = JSON.parse(ns.read(factionRepTargetHistoryFile) || "[]");
+        if (Array.isArray(parsed)) history = parsed;
+    } catch { history = []; }
+    history = history
+        .filter(target => target?.lastAugReset == currentLastAugReset)
+        .filter(target => !(target.factionName == entry.factionName &&
+            Number(target.targetRep) == Number(entry.targetRep)));
+    history.push(entry);
+    history.sort((a, b) => Number(b.updated || 0) - Number(a.updated || 0));
+    ns.write(factionRepTargetHistoryFile, JSON.stringify(history.slice(0, 20)), "w");
 }
 
 function exitAfterDeferredInviteOnlyPass(ns) {
@@ -298,6 +326,11 @@ function shouldBypassPrioritizeInvitesForFaction(factionName) {
 
 function shouldTreatGraftingAsBackground(factionName = null) {
     return currentBitnode == 3 && (!factionName || factionName == "Daedalus" || factionName == "Slum Snakes");
+}
+
+function shouldFinishFactionRepTargetBeforePriorityRefresh(etaMs, remainingRuns) {
+    return (Number(etaMs) > 0 && Number(etaMs) <= shortFactionRepTargetRefreshBypassEta) ||
+        (Number(remainingRuns) > 0 && Number(remainingRuns) <= shortFactionRepTargetRefreshBypassRuns);
 }
 
 export function autocomplete(data, args) {
@@ -498,6 +531,7 @@ async function mainLoop(ns) {
     const player = await getPlayerInfo(ns);
     const resetInfo = await getResetInfoRd(ns);
     currentBitnode = resetInfo.currentNode;
+    currentLastAugReset = resetInfo.lastAugReset;
     await stopBn8PaidWorkIfCashIsLow(ns, player);
     if (player.factions.length > numJoinedFactions) { // If we've recently joined a new faction, reset our work scope
         scope = 1; // Back to basics until we've satisfied all highest-priority work
@@ -1761,15 +1795,18 @@ export async function workForSingleFaction(ns, factionName, forceThroughInvitePr
     let lastSelectedInfiltrationTarget = "";
     let stickyInfiltrationTarget = "";
     while ((currentReputation = (await getFactionReputation(ns, factionName))) < factionRepRequired) {
-        ns.write(factionRepHashTargetFile, JSON.stringify({
+        writeFactionRepTargetStatus(ns, {
+            status: "active",
             factionName,
+            currentRep: currentReputation,
+            targetRep: factionRepRequired,
             remainingRep: Math.max(0, factionRepRequired - currentReputation),
-            updated: Date.now(),
-        }), "w");
+            highestRepAug,
+            forceBestAug,
+            forceRep,
+        });
         await tryBuyReputation(ns, true);
-        if (breakToMainLoop()) {
-            return ns.print('INFO: Interrupting infiltration to check on high-level priorities.');
-        }
+        const shouldRefreshPriorities = breakToMainLoop();
         const remainingRep = Math.max(0, factionRepRequired - currentReputation);
         const currentMoney = (await getPlayerInfo(ns)).money;
         const stockValue = await getStocksValue(ns);
@@ -1778,6 +1815,8 @@ export async function workForSingleFaction(ns, factionName, forceThroughInvitePr
         const moneyShortfall = Math.max(0, desiredAugCost - currentWealth);
         const bestLocation = await pickBestInfiltrationLocation(ns, remainingRep, currentMoney, stickyInfiltrationTarget);
         if (!bestLocation) {
+            if (shouldRefreshPriorities)
+                return ns.print('INFO: Interrupting infiltration to check on high-level priorities.');
             printNoFactionInfiltrationTargetStatus(ns, factionName);
             await ns.sleep(loopSleepInterval);
             continue;
@@ -1792,6 +1831,8 @@ export async function workForSingleFaction(ns, factionName, forceThroughInvitePr
                 ns.print(pauseStatus);
             }
             infiltrationConsoleStatus(`paused ${bestLocation.location.name}@${bestLocation.location.city} -> ${factionName}: grafting-active v=${workForFactionsVersion}`);
+            if (shouldRefreshPriorities)
+                return ns.print('INFO: Interrupting infiltration to check on high-level priorities.');
             await ns.sleep(loopSleepInterval);
             continue;
         }
@@ -1812,6 +1853,26 @@ export async function workForSingleFaction(ns, factionName, forceThroughInvitePr
         const travelNeeded = playerBeforeTravel.city != bestLocation.location.city;
         const repPerRun = Math.max(1, bestLocation?.reward?.tradeRep || 0);
         const remainingRuns = Math.max(1, Math.ceil(remainingRep / repPerRun));
+        const etaMs = estimateRepInfiltrationEtaMs(bestLocation, remainingRep, travelNeeded);
+        writeFactionRepTargetStatus(ns, {
+            status: "active",
+            factionName,
+            currentRep: currentReputation,
+            targetRep: factionRepRequired,
+            remainingRep,
+            highestRepAug,
+            forceBestAug,
+            forceRep,
+            etaMs,
+            remainingRuns,
+            repPerRun,
+            infiltrationCity: bestLocation.location.city,
+            infiltrationLocation: bestLocation.location.name,
+            travelNeeded,
+        });
+        if (shouldRefreshPriorities && !shouldFinishFactionRepTargetBeforePriorityRefresh(etaMs, remainingRuns)) {
+            return ns.print('INFO: Interrupting infiltration to check on high-level priorities.');
+        }
         const targetSummary = `${factionName}|${bestLocation.location.city}|${bestLocation.location.name}|${playerBeforeTravel.city}|${travelNeeded}|${remainingRuns}`;
         if (targetSummary != lastSelectedInfiltrationTarget) {
             lastSelectedInfiltrationTarget = targetSummary;
@@ -1877,9 +1938,20 @@ export async function workForSingleFaction(ns, factionName, forceThroughInvitePr
                 startingFavor = dictFactionFavors[factionName] = currentFavor;
         }
     }
-    if (currentReputation >= factionRepRequired)
+    if (currentReputation >= factionRepRequired) {
+        writeFactionRepTargetStatus(ns, {
+            status: "complete",
+            factionName,
+            currentRep: currentReputation,
+            targetRep: factionRepRequired,
+            remainingRep: 0,
+            highestRepAug,
+            forceBestAug,
+            forceRep,
+        });
         ns.print(`Attained ${Math.round(currentReputation).toLocaleString('en')} rep with "${factionName}" ` +
             `(needed ${factionRepRequired.toLocaleString('en')}).`);
+    }
     return currentReputation >= factionRepRequired;
 }
 

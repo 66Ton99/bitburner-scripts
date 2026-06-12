@@ -19,6 +19,8 @@ const default_hidden_stats = ['bladeburner', 'hacknet']; // Hide from the summar
 const output_file = "/Temp/affordable-augs.txt"; // Temp file produced for autopilot.js to relay information about current owned & affordable augs.
 const installStateFile = "/Temp/faction-manager-install-state.txt";
 const factionWorkIdleStatusFile = "/Temp/work-for-factions-idle-status.txt";
+const factionRepTargetFile = "/Temp/work-for-factions-rep-target.txt";
+const factionRepTargetHistoryFile = "/Temp/work-for-factions-rep-target-history.txt";
 const stockmasterLiquidationPauseFile = "/Temp/stockmaster-liquidation-pause.txt";
 const staneksGift = "Stanek's Gift - Genesis";
 const shadowsOfAnarchy = "Shadows of Anarchy";
@@ -46,9 +48,17 @@ const factionsWithoutDonation = ["Bladeburners", "Church of the Machine God", "S
 const nfCountMult = 1.14; // Factors that control how NeuroFlux prices scale
 let augCountMult = 1.9; // The multiplier for the cost increase of augmentations (changes based on SF11 level)
 const maxInstallBatchNeuroFluxRepTopUp = 25000;
+const activeFactionRepTargetMaxAge = 10 * 60 * 1000;
+const longFactionRepGrindEarlyInstallEtaMs = 45 * 60 * 1000;
+const longFactionRepGrindEarlyInstallMinAugs = 4;
+const shortFactionRepTargetNearBudgetGap = 1_000_000_000;
+const shortFactionRepTargetNearBudgetGapFrac = 0.5;
+const impracticalRepBlockedEarlyInstallResetAgeMs = 2 * 60 * 60 * 1000;
+const impracticalRepBlockedEarlyInstallMinAugs = 3;
+const impracticalRepBlockedEarlyInstallMinRepGap = 10_000_000;
 const stockLiquidationPauseMs = 60 * 1000;
 // Various globals because this script does not do modularity well. Assigned values are all ignored, just used to get type hints
-let playerData = (/**@returns{Player}*/() => null)(), bitNode = 0, gangFaction = "";
+let playerData = (/**@returns{Player}*/() => null)(), bitNode = 0, gangFaction = "", bladeburnerRank = null;
 let numAugsAwaitingInstall = 0, nfLevelPurchased = 0, startingPlayerMoney = 0, stockValue = 0; // If the player holds stocks, their liquidation value will be determined
 let factionNames = [""], joinedFactions = [""], desiredAugs = [""], desiredStatsFilters = [""], purchaseFactionRepCosts = [];
 let ownedAugmentations = [""], installedAugmentations = [""], simulatedOwnedAugmentations = [""], allAugStats = [""], priorityAugs = [""];
@@ -272,7 +282,7 @@ export async function main(ns) {
     _ns = ns;
 
     // Ensure all globals are reset before we proceed with the script, in case we've done things out of order
-    augCountMult = playerData = gangFaction = nfLevelPurchased = startingPlayerMoney = stockValue = null;
+    augCountMult = playerData = gangFaction = nfLevelPurchased = startingPlayerMoney = stockValue = bladeburnerRank = null;
     factionNames = [], joinedFactions = [], desiredAugs = [], desiredStatsFilters = [], purchaseFactionRepCosts = [];
     ownedAugmentations = [], installedAugmentations = [], simulatedOwnedAugmentations = [], effectiveSourceFiles = {}, allAugStats = [], priorityAugs = [], purchaseableAugs = [];
     factionData = {}, augmentationData = {}, bitNodeMults = {}, currentResetInfo = null, installBatchTopUpStatus = [];
@@ -472,6 +482,294 @@ function getRecentFactionWorkIdleStatus(ns, resetInfo, maxAgeMs = 10 * 60 * 1000
     return status;
 }
 
+function getRecentFactionRepTarget(ns, resetInfo = currentResetInfo, maxAgeMs = activeFactionRepTargetMaxAge) {
+    let target = null;
+    try { target = JSON.parse(ns.read(factionRepTargetFile) || "null"); }
+    catch { return null; }
+    return isRecentFactionRepTarget(target, resetInfo, maxAgeMs) ? target : null;
+}
+
+function isRecentFactionRepTarget(target, resetInfo = currentResetInfo, maxAgeMs = activeFactionRepTargetMaxAge) {
+    if (!target || !["active", "complete"].includes(target.status)) return null;
+    if (target.lastAugReset != resetInfo?.lastAugReset) return null;
+    if (!Number.isFinite(Number(target.targetRep)) || Number(target.targetRep) <= 0) return null;
+    if (Date.now() - Number(target.updated || 0) > maxAgeMs) return null;
+    return target;
+}
+
+function getRecentFactionRepTargets(ns, resetInfo = currentResetInfo, maxAgeMs = activeFactionRepTargetMaxAge) {
+    const targets = [];
+    const latestTarget = getRecentFactionRepTarget(ns, resetInfo, maxAgeMs);
+    if (latestTarget) targets.push(latestTarget);
+    try {
+        const history = JSON.parse(ns.read(factionRepTargetHistoryFile) || "[]");
+        if (Array.isArray(history))
+            targets.push(...history.filter(target => isRecentFactionRepTarget(target, resetInfo, maxAgeMs)));
+    } catch { /* Ignore malformed transient status. */ }
+
+    const byKey = new Map();
+    for (const target of targets) {
+        const key = `${target.factionName}:${Number(target.targetRep)}`;
+        const existing = byKey.get(key);
+        if (!existing || Number(target.updated || 0) > Number(existing.updated || 0))
+            byKey.set(key, target);
+    }
+    return [...byKey.values()].sort((a, b) => Number(b.updated || 0) - Number(a.updated || 0));
+}
+
+function getRecentActiveFactionRepTarget(ns, resetInfo = currentResetInfo, maxAgeMs = activeFactionRepTargetMaxAge) {
+    const target = getRecentFactionRepTarget(ns, resetInfo, maxAgeMs);
+    return target?.status == "active" ? target : null;
+}
+
+function getCashStocksAugBudget() {
+    return Math.max(0, playerData.money + stockValue - getReservedCash());
+}
+
+function getInstallBatchPlanningStatus(totalCost, summary) {
+    const reservedCash = getReservedCash();
+    const budget = getCashStocksAugBudget();
+    const cashNeededAfterStocks = Math.max(0, totalCost - Math.max(0, stockValue));
+    return `Planning ${formatMoney(totalCost)} cash+stocks augmentation batch to install ${summary.augSummary}. ` +
+        `Cash ${formatMoney(playerData.money)}, stocks ${formatMoney(stockValue)}, ` +
+        `existing reserve ${formatMoney(reservedCash)}, cash+stocks budget ${formatMoney(budget)}, ` +
+        `cash needed after stocks ${formatMoney(cashNeededAfterStocks)}.`;
+}
+
+function getCashStocksBudgetStatus() {
+    return `Cash ${formatMoney(playerData.money)}, stocks ${formatMoney(stockValue)}, ` +
+        `existing reserve ${formatMoney(getReservedCash())}, cash+stocks budget ${formatMoney(getCashStocksAugBudget())}.`;
+}
+
+function getBladeburnerRepBlockerStatus() {
+    const faction = factionData["Bladeburners"];
+    if (!faction?.joined) return null;
+    const blockedAugs = faction.unownedAugmentations()
+        .map(name => augmentationData[name])
+        .filter(aug => aug && aug.name != strNF && isPurchaseTargetAug(aug) && !aug.canAfford())
+        .sort((a, b) => (a.reputation - b.reputation) || (a.price - b.price) || a.name.localeCompare(b.name));
+    const nextAug = blockedAugs[0];
+    if (!nextAug) return null;
+    return `Bladeburner augmentation blocker: "${nextAug.name}" needs ${formatNumberShort(nextAug.reputation)} ` +
+        `Bladeburners faction rep, have ${formatNumberShort(faction.reputation)}` +
+        (bladeburnerRank == null ? '' : ` (current Bladeburner rank ${formatNumberShort(bladeburnerRank)})`) +
+        `. Bladeburners faction rep is earned from Bladeburner rank gains after joining the faction; keep bladeburner.js running.`;
+}
+
+function getNextConcreteAugBlockerStatus(ns) {
+    const plannedNames = new Set(purchaseableAugs.filter(aug => aug.name != strNF).map(aug => aug.name));
+    const ownedOrPlanned = new Set([...simulatedOwnedAugmentations, ...plannedNames]);
+    const [, totalRepCost, totalAugCost] = computeCosts(purchaseableAugs);
+    const budget = getCashStocksAugBudget();
+    const remainingDesired = Object.values(augmentationData)
+        .filter(aug => aug.name != strNF && !aug.owned && !plannedNames.has(aug.name) && isPurchaseTargetAug(aug))
+        .sort((a, b) => (b.reputation - a.reputation) || (b.price - a.price) || a.name.localeCompare(b.name));
+    if (remainingDesired.length == 0)
+        return `No remaining concrete desired augmentation is outside the current ready batch.`;
+
+    const bladeburnerBlocker = getBladeburnerRepBlockerStatus();
+    const candidates = remainingDesired.map(aug => {
+        const joinedFactions = aug.joinedFactionsWithAug();
+        const missingPrereqs = aug.prereqs.filter(prereq => !ownedOrPlanned.has(prereq));
+        const hasRep = aug.canAfford() || aug.canAffordWithDonation();
+        const bestFaction = joinedFactions.slice().sort((a, b) => b.reputation - a.reputation)[0];
+        const repGap = bestFaction ? Math.max(0, aug.reputation - bestFaction.reputation) : Infinity;
+        let finalCost = Infinity;
+        if (joinedFactions.length > 0 && hasRep && missingPrereqs.length == 0) {
+            const sortedWithCandidate = normalizePurchaseOrderPrereqs(ns, [...purchaseableAugs, aug], 'install-wait blocker candidate');
+            const [, candidateRepCost, candidateAugCost] = computeCosts(sortedWithCandidate);
+            finalCost = candidateRepCost + candidateAugCost;
+        }
+        return { aug, joinedFactions, missingPrereqs, hasRep, bestFaction, repGap, finalCost, addedCost: finalCost - totalRepCost - totalAugCost };
+    });
+    const budgetBlocked = candidates
+        .filter(candidate => candidate.joinedFactions.length > 0 && candidate.hasRep && candidate.missingPrereqs.length == 0)
+        .sort((a, b) => a.finalCost - b.finalCost)[0];
+    if (budgetBlocked && budgetBlocked.finalCost <= budget)
+        return `Next concrete desired aug for install-time top-up: "${budgetBlocked.aug.name}" from "${budgetBlocked.aug.getFromJoined()}" ` +
+            `fits the current cash+stocks batch (${formatMoney(budgetBlocked.finalCost)} final cost, current batch ` +
+            `${formatMoney(totalAugCost + totalRepCost)}, budget ${formatMoney(budget)}). It will be added immediately before install, ` +
+            `not bought while waiting for the install threshold.`;
+    if (budgetBlocked)
+        return `Next concrete desired aug by budget: "${budgetBlocked.aug.name}" from "${budgetBlocked.aug.getFromJoined()}" ` +
+            `would take final batch to ${formatMoney(budgetBlocked.finalCost)} ` +
+            `(need +${formatMoney(Math.max(0, budgetBlocked.finalCost - budget))}, current batch ${formatMoney(totalAugCost + totalRepCost)}, ` +
+            `budget ${formatMoney(budget)}).`;
+
+    const repBlocked = candidates
+        .filter(candidate => candidate.joinedFactions.length > 0 && candidate.missingPrereqs.length == 0 && !candidate.hasRep)
+        .sort((a, b) => (a.repGap - b.repGap) || (a.aug.reputation - b.aug.reputation) || (a.aug.price - b.aug.price))[0];
+    if (repBlocked) {
+        return `Next concrete desired aug by rep: "${repBlocked.aug.name}" from "${repBlocked.bestFaction.name}" ` +
+            `needs ${formatNumberShort(repBlocked.aug.reputation)} rep, have ${formatNumberShort(repBlocked.bestFaction.reputation)}.` +
+            (bladeburnerBlocker && repBlocked.aug.getFromJoined() != "Bladeburners" ? ` ${bladeburnerBlocker}` : '');
+    }
+
+    if (bladeburnerBlocker) {
+        return bladeburnerBlocker;
+    }
+
+    const prereqBlocked = candidates
+        .filter(candidate => candidate.missingPrereqs.length > 0)
+        .sort((a, b) => (b.aug.reputation - a.aug.reputation) || (b.aug.price - a.aug.price))[0];
+    if (prereqBlocked)
+        return `Next concrete desired aug by prereq: "${prereqBlocked.aug.name}" waits for ` +
+            `${prereqBlocked.missingPrereqs.map(prereq => `"${prereq}"`).join(", ")}.`;
+
+    const inviteBlocked = candidates
+        .filter(candidate => candidate.joinedFactions.length == 0)[0];
+    if (inviteBlocked)
+        return `Next concrete desired aug by invite: "${inviteBlocked.aug.name}" is not offered by any joined faction yet.`;
+
+    return `No actionable concrete desired augmentation blocker found.`;
+}
+
+function getLongFactionRepGrindEarlyInstallReason(ns, status, summary) {
+    const target = getRecentActiveFactionRepTarget(ns);
+    const etaMs = Number(target?.etaMs) || 0;
+    if (etaMs < longFactionRepGrindEarlyInstallEtaMs) return null;
+    if (summary.pendingAugCount < longFactionRepGrindEarlyInstallMinAugs) return null;
+    if ((status.affordable_count_ex_nf || 0) + Math.max(status.awaiting_install_count_ex_nf || 0,
+        (status.purchased_count_ex_nf || 0) - (status.installed_count_ex_nf || 0)) <= 0)
+        return null;
+    const shortRecentBlocker = getShortRecentFactionRepTargetBlocker(ns);
+    if (shortRecentBlocker && shortRecentBlocker.factionName != target.factionName)
+        return null;
+    return `Active faction reputation grind for ${target.factionName} is long ` +
+        `(${formatDuration(etaMs)}, ${target.remainingRuns || "?"} infiltration run${target.remainingRuns == 1 ? "" : "s"} ` +
+        `at ${target.infiltrationLocation || "unknown target"}). ` +
+        `Installing the current ${summary.pendingAugCount}-augmentation batch now is likely better than waiting for the normal ` +
+        `install threshold to be reached through that grind first.`;
+}
+
+function getImpracticalRepBlockedEarlyInstallReason(ns, resetInfo, summary) {
+    if ((Date.now() - resetInfo.lastAugReset) < impracticalRepBlockedEarlyInstallResetAgeMs) return null;
+    if (summary.pendingAugCount < impracticalRepBlockedEarlyInstallMinAugs) return null;
+
+    const plannedNames = new Set(purchaseableAugs.filter(aug => aug.name != strNF).map(aug => aug.name));
+    const ownedOrPlanned = new Set([...simulatedOwnedAugmentations, ...plannedNames]);
+    const [, totalRepCost, totalAugCost] = computeCosts(purchaseableAugs);
+    const budget = getCashStocksAugBudget();
+    const remainingDesired = Object.values(augmentationData)
+        .filter(aug => aug.name != strNF && !aug.owned && !plannedNames.has(aug.name) && isPurchaseTargetAug(aug));
+
+    const budgetReachable = remainingDesired.some(aug => {
+        if (aug.joinedFactionsWithAug().length == 0) return false;
+        if (!(aug.canAfford() || aug.canAffordWithDonation())) return false;
+        if (aug.prereqs.some(prereq => !ownedOrPlanned.has(prereq))) return false;
+        const sortedWithCandidate = normalizePurchaseOrderPrereqs(ns, [...purchaseableAugs, aug], 'impractical-rep early-install budget candidate');
+        const [, candidateRepCost, candidateAugCost] = computeCosts(sortedWithCandidate);
+        return candidateRepCost + candidateAugCost <= budget;
+    });
+    if (budgetReachable) return null;
+
+    const repBlocked = remainingDesired
+        .map(aug => {
+            const joinedFactions = aug.joinedFactionsWithAug();
+            if (joinedFactions.length == 0) return null;
+            if (aug.prereqs.some(prereq => !ownedOrPlanned.has(prereq))) return null;
+            if (aug.canAfford() || aug.canAffordWithDonation()) return null;
+            const bestFaction = joinedFactions.slice().sort((a, b) => b.reputation - a.reputation)[0];
+            return { aug, bestFaction, repGap: Math.max(0, aug.reputation - bestFaction.reputation) };
+        })
+        .filter(Boolean)
+        .sort((a, b) => b.repGap - a.repGap || b.aug.reputation - a.aug.reputation)[0];
+    if (!repBlocked || repBlocked.repGap < impracticalRepBlockedEarlyInstallMinRepGap) return null;
+
+    return `Next concrete desired augmentation "${repBlocked.aug.name}" is blocked by an impractical reputation gap ` +
+        `(${formatNumberShort(repBlocked.bestFaction.reputation)}/${formatNumberShort(repBlocked.aug.reputation)} rep with ` +
+        `${repBlocked.bestFaction.name}, missing ${formatNumberShort(repBlocked.repGap)}). ` +
+        `After ${formatDuration(Date.now() - resetInfo.lastAugReset)} in this reset, installing the current ` +
+        `${summary.pendingAugCount}-augmentation batch is better than waiting for that rep wall.`;
+}
+
+function isShortFactionRepTarget(target) {
+    return target?.status == "complete" ||
+        (Number(target?.etaMs) > 0 && Number(target.etaMs) < longFactionRepGrindEarlyInstallEtaMs) ||
+        (Number(target?.remainingRuns) > 0 && Number(target.remainingRuns) <= 12);
+}
+
+function getConcreteFactionRepTargetBlockerForTarget(ns, target) {
+    if (!target?.factionName) return null;
+    const faction = factionData[target.factionName];
+    if (!faction?.joined || !Array.isArray(faction.augmentations)) return null;
+    const targetRep = Number(target.targetRep);
+    const plannedNonNf = new Set(purchaseableAugs.filter(aug => aug.name != strNF).map(aug => aug.name));
+    const ownedOrPlanned = new Set([...simulatedOwnedAugmentations, ...plannedNonNf]);
+    const [, totalRepCost, totalAugCost] = computeCosts(purchaseableAugs);
+    const budget = getCashStocksAugBudget();
+    const nearBudgetGap = Math.max(shortFactionRepTargetNearBudgetGap, budget * shortFactionRepTargetNearBudgetGapFrac);
+    const allowNearBudget = isShortFactionRepTarget(target);
+    const missingCandidates = faction.augmentations
+        .map(name => augmentationData[name])
+        .filter(aug => aug && aug.name != strNF && !aug.owned && isPurchaseTargetAug(aug))
+        .filter(aug => aug.prereqs.every(prereq => ownedOrPlanned.has(prereq)))
+        .filter(aug => aug.reputation <= targetRep && !plannedNonNf.has(aug.name))
+        .map(aug => {
+            const sortedWithCandidate = normalizePurchaseOrderPrereqs(ns, [...purchaseableAugs, aug],
+                'faction-progress blocker candidate');
+            const [, candidateRepCost, candidateAugCost] = computeCosts(sortedWithCandidate);
+            return { aug, totalCost: candidateRepCost + candidateAugCost };
+        })
+        .map(candidate => ({ ...candidate, budgetGap: Math.max(0, candidate.totalCost - budget) }))
+        .filter(candidate => candidate.totalCost <= budget || (allowNearBudget && candidate.budgetGap <= nearBudgetGap))
+        .sort((a, b) => (b.aug.reputation - a.aug.reputation) || (b.aug.price - a.aug.price) || a.aug.name.localeCompare(b.aug.name));
+    const missingTargets = missingCandidates.map(candidate => candidate.aug);
+    if (missingTargets.length == 0) return null;
+    const missingBudget = Math.max(0, Math.min(...missingCandidates.map(candidate => candidate.budgetGap)));
+    return { ...target, targetRep, missingTargets, budget, currentBatchCost: totalAugCost + totalRepCost, missingBudget };
+}
+
+function getRecentConcreteFactionRepTargetBlockers(ns, resetInfo = currentResetInfo) {
+    return getRecentFactionRepTargets(ns, resetInfo)
+        .map(target => getConcreteFactionRepTargetBlockerForTarget(ns, target))
+        .filter(Boolean)
+        .sort((a, b) => {
+            if (a.status != b.status) return a.status == "active" ? -1 : 1;
+            const aEta = Number(a.etaMs) || Number.POSITIVE_INFINITY;
+            const bEta = Number(b.etaMs) || Number.POSITIVE_INFINITY;
+            return aEta - bEta ||
+                Number(a.remainingRep || 0) - Number(b.remainingRep || 0) ||
+                Number(b.updated || 0) - Number(a.updated || 0);
+        });
+}
+
+function getShortRecentFactionRepTargetBlocker(ns, resetInfo = currentResetInfo) {
+    const idleStatus = getRecentFactionWorkIdleStatus(ns, resetInfo);
+    return getRecentConcreteFactionRepTargetBlockers(ns, resetInfo)
+        .filter(blocker => !idleStatus || Number(idleStatus.updated || 0) <= Number(blocker.updated || 0))
+        .find(blocker => isShortFactionRepTarget(blocker));
+}
+
+function formatActiveFactionRepTargetBlocker(blocker) {
+    const currentRep = Number(blocker.currentRep || 0);
+    const targetRep = Number(blocker.targetRep || 0);
+    return `Faction work is actively grinding ${blocker.factionName} rep for concrete target augmentation(s) ` +
+        `${formatAugList(blocker.missingTargets, 6)} ` +
+        `(${formatNumberShort(currentRep)}/${formatNumberShort(targetRep)} rep). ` +
+        `Delaying augmentation purchase/install because the short target fits or is near the current cash+stocks budget ` +
+        `(${formatMoney(blocker.currentBatchCost)}/${formatMoney(blocker.budget)} already planned` +
+        (blocker.missingBudget > 0 ? `, ${formatMoney(blocker.missingBudget)} short` : "") + `).`;
+}
+
+function getRecentFactionProgressBlocker(ns, resetInfo = currentResetInfo) {
+    const idleStatus = getRecentFactionWorkIdleStatus(ns, resetInfo);
+    const blockers = getRecentConcreteFactionRepTargetBlockers(ns, resetInfo)
+        .filter(blocker => !idleStatus || Number(idleStatus.updated || 0) <= Number(blocker.updated || 0));
+    const activeConcreteBlocker = blockers
+        .find(blocker => blocker.status == "active");
+    if (activeConcreteBlocker)
+        return formatActiveFactionRepTargetBlocker(activeConcreteBlocker);
+    const recentConcreteBlocker = blockers[0];
+    if (!recentConcreteBlocker) return null;
+    const status = recentConcreteBlocker.status == "complete" ? "recently completed" : "recently updated";
+    return `Faction work ${status} a rep target for ${recentConcreteBlocker.factionName} ` +
+        `(${formatNumberShort(Number(recentConcreteBlocker.currentRep || 0))}/${formatNumberShort(Number(recentConcreteBlocker.targetRep || 0))} rep), ` +
+        `but work-for-factions has not reported an idle/no-action pass yet. ` +
+        `Delaying augmentation purchase/install until the next faction-work scan confirms no higher-rep concrete target remains. ` +
+        `Budget-plausible target(s): ${formatAugList(recentConcreteBlocker.missingTargets, 6)}.`;
+}
+
 function isBn3FirstAugReset(resetInfo = currentResetInfo) {
     return bitNode == 3 && resetInfo && Math.abs(resetInfo.lastAugReset - resetInfo.lastNodeReset) < 1000;
 }
@@ -507,9 +805,14 @@ async function checkIfGrafting(ns) {
     return true;
 }
 
-async function shouldDelayAutomatedInstall(ns, resetInfo, status, augsNeeded, augsNeededInclNf) {
+async function shouldDelayAutomatedInstall(ns, resetInfo, status, augsNeeded, augsNeededInclNf, ignoreFactionProgressBlocker = false) {
     if (await checkIfGrafting(ns))
         return `Grafting in progress. Not installing augmentations.`;
+    if (!ignoreFactionProgressBlocker) {
+        const factionProgressBlocker = getRecentFactionProgressBlocker(ns, resetInfo);
+        if (factionProgressBlocker)
+            return factionProgressBlocker;
+    }
     const bn3DaedalusBlockers = getBn3DaedalusBatchBlockers(purchaseableAugs);
     if (bn3DaedalusBlockers.length > 0)
         return `BN3 Daedalus batch mode: not installing while higher-rep/price Daedalus target(s) remain outside the current purchase batch: ` +
@@ -569,7 +872,7 @@ async function refreshOwnedAfterAutomatedPurchase(ns) {
     purchaseFactionRepCosts = [];
 }
 
-async function purchaseManagedAugs(ns, state, purchaseMode = null) {
+async function purchaseManagedAugs(ns, state, purchaseMode = null, ignoreFactionProgressBlocker = false) {
     if (purchaseMode && purchaseMode != options['purchase-mode']) {
         options['purchase-mode'] = purchaseMode;
         if (purchaseMode == "no-neuroflux") options['neuroflux-disabled'] = true;
@@ -581,7 +884,7 @@ async function purchaseManagedAugs(ns, state, purchaseMode = null) {
         }
     }
     await ns.write("reserve.txt", 0, "w");
-    const purchaseSucceeded = await purchaseDesiredAugs(ns);
+    const purchaseSucceeded = await purchaseDesiredAugs(ns, ignoreFactionProgressBlocker);
     await refreshOwnedAfterAutomatedPurchase(ns);
     state.reservedPurchase = 0;
     state.installCountdown = 0;
@@ -661,6 +964,7 @@ function appendAffordableConcreteAugsForInstallBatch(ns) {
     let lastCheapestCandidateCost = Infinity;
     let lastCheapestCandidateName = null;
     while (added < 200) {
+        purchaseableAugs = normalizePurchaseOrderPrereqs(ns, purchaseableAugs, 'install-batch concrete top-up current order');
         const plannedNames = new Set(purchaseableAugs.map(aug => aug.name));
         const [purchaseCosts, totalRepCost, totalAugCost] = computeCosts(purchaseableAugs);
         const budget = Math.max(0, playerData.money + stockValue - getReservedCash());
@@ -673,15 +977,20 @@ function appendAffordableConcreteAugsForInstallBatch(ns) {
             .filter(aug => aug.canAfford() || aug.canAffordWithDonation())
             .filter(aug => aug.prereqs.every(prereq => ownedOrPlanned.has(prereq)));
         lastCandidates = candidates.length;
-        const candidatesWithCosts = candidates.map(aug => ({
-            aug,
-            cost: aug.price * augCountMult ** purchaseableAugs.length + getReqDonationForAug(aug),
-        }));
+        const candidatesWithCosts = candidates.map(aug => {
+            const sortedWithCandidate = normalizePurchaseOrderPrereqs(ns, [...purchaseableAugs, aug], 'install-batch concrete candidate');
+            const [, candidateRepCost, candidateAugCost] = computeCosts(sortedWithCandidate);
+            return {
+                aug,
+                cost: Math.max(0, candidateRepCost + candidateAugCost - totalRepCost - totalAugCost),
+                totalCost: candidateRepCost + candidateAugCost,
+            };
+        });
         const cheapestCandidate = candidatesWithCosts.sort((a, b) => a.cost - b.cost)[0];
         lastCheapestCandidateCost = cheapestCandidate?.cost ?? Infinity;
         lastCheapestCandidateName = cheapestCandidate?.aug?.name ?? null;
         const nextAug = sortAugs(ns, candidatesWithCosts
-            .filter(candidate => totalAugCost + totalRepCost + candidate.cost <= budget)
+            .filter(candidate => candidate.totalCost <= budget)
             .map(candidate => candidate.aug))[0];
         if (!nextAug) break;
         purchaseableAugs.push(nextAug);
@@ -727,7 +1036,8 @@ function getInstallBatchNeuroFluxRepTopUpBlocker() {
 }
 
 function launchAscendForManagedInstall(ns, status, summary) {
-    const ascendArgs = ['--install-augmentations', true, '--skip-faction-manager-purchase', '--on-reset-script', options['on-reset-script']];
+    const ascendArgs = ['--install-augmentations', true, '--skip-faction-manager-purchase', '--spend-all-before-install',
+        '--on-reset-script', options['on-reset-script']];
     if (summary.pendingAugInclNfCount == 0)
         ascendArgs.push("--allow-soft-reset");
     log(ns, `INFO: faction-manager.js invoking ascend.js to install: ${summary.augSummary}`, true, 'info');
@@ -825,7 +1135,8 @@ async function manageAutomatedAugmentations(ns, resetInfo, ownedSourceFiles, sf1
         };
     }
 
-    let resetStatus = `Reserving ${formatMoney(totalCost)} to install ${summary.augSummary}`;
+    let baseResetStatus = getInstallBatchPlanningStatus(totalCost, summary);
+    let resetStatus = baseResetStatus;
     const bn3DaedalusBlockers = getBn3DaedalusBatchBlockers(purchaseableAugs);
     const installTargetReady = options['install-for-augs'].some(a =>
         !(a == augTRP && bn3DaedalusBlockers.length > 0) &&
@@ -833,6 +1144,13 @@ async function manageAutomatedAugmentations(ns, resetInfo, ownedSourceFiles, sf1
     let shouldReset = installTargetReady ||
         summary.pendingAugCount >= augsNeeded || summary.pendingAugInclNfCount >= augsNeededInclNf;
     let installCountdown = Number(options['install-countdown']) || 0;
+    const earlyInstallReason = getLongFactionRepGrindEarlyInstallReason(ns, status, summary) ||
+        getImpracticalRepBlockedEarlyInstallReason(ns, resetInfo, summary);
+    if (!shouldReset && earlyInstallReason) {
+        shouldReset = true;
+        installCountdown = 0;
+        resetStatus = `${earlyInstallReason}\n${resetStatus}`;
+    }
     if (!shouldReset && factionWorkIdleStatus && summary.pendingAugCount > 0) {
         shouldReset = true;
         installCountdown = 0;
@@ -912,11 +1230,14 @@ async function manageAutomatedAugmentations(ns, resetInfo, ownedSourceFiles, sf1
                 `Waiting for ${augsNeeded} new augs (or ${augsNeededInclNf} including NeuroFlux levels) before installing.` +
                 `\nReady now: ${summary.augSummary}` + summary.detailLines.join("") +
                 ((status.affordable_count_ex_nf + status.affordable_count_nf) == 0 ? '' : `\n  Total Cost to buy remaining affordable augs: ${formatMoney(totalCost)}`) +
+                `\n  ${getCashStocksBudgetStatus()}` +
+                `\n  ${getNextConcreteAugBlockerStatus(ns)}` +
                 ` (\`run faction-manager.js\` for details)`
         };
     }
 
-    const delayReason = await shouldDelayAutomatedInstall(ns, resetInfo, status, augsNeeded, augsNeededInclNf);
+    const delayReason = await shouldDelayAutomatedInstall(ns, resetInfo, status, augsNeeded, augsNeededInclNf,
+        !!earlyInstallReason);
     if (delayReason) {
         state.reservedPurchase = 0;
         writeInstallState(ns, state);
@@ -941,7 +1262,11 @@ async function manageAutomatedAugmentations(ns, resetInfo, ownedSourceFiles, sf1
         summary.detailLines = refreshedSummary.detailLines;
     }
     const finalTotalCost = status.total_rep_cost + status.total_aug_cost;
-    const nfRepTopUpBlocker = getInstallBatchNeuroFluxRepTopUpBlocker();
+    const finalBaseResetStatus = getInstallBatchPlanningStatus(finalTotalCost, summary);
+    if (resetStatus.includes(baseResetStatus))
+        resetStatus = resetStatus.replace(baseResetStatus, finalBaseResetStatus);
+    baseResetStatus = finalBaseResetStatus;
+    const nfRepTopUpBlocker = earlyInstallReason ? null : getInstallBatchNeuroFluxRepTopUpBlocker();
     if (nfRepTopUpBlocker) {
         state.reservedPurchase = finalTotalCost;
         state.installCountdown = 0;
@@ -978,7 +1303,8 @@ async function manageAutomatedAugmentations(ns, resetInfo, ownedSourceFiles, sf1
     await ns.write("reserve.txt", 0, "w");
     if ((status.affordable_count_ex_nf + status.affordable_count_nf) > 0) {
         log(ns, `INFO: Buying the selected augmentation batch immediately before install handoff.`, true, 'info');
-        const purchaseSucceeded = await purchaseManagedAugs(ns, state, bn8FrequentInstall ? "no-neuroflux" : null);
+        const purchaseSucceeded = await purchaseManagedAugs(ns, state, bn8FrequentInstall ? "no-neuroflux" : null,
+            !!earlyInstallReason);
         if (!purchaseSucceeded)
             return { status: `Augmentation purchase batch failed or was only partially purchased. Not installing; faction-manager will retry after the next refresh.` };
     }
@@ -1064,6 +1390,13 @@ async function updateFactionData(ns, factionsToOmit) {
         await getSingularityDict(ns, 'getFactionRep', factionNames);
     const dictFactionFavors = (/**@returns {{[factionName: string]: number}}*/() => null)() ??
         await getSingularityDict(ns, 'getFactionFavor', factionNames);
+    if (joinedFactions.includes("Bladeburners") && (bitNode == 7 || 7 in effectiveSourceFiles)) {
+        try {
+            bladeburnerRank = await getNsDataThroughFile(ns,
+                `ns.bladeburner.inBladeburner() ? ns.bladeburner.getRank() : null`,
+                '/Temp/facman-bladeburner-rank.txt');
+        } catch { bladeburnerRank = null; }
+    }
 
     // Need information about our gang to work around a TRP bug - gang faction appears to have it available, but it's not (outside of BN2)
     if (gangFaction && bitNode != 2)
@@ -1427,6 +1760,11 @@ async function manageUnownedAugmentations(ns, ignoredAugs) {
         log(ns, `INFO: The above ${purchaseableAugs.length} augmentations ${options.purchase ? 'will' : 'can'} be purchased ` +
             `${stockValue > 0 ? 'after liquidating stocks' : 'right now'}.` +
             (options.purchase ? '' : ' Run with the --purchase flag to make the purchase.'), printToTerminal);
+    else {
+        const bladeburnerBlocker = getBladeburnerRepBlockerStatus();
+        if (bladeburnerBlocker)
+            log(ns, `INFO: ${bladeburnerBlocker}`, printToTerminal, 'info');
+    }
 }
 
 /** Helper to compute the total purchase cost for augmentations, including Red Pill donations when available.
@@ -1666,11 +2004,16 @@ async function managePurchaseableAugs(ns, outputRows, accessibleAugs) {
 
 /** @param {NS} ns
  * Purchase the desired augmentations */
-async function purchaseDesiredAugs(ns) {
+async function purchaseDesiredAugs(ns, ignoreFactionProgressBlocker = false) {
     installBatchTopUpStatus = [];
     if (bitNode == 8 && purchaseableAugs.some(aug => aug.name == strNF)) {
         purchaseableAugs = purchaseableAugs.filter(aug => aug.name != strNF);
         log(ns, `INFO: Removed ${strNF} from the purchase order because BN8 must not buy it.`, printToTerminal);
+    }
+    if (!ignoreFactionProgressBlocker) {
+        const factionProgressBlocker = getRecentFactionProgressBlocker(ns);
+        if (factionProgressBlocker)
+            return log(ns, `INFO: ${factionProgressBlocker}`, printToTerminal, 'info');
     }
     appendAffordableConcreteAugsForInstallBatch(ns);
     appendAffordableNeuroFluxForInstallBatch(ns);

@@ -5,6 +5,10 @@ const argsSchema = [
     ['low-money-max-infiltration-difficulty', 2.5],
     ['travel-buffer', 200000],
     ['result-file', '/Temp/money-infiltration-result.txt'],
+    ['interval', 1000],
+    ['retry-interval', 100],
+    ['run-once', false],
+    ['stop-at-money', 0],
 ];
 
 const cityTravelCost = 200000;
@@ -18,10 +22,26 @@ export async function main(ns) {
     ns.disableLog('isRunning');
     ns.write(options['result-file'], JSON.stringify({ success: false, reason: 'started' }), 'w');
 
+    do {
+        const result = await runMoneyInfiltrationOnce(ns, options);
+        if (options['run-once']) return result.success;
+        if (shouldStopFarming(ns, options)) {
+            ns.print(`INFO: Money infiltration reached --stop-at-money ${formatMoney(Number(options['stop-at-money']))}. Exiting.`);
+            return true;
+        }
+        const delay = result.success ? Number(options['interval']) : Number(options['retry-interval']);
+        await ns.sleep(Math.max(0, Number.isFinite(delay) ? delay : 1000));
+    } while (true);
+}
+
+async function runMoneyInfiltrationOnce(ns, options) {
     if (ns.ps('home').some(process => process.filename == getFilePath('infiltration-runner.js') || process.filename == 'infiltration-runner.js'))
         return finish(ns, options, { success: false, reason: 'runner-already-active' });
 
     const player = ns.getPlayer();
+    if (shouldStopFarming(ns, options))
+        return finish(ns, options, { success: true, reason: 'stop-money-reached' });
+
     const target = pickBestCashInfiltration(ns, player, options);
     if (!target)
         return finish(ns, options, { success: false, reason: 'no-feasible-target' });
@@ -53,6 +73,11 @@ export async function main(ns) {
     const result = parseJson(ns.read(resultFile)) || { success: false, reason: 'missing-result' };
     await healIfNeeded(ns, target);
     return finish(ns, options, { ...result, target: summarizeTarget(target) });
+}
+
+function shouldStopFarming(ns, options) {
+    const stopAtMoney = Number(options['stop-at-money']);
+    return Number.isFinite(stopAtMoney) && stopAtMoney > 0 && Number(ns.getPlayer().money || 0) >= stopAtMoney;
 }
 
 function pickBestCashInfiltration(ns, player, options) {
@@ -143,8 +168,13 @@ function summarizeTarget(target) {
 function finish(ns, options, result) {
     ns.write(options['result-file'], JSON.stringify(result), 'w');
     if (result.success) {
-        moneyInfiltrationConsoleStatus(`done ${result.target?.company || 'unknown'}@${result.target?.city || '?'}`);
-        ns.print(`SUCCESS: Money infiltration completed at ${result.target?.company || 'unknown'} for cash.`);
+        if (result.reason == 'stop-money-reached') {
+            moneyInfiltrationConsoleStatus(`stop-money-reached`);
+            ns.print(`INFO: Money infiltration stop money reached.`);
+        } else {
+            moneyInfiltrationConsoleStatus(`done ${result.target?.company || 'unknown'}@${result.target?.city || '?'}`);
+            ns.print(`SUCCESS: Money infiltration completed at ${result.target?.company || 'unknown'} for cash.`);
+        }
     } else if (!['runner-already-active'].includes(result.reason)) {
         const target = result.target;
         moneyInfiltrationConsoleStatus(`failed ${target?.company || 'unknown'}@${target?.city || '?'}: ${result.reason}`, 'error');
