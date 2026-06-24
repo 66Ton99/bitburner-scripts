@@ -168,6 +168,7 @@ export async function main(ns) {
 
         // Low Priority:
         8.3,  // Hard.   Just gives stock "Limit orders" which we don't use in our scripts,
+        15.3, // ???.    The Secrets of the Dark Net
         12.9999 // Easy. Keep playing forever. Only stanek scales very well here, there is much work to be done to be able to climb these faster.
     ];
     const augTRP = "The Red Pill";
