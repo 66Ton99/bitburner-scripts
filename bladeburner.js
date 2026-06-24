@@ -504,6 +504,7 @@ async function beingInBladeburner(ns) {
                     message += ' --disable-spending-hashes is set, but consider running the following command to give it a boost:\n' +
                         'run spend-hacknet-hashes.js --spend-on Exchange_for_Bladeburner_Rank --spend-on Exchange_for_Bladeburner_SP --liquidate';
                 log(ns, message, true, 'success');
+                await dismissBladeburnerCinematic(ns);
                 break;
             } else
                 log(ns, 'WARNING: Failed to joined Bladeburner despite physical stats. Will try again...', false, 'warning');
@@ -516,6 +517,7 @@ async function beingInBladeburner(ns) {
         await ns.sleep(5000);
     }
     log(ns, "INFO: We are in Bladeburner. Starting main loop...")
+    await dismissBladeburnerCinematic(ns, 1000);
     // If not disabled, launch an external script to spend hashes on bladeburner rank
     if (!(9 in ownedSourceFiles)) return true; // Hacknet not unlocked
     if (options['disable-spending-hashes'])
@@ -527,4 +529,31 @@ async function beingInBladeburner(ns) {
     else
         log(ns, `WARNING: Failed to launch '${fPath}' (already running?)`)
     return true;
+}
+
+async function dismissBladeburnerCinematic(ns, timeoutMs = 35000) {
+    const started = Date.now();
+    try {
+        const doc = eval("document");
+        const bodyText = doc.body?.innerText || doc.body?.textContent || "";
+        if (!isBladeburnerCinematicText(bodyText)) return false;
+        while (Date.now() - started < timeoutMs) {
+            const continueButton = Array.from(doc.querySelectorAll("button"))
+                .find(btn => btn.textContent?.trim() == "Continue ...");
+            if (continueButton) {
+                continueButton.click();
+                log(ns, `INFO: Dismissed blocking Bladeburner cinematic.`);
+                return true;
+            }
+            await ns.sleep(250);
+        }
+        log(ns, `WARNING: Bladeburner cinematic is open, but the Continue button did not appear yet.`, false, 'warning');
+    } catch { /* UI is not available in all contexts. */ }
+    return false;
+}
+
+function isBladeburnerCinematicText(text) {
+    return text.includes("Synthoid Uprising") ||
+        (text.includes("OmniTek Incorporated") && text.includes("Synthoids")) ||
+        text.includes("Bladeburners divisions");
 }

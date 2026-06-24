@@ -224,7 +224,7 @@ export async function main(ns) {
         options = runOptions; // We don't set the global "options" until we're sure this is the only running instance
 
         log(ns, `INFO: Auto-pilot engaged... version ${autopilotVersion}`, true, 'info');
-        dismissFactionInvitationModalDirect(ns);
+        await dismissBlockingStartupModalsDirect(ns);
         // The game does not allow boolean flags to be turned "off" via command line, only on. Since this gets saved, notify the user about how they can turn it off.
         const flagsSet = ['disable-auto-destroy-bn', 'disable-bladeburner', 'disable-wait-for-4s', 'disable-rush-gangs', 'disable-corporation', 'disable-darknet', 'disable-grafting'].filter(f => options[f]);
         for (const flag of flagsSet)
@@ -531,20 +531,42 @@ export async function main(ns) {
         return ns.getPlayer();
     }
 
-    /** Dismiss faction invite modals that can remain after the casino handoff.
+    /** Dismiss UI modals/pages that can block automation after reset or casino handoff.
      * @param {NS} ns */
-    function dismissFactionInvitationModalDirect(ns) {
+    async function dismissBlockingStartupModalsDirect(ns) {
         try {
             const doc = eval("document");
-            const button = Array.from(doc.querySelectorAll("button"))
+            const inviteButton = Array.from(doc.querySelectorAll("button"))
                 .find(btn => btn.textContent?.trim() == "Decide later");
-            if (!button) return false;
-            button.click();
-            log(ns, `INFO: Dismissed blocking faction invitation modal.`, false, 'info');
-            return true;
+            if (inviteButton) {
+                inviteButton.click();
+                log(ns, `INFO: Dismissed blocking faction invitation modal.`, false, 'info');
+                return true;
+            }
+
+            const bodyText = doc.body?.innerText || doc.body?.textContent || "";
+            if (!isBladeburnerCinematicText(bodyText)) return false;
+            for (let i = 0; i < 140; i++) {
+                const continueButton = Array.from(doc.querySelectorAll("button"))
+                    .find(btn => btn.textContent?.trim() == "Continue ...");
+                if (continueButton) {
+                    continueButton.click();
+                    log(ns, `INFO: Dismissed blocking Bladeburner cinematic.`, false, 'info');
+                    return true;
+                }
+                await ns.sleep(250);
+            }
+            log(ns, `WARNING: Bladeburner cinematic is open, but the Continue button did not appear yet.`, false, 'warning');
+            return false;
         } catch {
             return false;
         }
+    }
+
+    function isBladeburnerCinematicText(text) {
+        return text.includes("Synthoid Uprising") ||
+            (text.includes("OmniTek Incorporated") && text.includes("Synthoids")) ||
+            text.includes("Bladeburners divisions");
     }
 
     /** Update some information that can be safely cached for small periods of time
