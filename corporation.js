@@ -17,6 +17,7 @@ const _ = globalThis._; // lodash
 
 // Global constants
 const desiredDivisions = 2; // One Material division to kickstart things, then a product division to really make money.
+const minimumProductInvestment = 2e9;
 
 const bonusMaterials = ['Hardware', 'Robots', 'AI Cores', 'Real Estate'];
 const materialSizes = { Water: 0.05, Ore: 0.01, Minerals: 0.04, Food: 0.03, Plants: 0.05, Metal: 0.1, Hardware: 0.06, Chemicals: 0.05, Drugs: 0.02, Robots: 0.5, 'AI Cores': 0.1, 'Real Estate': 0.005 };
@@ -26,8 +27,27 @@ const unlocks = ['Export', 'Smart Supply', 'Market Research - Demand', 'Market D
 const upgrades = ['Smart Factories', 'Smart Storage', 'Wilson Analytics', 'Nuoptimal Nootropic Injector Implants', 'Speech Processor Implants', 'Neural Accelerators', 'FocusWires', 'ABC SalesBots', 'Project Insight'];
 const cities = ['Aevum', 'Chongqing', 'Sector-12', 'New Tokyo', 'Ishima', 'Volhaven'];
 const hqCity = 'Aevum'; // Our production industries will need a headquarters. It doesn't matter which city we use, AFAICT.
-const jobs = ['Operations', 'Engineer', 'Research & Development', 'Management', 'Business']; // Also, 'Training', but that's not a real job.
+const jobs = ['Operations', 'Engineer', 'Research & Development', 'Management', 'Business']; // Interns are deliberately excluded from production assignments.
 const industryAliases = { RealEstate: 'Real Estate', Computer: 'Computer Hardware', Food: 'Restaurant', Utilities: 'Water Utilities' };
+const employeeWellnessThreshold = 0.9995;
+const commonResearchPlan = [
+    'Hi-Tech R&D Laboratory',
+    'AutoBrew',
+    'AutoPartyManager',
+    'Market-TA.I',
+    'Market-TA.II',
+];
+const growthResearchPlan = [
+    'Drones',
+    'Drones - Assembly',
+    'Self-Correcting Assemblers',
+    'Overclock',
+    'Automatic Drug Administration',
+    'CPH4 Injections',
+    'Drones - Transport',
+    'Go-Juice',
+    'Sti.mu',
+];
 
 // Classes here, since we want to use Industry shortly.
 class Industry {
@@ -176,7 +196,7 @@ export function autocomplete(data, _) {
 /** @param {NS} ns **/
 export async function main(ns) {
     // Pull in any information we only need at startup.
-    const version = '2026-05-17-no-corp-exit.1';
+    const version = '2026-06-29-profit-growth.1';
     ns.print(`corporation.js version ${version}`);
     options = ns.flags(argsSchema);
     verbose = options.verbose;
@@ -265,6 +285,18 @@ async function doManageCorporation(ns) {
 
     if (verbose) log(ns, `----- [ ${myCorporation.name} Quarterly Report ${now} ] -----`);
     log(ns, `Corporate cash on hand: ${mf(myCorporation.funds)} (Gross: ${mf(myCorporation.revenue)}/s, Net: ${mf(netIncome)}/s)`);
+
+    // Before the product division exists, spend only enough hashes to automate energy and morale.
+    // Saving every hash for two divisions can otherwise strand an unhealthy first division indefinitely.
+    if (options['can-spend-hashes'] && myCorporation.divisions.length < desiredDivisions)
+        bootstrapEmployeeAutomationWithHashes(ns);
+    myCorporation = ns.corporation.getCorporation();
+
+    // Morale and energy directly multiply employee productivity. Restore them before discretionary spending,
+    // otherwise an unhealthy corporation can stay unprofitable and never qualify for its next funding round.
+    const wellnessBudget = Math.max(0, myCorporation.funds - options['reserve-amount'] - extraReserve);
+    const wellnessSpent = maintainEmployeeWellness(ns, wellnessBudget);
+    if (wellnessSpent > 0) myCorporation = ns.corporation.getCorporation();
 
     // See if we can raise more money.
     await tryRaiseCapital(ns);
@@ -357,11 +389,12 @@ async function doManageCorporation(ns) {
     }
     // Figure out where we are in the fundraising progression. Don't buy a production industry until after accepting round 3.
     let offer = ns.corporation.getInvestmentOffer();
-    if (!options['no-expansion'] && myCorporation.divisions.length > 0 && myCorporation.divisions.length < desiredDivisions && offer.round > 3) {
+    const readyForProductDivision = isReadyForProductDivision(myCorporation, offer);
+    if (!options['no-expansion'] && myCorporation.divisions.length > 0 && myCorporation.divisions.length < desiredDivisions && readyForProductDivision) {
         let newDivisionBudget = budget * 0.9;
         let possibleIndustries = industries.filter((ind) => ind.makesProducts);
-        // Only consider industries where we can still have a budget to actually get started.
-        possibleIndustries = possibleIndustries.filter((ind) => ind.startupCost < newDivisionBudget);
+        // Keep enough money after industry expansion to start its first product immediately.
+        possibleIndustries = possibleIndustries.filter((ind) => ind.startupCost + minimumProductInvestment <= newDivisionBudget);
         possibleIndustries.sort((a, b) => a.startupCost - b.startupCost).reverse();
         if (verbose && possibleIndustries.length) {
             log(ns, `We would like to expand into a new industry. Possibilities:`);
@@ -370,19 +403,21 @@ async function doManageCorporation(ns) {
             }
         } else if (verbose) log(ns, `INFO: We would like to create a new division but we cannot afford one. Willing to spend ${mf(budget)}.`);
 
-        // Try to use the industry from the command line. If that doesn't work, fall back to picking from our list of possibilities.
-        //        let newIndustry = possibleIndustries.find((ind) => ind.name == 'Pharmaceutical');
+        // Honor the configured product industry instead of permanently filling the only product slot
+        // with a cheaper fallback. If the name is invalid, use the best currently affordable fallback.
         let secondIndustry = industryAliases[options['second']] || options['second'];
-        let newIndustry = possibleIndustries.find((ind) => ind.name === secondIndustry);
-        if (!newIndustry && possibleIndustries.length > 0) {
+        const preferredIndustry = industries.find((ind) => ind.makesProducts && ind.name === secondIndustry);
+        let newIndustry = possibleIndustries.find((ind) => ind === preferredIndustry);
+        if (!preferredIndustry && possibleIndustries.length > 0) {
             newIndustry = possibleIndustries[0];
         }
         if (newIndustry) {
             tasks.push(new Task(`Add a production division, '${newIndustry.name}'`, () => doCreateNewDivision(ns, newIndustry, newDivisionBudget), newDivisionBudget, 100));
         } else {
-            const cheapestProductionIndustry = industries.filter((ind) => ind.makesProducts).sort((a, b) => a.startupCost - b.startupCost)[0];
-            log(ns, `INFO: Waiting to afford a production division. Cheapest is '${cheapestProductionIndustry.name}' ` +
-                `at ${mf(cheapestProductionIndustry.startupCost)}; expansion budget is ${mf(newDivisionBudget)}.`);
+            const targetIndustry = preferredIndustry || industries.filter((ind) => ind.makesProducts).sort((a, b) => a.startupCost - b.startupCost)[0];
+            log(ns, `INFO: Waiting to afford the production division '${targetIndustry.name}' ` +
+                `at ${mf(targetIndustry.startupCost + minimumProductInvestment)} including its first product; ` +
+                `expansion budget is ${mf(newDivisionBudget)}.`);
         }
     }
 
@@ -714,42 +749,23 @@ async function doManageDivision(ns, division, budget) {
     let adPrice = ns.corporation.getHireAdVertCost(division.name);
     if (industry.makesProducts && adPrice < budget * 0.9) {
         tasks.push(new Task(`Buy advertising campaign #${adCount + 1} for ${division.name}`, () => ns.corporation.hireAdVert(division.name), adPrice, 60));
-        adCount++;
     }
     // Buy the first advertising campaign for non-product industries
-    if (adCount == 0 && !industry.makesProducts && adPrice < budget * 0.9) {
+    else if (adCount == 0 && adPrice < budget * 0.9) {
         // Buy one advertising campaign in material markets
         tasks.push(new Task(`Buy advertising campaign #${adCount + 1} for ${division.name}`, () => ns.corporation.hireAdVert(division.name), adPrice, 60));
     }
     // Consider buying more advertising. All industires with MarketTA2, or a second one for production industries.
-    if ((industry.makesProducts || hasMarketTA2) && adPrice < budget * 0.5) {
+    else if (hasMarketTA2 && adPrice < budget * 0.5) {
         tasks.push(new Task(`Buy advertising campaign #${adCount + 1} for ${division.name}`, () => ns.corporation.hireAdVert(division.name), adPrice, 20));
     }
 
     // Should we spend any research?
-    let researchToSpend = getDivisionResearch(division);
-    if (industry.makesProducts || hasMarketTA2) {
-        // Willing to spend in inverse proportion to how much stored science helps this product.
-        researchToSpend = getDivisionResearch(division) * (1 - industry.factors.Science);
-    }
-    let researchTypes = ['Hi-Tech R&D Laboratory', 'uPgrade: Fulcrum', 'uPgrade: Capacity.I', 'uPgrade: Capacity.II', 'Market-TA.I', 'Market-TA.II'];
-    for (const researchType of researchTypes) {
-        let hasResearch = false;
-        let cost = Infinity;
-        try {
-            hasResearch = ns.corporation.hasResearched(division.name, researchType);
-            cost = ns.corporation.getResearchCost(division.name, researchType);
-        } catch {}
-        if (!hasResearch && researchToSpend >= cost) {
-            log(ns, `INFO: Buying reasearch project ${researchType} for ${nf(cost)} research points.`, 'info');
-            ns.corporation.research(division.name, researchType);
-            researchToSpend -= cost;
-        } else if (!hasResearch && cost !== Infinity) {
-            if (verbose) log(ns, `Considered spending up to ${nf(researchToSpend)} of ${nf(getDivisionResearch(division))} research on '${researchType}' but it would cost ${nf(cost)}.`);
-            // If we don't have this research, and can't afford to buy it, don't buy the next item on the list
-            break;
-        }
-    }
+    const productResearchPlan = industry.makesProducts
+        ? ['uPgrade: Fulcrum', 'uPgrade: Capacity.I', 'uPgrade: Capacity.II']
+        : [];
+    const researchTypes = [...commonResearchPlan, ...productResearchPlan, ...growthResearchPlan];
+    purchaseResearchPlan(ns, division, researchTypes);
 
     // If this is a production industry, see if we should be researching a new product.
     if (industry.makesProducts) {
@@ -762,8 +778,9 @@ async function doManageDivision(ns, division, budget) {
             // No product being researched. Consider creating a new one.
             if (products.length < maxProducts) {
                 // We're not full, so go ahead.
-                spent += createNewProduct(ns, division);
-                budget -= spent;
+                const productSpend = createNewProduct(ns, division);
+                spent += productSpend;
+                budget -= productSpend;
             } // Discontinue an existing product for a new one if we're not raising capital.
             else {
                 // log(ns, `Considering creating a new product. rC: ${raisingCapital} eR: ${mf(extraReserve)}`);
@@ -776,8 +793,9 @@ async function doManageDivision(ns, division, budget) {
                         myCorporation = ns.corporation.getCorporation();
                     }
                     // Try to create the Product. If it fails, it will set a reserve for us.
-                    spent += createNewProduct(ns, division);
-                    budget -= spent;
+                    const productSpend = createNewProduct(ns, division);
+                    spent += productSpend;
+                    budget -= productSpend;
                 }
             }
         }
@@ -977,7 +995,7 @@ function getMaximumProduction(ns, division, city) {
  * @returns amount of money spent, if any.
  */
 function createNewProduct(ns, division) {
-    let wantToSpend = 2e9; // $2b minimum.
+    let wantToSpend = minimumProductInvestment;
     let spent = 0;
     let spentOnProducts = [];
     try {
@@ -1095,15 +1113,16 @@ async function fillOpenPositions(ns, divisionName, cityName) {
     office = ns.corporation.getOffice(divisionName, cityName);
     if (office.numEmployees > 0) {
         if (verbose) log(ns, `Assigning ${office.numEmployees} employees to work in ${divisionName}/${cityName}`);
-        let employeesPerJob = Math.floor(office.numEmployees / jobs.length);
-        let employeesLeft = office.numEmployees % jobs.length;
-        for (let i = 0; i < jobs.length; i++) {
-            const job = jobs[i];
-            let num = employeesPerJob;
-            if (i < employeesLeft) num++;
-            // if (verbose) log(ns, `Assigning ${num} employees to work as ${job} in ${cityName}`);
-            await ns.corporation.setJobAssignment(divisionName, cityName, job, num);
-        }
+        const division = ns.corporation.getDivision(divisionName);
+        const industry = getIndustry(division);
+        const isProductHeadquarters = industry.makesProducts && cityName === getDivisionProductCity(division);
+        const assignments = getEmployeeAssignments(office.numEmployees, isProductHeadquarters);
+
+        // Release current assignments first. In Bitburner 3.x, increases can only consume Unassigned employees.
+        for (const job of jobs)
+            await ns.corporation.setJobAssignment(divisionName, cityName, job, 0);
+        for (const job of jobs)
+            await ns.corporation.setJobAssignment(divisionName, cityName, job, assignments[job]);
     }
 }
 
@@ -1135,7 +1154,8 @@ async function doPriceDiscovery(ns) {
         // Materials are easy. Just sell them for Market price.
         for (const materialName of industry.prodMats) {
             for (const city of division.cities) {
-                ns.corporation.sellMaterial(division.name, city, materialName, 'PROD', 'MP');
+                // MAX also sells any backlog accumulated during an earlier production or pricing bottleneck.
+                ns.corporation.sellMaterial(division.name, city, materialName, 'MAX', 'MP');
             }
         }
 
@@ -1229,6 +1249,146 @@ function parseProductPriceMultiplier(price, fallback = 1.0) {
     if (!match) return fallback;
     const multiplier = Number.parseFloat(match[1]);
     return Number.isFinite(multiplier) && multiplier > 0 ? multiplier : fallback;
+}
+
+function maintainEmployeeWellness(ns, budget) {
+    if (options.mock || budget <= 0) return 0;
+    let spent = 0;
+    const teaCostPerEmployee = getCorpConstants(ns).teaCostPerEmployee;
+    const offices = [];
+    const divisions = getCorpDivisions(ns).sort((a, b) => Number(getIndustry(b).makesProducts) - Number(getIndustry(a).makesProducts));
+    for (const division of divisions) {
+        const hasAutoBrew = ns.corporation.hasResearched(division.name, 'AutoBrew');
+        const hasAutoParty = ns.corporation.hasResearched(division.name, 'AutoPartyManager');
+        const orderedCities = [...division.cities].sort((a, b) => Number(b === getDivisionProductCity(division)) - Number(a === getDivisionProductCity(division)));
+        for (const city of orderedCities) {
+            const office = ns.corporation.getOffice(division.name, city);
+            if (office.numEmployees > 0) offices.push({ division, city, office, hasAutoBrew, hasAutoParty });
+        }
+    }
+
+    let teaOffices = 0;
+    let partyOffices = 0;
+    for (const { division, city, office, hasAutoBrew } of offices) {
+        if (hasAutoBrew || office.avgEnergy >= office.maxEnergy * employeeWellnessThreshold) continue;
+        const cost = teaCostPerEmployee * office.numEmployees;
+        if (cost > budget - spent) continue;
+        if (ns.corporation.buyTea(division.name, city)) {
+            spent += cost;
+            teaOffices++;
+        }
+    }
+    for (const { division, city, office, hasAutoParty } of offices) {
+        if (hasAutoParty || office.avgMorale >= office.maxMorale * employeeWellnessThreshold) continue;
+        const costPerEmployee = getPartyCostPerEmployee(office);
+        const cost = costPerEmployee * office.numEmployees;
+        if (cost > budget - spent) continue;
+        if (ns.corporation.throwParty(division.name, city, costPerEmployee) > 0) {
+            spent += cost;
+            partyOffices++;
+        }
+    }
+    if (spent > 0)
+        log(ns, `Employee wellness: spent ${mf(spent)} on tea for ${teaOffices} office(s) and parties for ${partyOffices} office(s).`);
+    return spent;
+}
+
+function getPartyCostPerEmployee(office) {
+    // OfficeSpace applies (morale + 10*x) * (1+x), where x = partyCost / $10m.
+    // Aim 1% above the cap so a weak performance multiplier still reaches maximum morale.
+    const morale = Math.max(0, office.avgMorale);
+    const target = office.maxMorale * 1.01;
+    const linear = morale + 10;
+    const x = Math.max(0, (-linear + Math.sqrt(linear * linear - 40 * (morale - target))) / 20);
+    return Math.ceil((x * 10e6) / 100e3) * 100e3;
+}
+
+function getEmployeeAssignments(employeeCount, isProductHeadquarters) {
+    const weightedJobs = isProductHeadquarters
+        ? [
+            ['Engineer', 0.35],
+            ['Management', 0.20],
+            ['Research & Development', 0.20],
+            ['Operations', 0.15],
+            ['Business', 0.10],
+        ]
+        : [
+            ['Operations', 0.30],
+            ['Engineer', 0.30],
+            ['Management', 0.20],
+            ['Business', 0.10],
+            ['Research & Development', 0.10],
+        ];
+    const assignments = Object.fromEntries(jobs.map((job) => [job, 0]));
+    const shares = weightedJobs.map(([job, weight], index) => {
+        const exact = employeeCount * weight;
+        const assigned = Math.floor(exact);
+        assignments[job] = assigned;
+        return { job, remainder: exact - assigned, index };
+    });
+    let employeesLeft = employeeCount - Object.values(assignments).reduce((sum, count) => sum + count, 0);
+    shares.sort((a, b) => b.remainder - a.remainder || a.index - b.index);
+    for (let i = 0; i < employeesLeft; i++) assignments[shares[i].job]++;
+    return assignments;
+}
+
+function isReadyForProductDivision(corporation, offer) {
+    return corporation.public || offer.round > 3;
+}
+
+function bootstrapEmployeeAutomationWithHashes(ns) {
+    if (ns.getPlayer().money <= 100e6 || !(9 in dictSourceFiles)) return;
+    const bootstrapPlan = commonResearchPlan.slice(0, 3);
+    let divisions = getCorpDivisions(ns);
+    let researchNeeded = Math.max(...divisions.map((division) => getPendingResearchCost(ns, division, bootstrapPlan)), 0);
+    let spentHashes = 0;
+    let purchases = 0;
+    while (researchNeeded > 0) {
+        const hashesBefore = ns.hacknet.numHashes();
+        if (!ns.hacknet.spendHashes('Exchange for Corporation Research')) break;
+        const hashesAfter = ns.hacknet.numHashes();
+        if (hashesAfter >= hashesBefore) break;
+        spentHashes += hashesBefore - hashesAfter;
+        purchases++;
+        researchNeeded -= 1000;
+    }
+    divisions = getCorpDivisions(ns);
+    for (const division of divisions)
+        purchaseResearchPlan(ns, division, bootstrapPlan);
+    if (purchases > 0)
+        log(ns, `Employee automation bootstrap: spent ${nf(spentHashes)} hashes for ${nf(purchases * 1000)} research in each existing division.`);
+}
+
+function getPendingResearchCost(ns, division, researchPlan) {
+    let cost = 0;
+    for (const researchType of researchPlan) {
+        if (ns.corporation.hasResearched(division.name, researchType)) continue;
+        try {
+            cost += ns.corporation.getResearchCost(division.name, researchType);
+        } catch {}
+    }
+    return Math.max(0, cost - getDivisionResearch(division));
+}
+
+function purchaseResearchPlan(ns, division, researchPlan) {
+    let researchToSpend = getDivisionResearch(ns.corporation.getDivision(division.name));
+    for (const researchType of researchPlan) {
+        let hasResearch = false;
+        let cost = Infinity;
+        try {
+            hasResearch = ns.corporation.hasResearched(division.name, researchType);
+            cost = ns.corporation.getResearchCost(division.name, researchType);
+        } catch {}
+        if (hasResearch) continue;
+        if (researchToSpend < cost) {
+            if (verbose && cost !== Infinity)
+                log(ns, `Saving ${nf(researchToSpend)} research for '${researchType}' at ${nf(cost)}.`);
+            break;
+        }
+        log(ns, `INFO: Buying research project ${researchType} for ${nf(cost)} research points.`, 'info');
+        ns.corporation.research(division.name, researchType);
+        researchToSpend -= cost;
+    }
 }
 
 /**
