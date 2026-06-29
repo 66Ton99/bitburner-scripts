@@ -24,6 +24,7 @@ Project-specific guidance for coding agents working in `bitburner-scripts`.
 - Do not disable `logError` in infiltration automation; error logging stays on.
 - When a runtime incident reveals a durable project rule or user preference, update `AGENTS.md` in the same change unless the user says not to.
 - Keep these notes current: remove or amend stale guidance when behavior changes, rather than accumulating contradictory rules.
+- When `gangs.js` is money-focused, do not randomly idle the entire gang for training. Crime tasks already provide relevant experience; keep only the mandatory rebuild training for newly recruited or ascended members.
 
 ## Infiltration Rules
 

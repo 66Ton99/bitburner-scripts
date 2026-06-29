@@ -6,6 +6,7 @@ import {
 // Global config
 const updateInterval = 200; // We can improve our timing by updating more often than gang stats do (which is every 2 seconds for stats, every 20 seconds for territory)
 const wantedPenaltyThreshold = 0.0001; // Don't let the wanted penalty get worse than this
+const balancedMoneyWeight = 1 / 1000; // In balanced mode, value $1000/tick the same as one respect/tick
 const offStatCostPenalty = 50; // Equipment that doesn't contribute to our main stats suffers a percieved cost penalty of this multiple
 const defaultMaxSpendPerTickTransientEquipment = 0.002; // If the --equipment-budget is not specified, spend up to this percent of non-reserved cash on temporary upgrades (equipment)
 const defaultMaxSpendPerTickPermanentEquipment = 0.2; // If the --augmentation-budget is not specified, spend up to this percent of non-reserved cash on permanent member upgrades
@@ -248,10 +249,14 @@ async function onTerritoryTick(ns, myGangInfo) {
     if (!options['no-auto-ascending']) await tryAscendMembers(ns); // Ascend members if we deem it a good time
     await tryUpgradeMembers(ns, dictMembers); // Upgrade members if possible
     await enableOrDisableWarfare(ns, myGangInfo); // Update whether we should be participating in gang warfare
+    const optStat = await getCrimeFocus(ns, myGangInfo);
     // There's a chance we do training instead of work for this next tick. If training, we primarily train our main stat, with a small chance to train less-important stats
-    const task = Math.random() >= pctTraining ? null : "Train " + (Math.random() < 0.1 ? "Charisma" : Math.random() < (isHackGang ? 0.1 : 0.9) ? "Combat" : "Hacking")
+    // Money-focused gangs already gain task-relevant experience from crimes. Avoid idling the entire gang for random training;
+    // newly recruited or ascended members still receive mandatory training in optimizeGangCrime.
+    const task = optStat == "money" || Math.random() >= pctTraining ? null :
+        "Train " + (Math.random() < 0.1 ? "Charisma" : Math.random() < (isHackGang ? 0.1 : 0.9) ? "Combat" : "Hacking")
     await updateMemberActivities(ns, dictMembers, task); // Set everyone working on the next activity
-    if (!task) await optimizeGangCrime(ns, await waitForGameUpdate(ns, myGangInfo));  // Finally, see if we can improve rep gain rates by micro-optimizing individual member crimes
+    if (!task) await optimizeGangCrime(ns, await waitForGameUpdate(ns, myGangInfo), optStat);  // Finally, see if we can improve rep gain rates by micro-optimizing individual member crimes
 }
 
 /** @param {NS} ns
@@ -281,7 +286,7 @@ async function updateMemberActivities(ns, dictMemberInfo = null, forceTask = nul
 /** @param {NS} ns
  * @param {GangGenInfo} myGangInfo
  * Logic to assign tasks that maximize rep gain rate without wanted gain getting out of control **/
-async function optimizeGangCrime(ns, myGangInfo) {
+async function optimizeGangCrime(ns, myGangInfo, optStat = null) {
     const dictMembers = await getGangInfoDict(ns, myGangMembers, 'getMemberInformation');
     // Tolerate our wanted level increasing, as long as reputation increases several orders of magnitude faster and we do not currently have a penalty more than -0.01%
     let currentWantedPenalty = getWantedPenalty(myGangInfo) - 1;
@@ -290,18 +295,7 @@ async function optimizeGangCrime(ns, myGangInfo) {
         myGangInfo.respect > 200 ? -0.01 * myGangInfo.wantedLevel /* Recover from wanted penalty */ :
         currentWantedPenalty < -0.9 * wantedPenaltyThreshold && myGangInfo.wantedLevel >= (1.1 + myGangInfo.respect / 10000) ? 0 /* Sustain */ :
             Math.max(myGangInfo.respectGainRate / 1000, myGangInfo.wantedLevel / 10) /* Allow wanted to increase at a manageable rate */;
-    const playerData = await getNsDataThroughFile(ns, 'ns.getPlayer()');
-    // Find out how much reputation we need, without SF4, we estimate gang faction rep based on current gang rep
-    let factionRep = -1;
-    if (ownedSourceFiles[4] > 0) {
-        try { factionRep = await getNsDataThroughFile(ns, `ns.singularity.getFactionRep(ns.args[0])`, null, [myGangFaction]); }
-        catch { log(ns, 'INFO: Error suppressed. Falling back to estimating current gang faction rep.'); }
-    }
-    if (factionRep == -1) // Estimate current gang rep based on respect. Game gives 1/75 rep / respect. This is an underestimate, because it doesn't take into account spent/lost respect on ascend/recruit/death.
-        factionRep = myGangInfo.respect / 75;
-    const optStat = options['reputation-focus'] ? "respect" : options['money-focus'] ? "money" :
-        // If not specified, automatically change focus based on achieved rep/money
-        factionRep > requiredRep ? "money" : (playerData.money > 1E11 || myGangInfo.respect) < 9000 ? "respect" : "both money and respect";
+    optStat ??= await getCrimeFocus(ns, myGangInfo);
     // Pre-compute how every gang member will perform at every task
     const memberTaskRates = Object.fromEntries(Object.values(dictMembers).map(m => [m.name, allTaskNames.map(taskName => ({
         name: taskName,
@@ -309,20 +303,17 @@ async function optimizeGangCrime(ns, myGangInfo) {
         money: calculateMoneyGains(myGangInfo, taskName, m),
         wanted: computeWantedGains(myGangInfo, taskName, m),
     })).filter(task => task.wanted <= 0 || task.money > 0 || task.respect > 0)])); // Completely remove tasks that offer no gains, but would generate wanted levels
-    // Sort tasks by best gain rate
-    if (optStat == "both money and respect") {
-        Object.values(memberTaskRates).flat().forEach(v => v[optStat] = v.money / 1000 + v.respect); // Hack to support a "optimized total" stat when trying to balance both money and wanted
-        Object.values(memberTaskRates).forEach((tasks, idx) => tasks.sort((a, b) => idx % 2 == 0 ? b.respect - a.respect : b.money - a.money)); // Hack: Even members prioritize respect, odd money
-    } else {
-        Object.values(memberTaskRates).forEach(tasks => tasks.sort((a, b) => b[optStat] - a[optStat]));
-    }
+    const getObjectiveGain = task => getGangObjectiveGain(task, optStat);
+    // Sort every member's tasks by the same objective used to compare complete assignments.
+    Object.values(memberTaskRates).forEach(tasks => tasks.sort((a, b) => getObjectiveGain(b) - getObjectiveGain(a)));
     //ns.print(memberTaskRates);
 
     // Run "the algorithm"
     const start = Date.now(); // Time the algorithms
-    let bestTaskAssignments = null, bestWanted = 0;
-    let bestTotalGain = myGangInfo.wantedLevelGainRate > wantedGainTolerance ? 0 : // Forget our past achievements, we're gaining wanted levels too fast right now
-        optStat == "respect" ? myGangInfo.respectGainRate : myGangInfo.moneyGainRate; // Must do better than the current gain rate if it's within our wanted threshold
+    const currentWantedAcceptable = myGangInfo.wantedLevelGainRate <= wantedGainTolerance;
+    let bestTaskAssignments = null, bestWanted = currentWantedAcceptable ? myGangInfo.wantedLevelGainRate : Number.POSITIVE_INFINITY;
+    let bestTotalGain = !currentWantedAcceptable ? 0 : // Forget our past achievements, we're gaining wanted levels too fast right now
+        getObjectiveGain({ respect: myGangInfo.respectGainRate, money: myGangInfo.moneyGainRate }); // Must do better than the current gain rate if it's within our wanted threshold
     for (let shuffle = 0; shuffle < 100; shuffle++) { // We can discover more optimal results by greedy-optimizing gang members in a different order. Try a few.
         let proposedTasks = {}, totalWanted = 0, totalGain = 0;
         shuffleArray(myGangMembers.slice()).forEach((member, index) => {
@@ -330,23 +321,43 @@ async function optimizeGangCrime(ns, myGangInfo) {
             // "Greedy" optimize one member at a time, but as we near the end of the list, we can no longer expect future members to make for wanted increases
             const sustainableTasks = (index < myGangMembers.length - 2) ? taskRates : taskRates.filter(c => (totalWanted + c.wanted) <= wantedGainTolerance);
             // Find the crime with the best gain (If we can't generate value for any tasks, then we should only be training)
-            const bestTask = taskRates[0][optStat] == 0 || (Date.now() - (lastMemberReset[member] || 0) < options['min-training-ticks'] * territoryTickTime) ?
+            const bestTask = getObjectiveGain(taskRates[0]) == 0 || (Date.now() - (lastMemberReset[member] || 0) < options['min-training-ticks'] * territoryTickTime) ?
                 taskRates.find(t => t.name === ("Train " + (isHackGang ? "Hacking" : "Combat"))) :
                 (totalWanted > wantedGainTolerance || sustainableTasks.length == 0) ? taskRates.find(t => t.name === strWantedReduction) : sustainableTasks[0];
-            [proposedTasks[member], totalWanted, totalGain] = [bestTask, totalWanted + bestTask.wanted, totalGain + bestTask[optStat]];
+            [proposedTasks[member], totalWanted, totalGain] = [bestTask, totalWanted + bestTask.wanted, totalGain + getObjectiveGain(bestTask)];
         });
-        // Following the above attempted optimization, if we're above our wanted gain threshold, downgrade the task of the greatest generators of wanted until within our limit
+        // If we're above the wanted threshold, buy back wanted capacity with the least objective loss.
         let infiniteLoop = 9999;
         while (totalWanted > wantedGainTolerance && Object.values(proposedTasks).some(t => t.name !== strWantedReduction)) {
-            const mostWanted = Object.keys(proposedTasks).reduce((t, c) => proposedTasks[c].name !== strWantedReduction && (t == null || proposedTasks[t].wanted < proposedTasks[c].wanted) ? c : t, null);
-            const nextBestTask = memberTaskRates[mostWanted].filter(c => c.wanted < proposedTasks[mostWanted].wanted)[0] ?? memberTaskRates[mostWanted].find(t => t.name === strWantedReduction);
-            [proposedTasks[mostWanted], totalWanted, totalGain] = [nextBestTask, totalWanted + nextBestTask.wanted - proposedTasks[mostWanted].wanted, totalGain + nextBestTask[optStat] - proposedTasks[mostWanted][optStat]];
+            const wantedExcess = totalWanted - wantedGainTolerance;
+            const replacements = Object.entries(proposedTasks).flatMap(([member, currentTask]) => memberTaskRates[member]
+                .filter(candidate => candidate.wanted < currentTask.wanted)
+                .map(candidate => ({
+                    member, candidate,
+                    wantedReduction: currentTask.wanted - candidate.wanted,
+                    gainLoss: getObjectiveGain(currentTask) - getObjectiveGain(candidate),
+                })));
+            if (replacements.length == 0) break;
+            // Prefer the smallest absolute loss that solves the remaining excess. Otherwise, use the best loss/reduction tradeoff.
+            const sufficientReplacements = replacements.filter(r => r.wantedReduction >= wantedExcess);
+            const replacement = (sufficientReplacements.length > 0 ? sufficientReplacements : replacements).reduce((best, candidate) => {
+                if (best == null) return candidate;
+                const candidateCost = sufficientReplacements.length > 0 ? candidate.gainLoss : candidate.gainLoss / candidate.wantedReduction;
+                const bestCost = sufficientReplacements.length > 0 ? best.gainLoss : best.gainLoss / best.wantedReduction;
+                return candidateCost < bestCost || (candidateCost == bestCost && candidate.gainLoss < best.gainLoss) ? candidate : best;
+            }, null);
+            const oldTask = proposedTasks[replacement.member];
+            proposedTasks[replacement.member] = replacement.candidate;
+            totalWanted -= replacement.wantedReduction;
+            totalGain += getObjectiveGain(replacement.candidate) - getObjectiveGain(oldTask);
             if (infiniteLoop-- <= 0) throw "Infinite Loop!";
         }
         //log(ns, `Optimal task assignments:. Wanted: ${totalWanted.toPrecision(3)}, Gain: ${formatNumberShort(totalGain)}`);
         // Save the new new task assignments only if it's the best gain result we've seen for the value we're trying to optimize, or the closest we've come to meeting our wanted tolerance
-        if (totalWanted <= wantedGainTolerance && totalGain > bestTotalGain || totalWanted > wantedGainTolerance && totalWanted < bestWanted)
+        if (totalWanted <= wantedGainTolerance && totalGain > bestTotalGain)
             [bestTaskAssignments, bestTotalGain, bestWanted] = [proposedTasks, totalGain, totalWanted];
+        else if (totalWanted > wantedGainTolerance && bestWanted > wantedGainTolerance && totalWanted < bestWanted)
+            [bestTaskAssignments, bestWanted] = [proposedTasks, totalWanted];
     }
     const elapsed = Date.now() - start;
     // Determine whether any changes need to be made
@@ -354,38 +365,77 @@ async function optimizeGangCrime(ns, myGangInfo) {
         myGangMembers.forEach(m => assignedTasks[m] = bestTaskAssignments[m].name); // Update work orders for all members
         const oldGangInfo = myGangInfo;
         await updateMemberActivities(ns, dictMembers);
-        const [optWanted, optRespect, optMoney] = myGangMembers.map(m => assignedTasks[m]).reduce(([w, r, m], t) => [w + t.wanted, r + t.respect, m + t.money], [0, 0, 0]);
+        const [optWanted, optRespect, optMoney] = myGangMembers.map(m => bestTaskAssignments[m]).reduce(([w, r, m], t) => [w + t.wanted, r + t.respect, m + t.money], [0, 0, 0]);
         if (optWanted != oldGangInfo.wantedLevelGainRate || optRespect != oldGangInfo.respectGainRate || optMoney != oldGangInfo.moneyGainRate)
             myGangInfo = await waitForGameUpdate(ns, oldGangInfo);
         log(ns, `SUCCESS: Optimized gang member crimes for ${optStat} with wanted gain tolerance ${wantedGainTolerance.toPrecision(2)} (${elapsed} ms). ` +
             `Wanted: ${oldGangInfo.wantedLevelGainRate.toPrecision(3)} -> ${myGangInfo.wantedLevelGainRate.toPrecision(3)}, ` +
             `Rep: ${formatNumberShort(oldGangInfo.respectGainRate)} -> ${formatNumberShort(myGangInfo.respectGainRate)}, Money: ${formatMoney(oldGangInfo.moneyGainRate)} -> ${formatMoney(myGangInfo.moneyGainRate)}`);
         // Check that our calculations (which we stole from game source code) are about right
-        if ((Math.abs(myGangInfo.wantedLevelGainRate - optWanted) / optWanted > 0.01) || (Math.abs(myGangInfo.respectGainRate - optRespect) / optRespect > 0.01) || (Math.abs(myGangInfo.moneyGainRate - optMoney) / optMoney > 0.01))
+        const rateMismatch = (actual, predicted) => Math.abs(actual - predicted) / Math.max(1e-9, Math.abs(actual), Math.abs(predicted)) > 0.01;
+        if (rateMismatch(myGangInfo.wantedLevelGainRate, optWanted) || rateMismatch(myGangInfo.respectGainRate, optRespect) || rateMismatch(myGangInfo.moneyGainRate, optMoney))
             log(ns, `WARNING: Calculated new rates would be Rep:${formatNumberShort(optRespect)} Wanted: ${optWanted.toPrecision(3)} Money: ${formatMoney(optMoney)}` +
                 `but they are Rep:${formatNumberShort(myGangInfo.respectGainRate)} Wanted: ${myGangInfo.wantedLevelGainRate.toPrecision(3)} Money: ${formatMoney(myGangInfo.moneyGainRate)}`, false, 'warning');
     } else
         log(ns, `INFO: Determined all ${myGangMembers.length} gang member assignments are already optimal for ${optStat} with wanted gain tolerance ${wantedGainTolerance.toPrecision(2)} (${elapsed} ms).`);
-    // Fail-safe: If we somehow over-shot and are generating wanted levels, start randomly assigning members to vigilante to fix it
-    if (myGangInfo.wantedLevelGainRate > wantedGainTolerance) await fixWantedGainRate(ns, myGangInfo, wantedGainTolerance);
+    // Fail-safe: If we somehow over-shot and are generating wanted levels, strategically assign members to vigilante to fix it
+    if (myGangInfo.wantedLevelGainRate > wantedGainTolerance) await fixWantedGainRate(ns, myGangInfo, wantedGainTolerance, optStat);
+}
+
+/** Determine whether the gang currently needs reputation, money, or a balance of both. */
+async function getCrimeFocus(ns, myGangInfo) {
+    if (options['reputation-focus']) return "respect";
+    if (options['money-focus']) return "money";
+    const playerData = await getNsDataThroughFile(ns, 'ns.getPlayer()');
+    // Without SF4, estimate gang faction reputation from respect. The estimate is conservative because it ignores spent/lost respect.
+    let factionRep = -1;
+    if (ownedSourceFiles[4] > 0) {
+        try { factionRep = await getNsDataThroughFile(ns, `ns.singularity.getFactionRep(ns.args[0])`, null, [myGangFaction]); }
+        catch { log(ns, 'INFO: Error suppressed. Falling back to estimating current gang faction rep.'); }
+    }
+    if (factionRep == -1) factionRep = myGangInfo.respect / 75;
+    if (factionRep > requiredRep) return "money";
+    return playerData.money > 1E11 || myGangInfo.respect < 9000 ? "respect" : "both money and respect";
 }
 
 /** @param {NS} ns
  * Logic to reduce crime tiers when we're generating a wanted level **/
-async function fixWantedGainRate(ns, myGangInfo, wantedGainTolerance = 0) {
-    // TODO: steal actual wanted level calcs and strategically pick the member(s) who can bridge the gap while losing the least rep/sec
+async function fixWantedGainRate(ns, myGangInfo, wantedGainTolerance = 0, optStat = "money") {
     let lastWantedLevelGainRate = myGangInfo.wantedLevelGainRate;
-    log(ns, `WARNING: Generating wanted levels (${lastWantedLevelGainRate.toPrecision(3)}/sec > ${wantedGainTolerance.toPrecision(3)}/sec), temporarily assigning random members to Vigilante Justice...`, false, 'warning');
-    for (const member of shuffleArray(myGangMembers.slice())) {
-        if (!crimes.includes(assignedTasks[member])) continue; // This member isn't doing crime, so they aren't contributing to wanted
+    log(ns, `WARNING: Generating wanted levels (${lastWantedLevelGainRate.toPrecision(3)}/sec > ${wantedGainTolerance.toPrecision(3)}/sec), ` +
+        `temporarily assigning the least-profitable wanted generators to ${strWantedReduction}...`, false, 'warning');
+    const dictMembers = await getGangInfoDict(ns, myGangMembers, 'getMemberInformation');
+    const vigilanteCandidates = myGangMembers.filter(member => crimes.includes(assignedTasks[member])).map(member => {
+        const memberInfo = dictMembers[member];
+        const currentTask = assignedTasks[member];
+        const currentRates = {
+            respect: computeRepGains(myGangInfo, currentTask, memberInfo),
+            money: calculateMoneyGains(myGangInfo, currentTask, memberInfo),
+            wanted: computeWantedGains(myGangInfo, currentTask, memberInfo),
+        };
+        const vigilanteRates = {
+            respect: computeRepGains(myGangInfo, strWantedReduction, memberInfo),
+            money: calculateMoneyGains(myGangInfo, strWantedReduction, memberInfo),
+            wanted: computeWantedGains(myGangInfo, strWantedReduction, memberInfo),
+        };
+        const wantedReduction = currentRates.wanted - vigilanteRates.wanted;
+        const objectiveLoss = getGangObjectiveGain(currentRates, optStat) - getGangObjectiveGain(vigilanteRates, optStat);
+        return { member, objectiveLoss, wantedReduction, costPerWanted: objectiveLoss / Math.max(1e-9, wantedReduction) };
+    }).sort((a, b) => a.costPerWanted - b.costPerWanted || a.objectiveLoss - b.objectiveLoss);
+    for (const { member } of vigilanteCandidates) {
         assignedTasks[member] = strWantedReduction;
         await updateMemberActivities(ns);
         const wantedLevelGainRate = (myGangInfo = await waitForGameUpdate(ns, myGangInfo)).wantedLevelGainRate;
-        if (wantedLevelGainRate < wantedGainTolerance) return;
+        if (wantedLevelGainRate <= wantedGainTolerance) return;
         if (lastWantedLevelGainRate == wantedLevelGainRate)
             log(ns, `Warning: Attempt to rollback crime of ${member} to ${assignedTasks[member]} resulted in no change in wanted level gain rate ` +
                 `(${lastWantedLevelGainRate.toPrecision(3)})`, false, 'warning');
+        lastWantedLevelGainRate = wantedLevelGainRate;
     }
+}
+
+function getGangObjectiveGain(task, optStat) {
+    return optStat == "both money and respect" ? task.money * balancedMoneyWeight + task.respect : task[optStat];
 }
 
 /** @param {NS} ns
