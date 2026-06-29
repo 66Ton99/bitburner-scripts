@@ -4,13 +4,15 @@ import {
 } from './helpers.js'
 
 const statusFile = "/Temp/graft-manager-status.txt";
-const strCongruity = "Congruity Implant";
+const strCongruity = "violet Congruity Implant";
+const strLegacyCongruity = "Congruity Implant";
 const strNF = "NeuroFlux Governor";
 const defaultDesiredStats = ["hacking", "hacking_exp", "hacking_money", "hacking_speed", "hacking_grow", "hacking_chance", "faction_rep", "company_rep", "charisma", "charisma_exp"];
 const bn8DesiredStats = ["hacking", "hacking_speed", "hacking_grow", "hacking_chance"];
 const priorityAugs = {
     "The Red Pill": 100000,
-    "Congruity Implant": 10000,
+    [strCongruity]: 10000,
+    [strLegacyCongruity]: 10000,
     "Neuroreceptor Management Implant": 200,
     "CashRoot Starter Kit": 100,
 };
@@ -144,11 +146,11 @@ async function getGraftingCandidates(ns, options, player, resetInfo, reserve, ne
         if (price > availableCash || price > maxSpend || time > maxTime) continue;
         const reasonParts = [];
         let score = priorityAugs[name] || 0;
-        if (name == strCongruity && player.entropy > 0) {
+        if (isCongruityImplant(name) && player.entropy > 0) {
             score += 50000;
             reasonParts.push(`clears ${player.entropy} entropy`);
         }
-        if (name != strCongruity && player.entropy >= maxEntropy) continue;
+        if (!isCongruityImplant(name) && player.entropy >= maxEntropy) continue;
         const statScore = scoreStats(stats, desiredStats, resetInfo.currentNode == 8 || options["bn8-stock-mode"]);
         score += statScore;
         if (statScore > 0) reasonParts.push(`desired stats +${statScore.toFixed(2)}`);
@@ -166,6 +168,10 @@ async function getGraftingCandidates(ns, options, player, resetInfo, reserve, ne
         });
     }
     return rows.sort((a, b) => b.score - a.score);
+}
+
+function isCongruityImplant(name) {
+    return name == strCongruity || name == strLegacyCongruity;
 }
 
 function scoreStats(stats, desiredStats, bn8StockMode = false) {
