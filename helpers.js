@@ -914,6 +914,21 @@ export function getConfiguration(ns, argsSchema) {
         // rather than appropriately notifying the user that "1m" is a string, so not a valid value (resulting in Bug #237 )
         // As a result, we may wish to stop using ns.flags below and implement our own arg parsing, as painful as that may be.
         const finalOptions = ns.flags(overriddenSchema);
+        // ns.flags treats the presence of a boolean flag as true even when the next raw argument is the string "false".
+        // Respect explicit boolean values so `--flag false` behaves intuitively and is reported correctly below.
+        for (const optionSchema of overriddenSchema.filter(entry => typeof entry[1] === 'boolean')) {
+            const optionName = optionSchema[0];
+            const longFlag = `--${optionName}`, shortFlag = optionName.length === 1 ? `-${optionName}` : null;
+            for (let i = 0; i < ns.args.length - 1; i++) {
+                if (ns.args[i] !== longFlag && ns.args[i] !== shortFlag)
+                    continue;
+                const explicitValue = ns.args[i + 1];
+                if (typeof explicitValue === 'boolean')
+                    finalOptions[optionName] = explicitValue;
+                else if (typeof explicitValue === 'string' && ['true', 'false'].includes(explicitValue.toLowerCase()))
+                    finalOptions[optionName] = explicitValue.toLowerCase() === 'true';
+            }
+        }
         // Summarize the final set of settings the script is being run with
         log(ns, `INFO: Running ${scriptName} with the following settings:` +
             Object.keys(finalOptions).filter(a => a != "_").map(key => {
@@ -1001,7 +1016,6 @@ export function tail(ns, processId = undefined) {
     ns.ui.resizeTail(width * 0.60, height * 0.25, processId);
     // Cascade windows: After each tail, shift the window slightly down and over so that they don't overlap
     let offsetPct = ((((tailedPids.length % 30.0) / 30.0) + tailedPids.length) % 6.0) / 6.0;
-    ns.print(width, ' ', height, ' ', processId, ' ', offsetPct, ' ', tailedPids)
     ns.ui.moveTail(offsetPct * (width * 0.25 - 300) + 250, offsetPct * (height * 0.75 - 100) + 50, processId);
     tailedPids.push(processId);
     ns.write(tailFile, JSON.stringify(tailedPids), 'w');

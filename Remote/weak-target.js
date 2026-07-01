@@ -12,6 +12,9 @@ export async function main(ns) {
         /*args[5]*/ loopingMode = false
     ] = ns.args;
     const suppressMisfireToasts = silentMisfires || description == "weakenForXp";
+    // A scheduled weaken can legitimately do nothing when the preceding hack/grow misses.
+    // Keep late-start warnings, but do not call a harmless batch no-op a timing misfire.
+    const suppressNoReductionToast = suppressMisfireToasts || description.startsWith("Batch ");
 
     // We may need to sleep before we start the operation to align ourselves properly with other batch cycle (HGW) operations
     let sleepDuration = start_time - Date.now();
@@ -29,7 +32,7 @@ export async function main(ns) {
     do {
         const weakAmt = await ns.weaken(target, hgwOptions);
         // If enabled, warn of any misfires
-        if (weakAmt == 0 && !suppressMisfireToasts)
+        if (weakAmt == 0 && !suppressNoReductionToast)
             ns.toast(`Misfire: Weaken achieved no security reduction. ${JSON.stringify(ns.args)}`, 'warning');
         // (looping mode only) After the first loop, remove the initial sleep time used to align our start with other HGW operations
         if (firstLoop) {

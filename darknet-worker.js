@@ -5,6 +5,7 @@ const STATE_FILE = "/Temp/darknet-passwords.txt";
 const TOPOLOGY_FILE = "/Temp/darknet-topology.txt";
 const STASIS_FILE = "stasis.js";
 const STORM_FILE = "darknet-storm.js";
+const PHISHING_FILE = "darknet-phishing.js";
 const STORM_SEED_PROGRAM = "STORM_SEED.exe";
 const skippedSpreadForRam = new Set();
 
@@ -67,7 +68,8 @@ export async function main(ns) {
             await syncKnownPasswords(ns, String(options.origin));
             await syncDarknetCacheFile(ns, TOPOLOGY_FILE, String(options.origin));
             await freeLocalBlockedRam(ns);
-            if (!options["disable-phishing"]) await tryPhishing(ns);
+            const dedicatedPhishing = !options["disable-phishing"] && await launchLocalPhishingWorker(ns);
+            if (!options["disable-phishing"] && !dedicatedPhishing) await tryPhishing(ns);
             await crawlNeighbors(ns, script, String(options.origin), interval, maxAttempts, options["verbose-terminal"]);
         } catch (error) {
             ns.print(`WARN: Darknet worker cycle failed on ${ns.getHostname()}: ${formatError(error)}`);
@@ -82,6 +84,7 @@ function parseOptions(args) {
         interval: 15000,
         "max-attempts-per-host": 160,
         "disable-phishing": false,
+        "dedicated-phishing": false,
         "verbose-terminal": false,
         "self-test": false,
         help: false,
@@ -554,18 +557,39 @@ async function spreadToNeighbor(ns, script, target, password, interval, verboseT
             return;
         }
         await ns.scp(script, target, ns.getHostname());
+        if (ns.fileExists(PHISHING_FILE, ns.getHostname())) await ns.scp(PHISHING_FILE, target, ns.getHostname());
         if (ns.fileExists(STASIS_FILE, ns.getHostname())) await ns.scp(STASIS_FILE, target, ns.getHostname());
         if (ns.fileExists(STORM_FILE, ns.getHostname())) await ns.scp(STORM_FILE, target, ns.getHostname());
         if (ns.fileExists(STATE_FILE, ns.getHostname())) await ns.scp(STATE_FILE, target, ns.getHostname());
         if (ns.fileExists(TOPOLOGY_FILE, ns.getHostname())) await ns.scp(TOPOLOGY_FILE, target, ns.getHostname());
         await launchStormHelperIfPossible(ns, target, verboseTerminal);
-        const args = ["--origin", ns.getHostname(), "--interval", interval];
+        const args = ["--origin", ns.getHostname(), "--interval", interval, "--dedicated-phishing"];
         if (verboseTerminal) args.push("--verbose-terminal");
+        for (const process of ns.ps(target).filter(process =>
+            (process.filename === script || process.filename.endsWith(`/${script}`)) && !process.args.includes("--dedicated-phishing")))
+            ns.kill(process.pid);
         const pid = ns.exec(script, target, { threads: 1, preventDuplicates: true }, ...args);
         if (pid > 0) ns.print(`INFO: Spread ${script} to ${target} (pid ${pid}).`);
     } catch (error) {
         ns.print(`WARN: Could not spread to ${target}: ${formatError(error)}`);
     }
+}
+
+async function launchLocalPhishingWorker(ns) {
+    const host = ns.getHostname();
+    if (!ns.fileExists(PHISHING_FILE, host)) return false;
+    if (isScriptRunning(ns, host, PHISHING_FILE)) return true;
+    const workerRam = ns.getScriptRam(PHISHING_FILE, host);
+    const freeRam = ns.getServerMaxRam(host) - ns.getServerUsedRam(host);
+    const helperReserve = 16;
+    const threads = workerRam > 0 ? Math.floor(Math.max(0, freeRam - helperReserve) / workerRam) : 0;
+    if (threads < 1) return false;
+    const pid = ns.exec(PHISHING_FILE, host, { threads, preventDuplicates: true });
+    if (pid > 0) {
+        ns.print(`INFO: Started ${PHISHING_FILE} on ${host} with ${threads} threads (pid ${pid}).`);
+        return true;
+    }
+    return false;
 }
 
 async function launchStormHelperIfPossible(ns, target, verboseTerminal) {

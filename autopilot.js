@@ -71,7 +71,6 @@ const moneyFocusBlockedScripts = [
     'sleeve.js',
     'bladeburner.js',
     'graft-manager.js',
-    'Tasks/darknet-manager.js',
     'faction-manager.js',
     'Tasks/backdoor-all-servers.js',
 ];
@@ -1153,8 +1152,8 @@ export async function main(ns) {
                         continue;
                     daemonArgs.push('--disable-script', getFilePath(script));
                 }
-                daemonArgs.push('--disable-grafting', '--disable-darknet', '--disable-bladeburner');
-                log_once(ns, `INFO: ${getBn3MoneyFocusStatusPrefix()} is active. Prioritizing hacking income, stocks, and home RAM upgrades before side activities.`);
+                daemonArgs.push('--disable-grafting', '--disable-bladeburner');
+                log_once(ns, `INFO: ${getBn3MoneyFocusStatusPrefix()} is active. Prioritizing hacking income, Darknet phishing, stocks, and home RAM upgrades before side activities.`);
             }
             if (pursueNetburnersLateGame) daemonArgs.push('--late-netburners');
             if (pursueCompanyFactionsLateGame) daemonArgs.push('--late-company-work');

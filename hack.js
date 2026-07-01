@@ -17,6 +17,12 @@ const argsSchema = [
     ['money-focus', false], // Prioritize money over hack-XP kickstarts. Overrides --xp-only and startup study/XP bursts.
     ['initial-study-time', 10], // Seconds. Set to 0 to not do any studying at startup. By default, if early in an augmentation, will start with a little study to boost hack XP
     ['initial-hack-xp-time', 10], // Seconds. Set to 0 to not do any hack-xp grinding at startup. By default, if early in an augmentation, will start with a little study to boost hack XP
+    ['money-focus-max-loop-time', 5000], // (ms) Main-loop scheduling budget for --money-focus, allowing abundant-RAM runs to schedule more targets per pass.
+    ['money-focus-cycle-window-multiplier', 4], // Multiplier over one weaken-time scheduling horizon for --money-focus continuous batch pipelines.
+    ['money-focus-min-batches', 400], // Rolling lookahead cycles for --money-focus; longer queues did not improve stabilized realized income.
+    ['money-focus-initial-batches', 400], // Limit the initial per-target burst; the rolling top-up fills the remaining lookahead gradually.
+    ['money-focus-max-top-up-batches-per-target', 50], // Bound each target's refill work per coordinator pass.
+    ['preserve-hacknet-servers', false], // Keep Hacknet server RAM unused to preserve hash production, even in --money-focus.
 
     ['reserved-ram', 32], // Keep this much home RAM free when scheduling hack/grow/weaken cycles on home.
     ['double-reserve-threshold', 512], // in GB of RAM. Double our home RAM reserve once there is this much home max RAM.
@@ -24,10 +30,14 @@ const argsSchema = [
     // Batch script fine-tuning flags
     ['initial-max-targets', undefined], // Initial number of servers to target / prep (default is 2 + 1 for every 500 TB of RAM on the network)
     ['cycle-timing-delay', 4000], // (ms) Length of a hack cycle. The smaller this is, the more batches (HWGW) we can schedule before the first cycle fires, but the greater the chance of a misfire
+    ['money-focus-cycle-timing-delay', 100], // (ms) Batch spacing for --money-focus when --cycle-timing-delay is left at its conservative default.
     ['queue-delay', 1000], // (ms) Delay before the first script begins, to give time for all scripts to be scheduled
+    ['money-focus-queue-delay', 5000], // (ms) Scheduling headroom for high-density money-focus batches when --queue-delay is left at its default.
     ['recovery-thread-padding', 1], // Multiply the number of grow/weaken threads needed by this amount to automatically recover more quickly from misfires.
     ['max-batches', 40], // Maximum overlapping cycles to schedule in advance. Note that once scheduled, we must wait for all batches to complete before we can schedule mor
+    ['money-focus-max-batches', 1200], // Higher default --max-batches for --money-focus when RAM is abundant and --max-batches was not explicitly set.
     ['max-steal-percentage', 0.75], // Don't steal more than this in case something goes wrong with timing or scheduling, it's hard to recover frome
+    ['money-focus-max-steal-percentage', 0.98], // Higher default steal cap for --money-focus when --max-steal-percentage was not explicitly set.
 
     ['looping-mode', false], // Set to true to attempt to schedule perpetually-looping tasks.
 
@@ -62,6 +72,7 @@ export async function main(ns) {
     const maxGrowthRate = 1.0035;
     // The name given to purchased servers (should match what's in host-manager.js)
     const purchasedServersName = "daemon";
+    const isHacknetHostName = serverName => serverName.startsWith('hacknet-server-') || serverName.startsWith('hacknet-node-');
     // The name of the server to try running scripts on if home RAM is <= 16GB (early BN1)
     const backupServerName = 'harakiri-sushi'; // Somewhat arbitrarily chosen. It's one of several servers with 16GB which requires no open ports to crack.
 
@@ -71,7 +82,7 @@ export async function main(ns) {
     // If we have plenty of resources after targeting all possible servers, we can start to grow/weaken servers above our hack level - up to this utilization
     const maxUtilizationPreppingAboveHackLevel = 0.75;
     // Maximum number of milliseconds the main targeting loop should run before we take a break until the next loop
-    const maxLoopTime = 1000; //ms
+    const defaultMaxLoopTime = 1000; //ms
 
     // --- VARS ---
     // DISCLAIMER: Take any values you see assigned here with a grain of salt. Due to oddities in how Bitburner runs scripts,
@@ -84,6 +95,11 @@ export async function main(ns) {
     let cycleTimingDelay = 0; // (Set in command line args)
     let queueDelay = 0; // (Set in command line args) The delay that it can take for a script to start, used to pessimistically schedule things in advance
     let maxBatches = 0; // (Set in command line args) The max number of batches this daemon will spool up to avoid running out of IRL ram (TODO: Stop wasting RAM by scheduling batches so far in advance. e.g. Grind XP while waiting for cycle start!)
+    let maxLoopTime = defaultMaxLoopTime;
+    let moneyFocusCycleWindowMultiplier = 1;
+    let moneyFocusMinBatches = 1;
+    let moneyFocusInitialBatches = 1;
+    let moneyFocusMaxTopUpBatchesPerTarget = 1;
     let maxTargets = 0; // (Set in command line args) Initial value, will grow if there is an abundance of RAM
     let maxPreppingAtMaxTargets = 3; // The max servers we can prep when we're at our current max targets and have spare RAM
     // Allows some home ram to be reserved for ad-hoc terminal script running and when home is explicitly set as the "preferred server" for starting a helper
@@ -101,6 +117,8 @@ export async function main(ns) {
     let hackOnly = false; // --hack-only command line arg - don't grow or shrink, just hack (a.k.a. scrapping mode)
     let xpOnly = false; // --xp-only command line arg - focus on a strategy that produces the most hack EXP rather than money
     let moneyFocus = false; // --money-focus command line arg - skip startup XP helpers and optimize for money.
+    let preserveHacknetServers = false;
+    let maxStealPercentage = 0; // Effective cap on the percent stolen per HWGW batch.
     let verbose = false; // --verbose command line arg - Detailed logs about batch scheduling / tuning
     let runOnce = false; // --run-once command line arg - Good for debugging, run the main targeting loop once then stop
     let loopingMode = false;
@@ -166,6 +184,8 @@ export async function main(ns) {
     }
 
     let psCache = (/**@returns{{[serverName: string]: ProcessInfo[];}}*/() => ({}))();
+    let nextMoneyFocusBatchStart = (/**@returns{{[serverName: string]: number;}}*/() => ({}))();
+    let lastObservedHackingIncome = null, lastObservedHackingIncomeTime = 0;
     /** PS can get expensive, and we use it a lot so we cache this for the duration of a loop
      * @param {NS} ns
      * @param {string} serverName
@@ -217,6 +237,9 @@ export async function main(ns) {
         resetServerSortCache();
         ownedCracks = [];
         psCache = {};
+        nextMoneyFocusBatchStart = {};
+        lastObservedHackingIncome = null;
+        lastObservedHackingIncomeTime = 0;
         // XpMode Related Caches
         singleServerLimit = 0, lastCycleTotalRam = 0; // Cache of total ram on the server to check whether we should attempt to lift the above restriction.
         targetsByExp = [], jobHostMappings = {}, farmXpReentryLock = [], nextXpCycleEnd = [];
@@ -239,20 +262,59 @@ export async function main(ns) {
         options = runOptions;
         hackOnly = options['hack-only'];
         moneyFocus = options['money-focus'];
+        preserveHacknetServers = options['preserve-hacknet-servers'];
         xpOnly = options['xp-only'] && !moneyFocus;
         verbose = options['verbose'];
         runOnce = options['run-once'];
         loopingMode = options['looping-mode'];
         recoveryThreadPadding = options['recovery-thread-padding'];
-        cycleTimingDelay = options['cycle-timing-delay'];
-        queueDelay = options['queue-delay'];
-        maxBatches = options['max-batches'];
+        maxLoopTime = moneyFocus ? Math.max(defaultMaxLoopTime, options['money-focus-max-loop-time']) : defaultMaxLoopTime;
+        moneyFocusCycleWindowMultiplier = moneyFocus ? Math.max(1, options['money-focus-cycle-window-multiplier']) : 1;
+        moneyFocusMinBatches = moneyFocus ? Math.max(1, options['money-focus-min-batches']) : 1;
+        moneyFocusInitialBatches = moneyFocus ? Math.max(1, Math.min(moneyFocusMinBatches, options['money-focus-initial-batches'])) : 1;
+        moneyFocusMaxTopUpBatchesPerTarget = moneyFocus ? Math.max(1, options['money-focus-max-top-up-batches-per-target']) : 1;
+        const configuredCycleTimingDelay = options['cycle-timing-delay'];
+        const cycleTimingDelayExplicit = ns.args.some(arg => arg === '--cycle-timing-delay');
+        cycleTimingDelay = moneyFocus && !cycleTimingDelayExplicit && configuredCycleTimingDelay === 4000 ?
+            Math.max(100, options['money-focus-cycle-timing-delay']) : configuredCycleTimingDelay;
+        const configuredQueueDelay = options['queue-delay'];
+        const queueDelayExplicit = ns.args.some(arg => arg === '--queue-delay');
+        queueDelay = moneyFocus && !queueDelayExplicit && configuredQueueDelay === 1000 ?
+            Math.max(1000, options['money-focus-queue-delay']) : configuredQueueDelay;
+        const maxBatchesExplicit = ns.args.some(arg => arg === '--max-batches');
+        maxBatches = moneyFocus && !maxBatchesExplicit && options['max-batches'] === 40 ?
+            Math.max(40, options['money-focus-max-batches']) : options['max-batches'];
+        const maxStealPercentageExplicit = ns.args.some(arg => arg === '--max-steal-percentage');
+        maxStealPercentage = moneyFocus && !maxStealPercentageExplicit && options['max-steal-percentage'] === 0.75 ?
+            Math.min(0.98, Math.max(0.01, options['money-focus-max-steal-percentage'])) : options['max-steal-percentage'];
         homeReservedRam = options['reserved-ram']
         maxTargets = options['initial-max-targets'] ?? 0;
 
         // Log which flags are active
         if (hackOnly) log(ns, '--hack-only - Hack-Only mode activated!');
         if (moneyFocus) log(ns, '--money-focus - Money-focused hacking mode activated; startup study/XP helpers are disabled.');
+        if (moneyFocus && maxLoopTime !== defaultMaxLoopTime)
+            log(ns, `INFO: money-focus loop scheduling budget is ${maxLoopTime}ms (override with --money-focus-max-loop-time).`);
+        if (moneyFocus)
+            log(ns, `INFO: money-focus cycle window multiplier is ${formatNumber(moneyFocusCycleWindowMultiplier)}x (override with --money-focus-cycle-window-multiplier).`);
+        if (moneyFocus)
+            log(ns, `INFO: money-focus rolling lookahead is ${moneyFocusMinBatches} batch cycles (override with --money-focus-min-batches).`);
+        if (moneyFocus)
+            log(ns, `INFO: money-focus initial scheduling is capped at ${moneyFocusInitialBatches} batches/target and rolling top-up at ` +
+                `${moneyFocusMaxTopUpBatchesPerTarget} batches/target/pass.`);
+        if (moneyFocus)
+            log(ns, `INFO: money-focus rolling pipeline will keep approximately ${formatDuration(moneyFocusMinBatches * cycleTimingDelay)} of batches queued per target.`);
+        if (moneyFocus && !preserveHacknetServers)
+            log(ns, 'INFO: money-focus will use Hacknet server RAM for batch workers (use --preserve-hacknet-servers to protect hash production).');
+        if (moneyFocus && !cycleTimingDelayExplicit && configuredCycleTimingDelay === 4000)
+            log(ns, `INFO: money-focus batch spacing is ${cycleTimingDelay}ms ` +
+                `(${formatNumber(1000 / cycleTimingDelay)} batches/sec/target; override with --money-focus-cycle-timing-delay or an explicit --cycle-timing-delay).`);
+        if (moneyFocus && !queueDelayExplicit && configuredQueueDelay === 1000)
+            log(ns, `INFO: money-focus scheduling headroom is ${queueDelay}ms (override with --money-focus-queue-delay or an explicit --queue-delay).`);
+        if (moneyFocus && !maxBatchesExplicit && options['max-batches'] === 40)
+            log(ns, `INFO: money-focus max batches is ${maxBatches} (override with --money-focus-max-batches or an explicit --max-batches).`);
+        if (moneyFocus && !maxStealPercentageExplicit && options['max-steal-percentage'] === 0.75)
+            log(ns, `INFO: money-focus max steal is ${formatNumber(maxStealPercentage * 100)}% (override with --money-focus-max-steal-percentage or an explicit --max-steal-percentage).`);
         if (xpOnly) log(ns, '--xp-only - Hack XP Grinding mode activated!');
         if (verbose) log(ns, '--verbose - Verbose logging activated!');
         if (runOnce) log(ns, '--run-once - Run-once mode activated!');
@@ -264,7 +326,10 @@ export async function main(ns) {
         }
         // Remote hacking tools may open tails unless disabled.
         const openTailWindows = !options['no-tail-windows'];
-        if (openTailWindows) log(ns, 'Opening tail windows for remote hack tools (run with --no-tail-windows to disable)');
+        if (openTailWindows) {
+            log(ns, 'Opening the hack.js coordinator tail window (run with --no-tail-windows to disable)');
+            tail(ns);
+        }
 
         await establishMultipliers(ns); // figure out the various bitNode and player multipliers
 
@@ -281,6 +346,8 @@ export async function main(ns) {
 
         await buildToolkit(ns, hackTools); // build hacking/prep toolkit
         await buildServerList(ns, false); // create the exhaustive server list
+        await syncHackToolsToWorkerHosts(ns);
+        await killExistingBatchWorkers(ns, 'startup');
 
         // If we ascended less than 10 minutes ago, start with some study and/or XP cycles to quickly restore hack XP
         const timeSinceLastAug = Date.now() - resetInfo.lastAugReset;
@@ -496,6 +563,7 @@ export async function main(ns) {
                 const n = (/**@returns{Server[]}*/() => []); // Trick to initialize new arrays with a strong type
                 const prepping = n(), preppedButNotTargeting = n(), targeting = n(), notRooted = n(), cantHack = n(),
                     cantHackButPrepped = n(), cantHackButPrepping = n(), noMoney = n(), failed = n(), skipped = n();
+                let moneyFocusTopUpRequested = 0, moneyFocusTopUpScheduled = 0, moneyFocusTopUpTargets = 0;
                 let lowestUnhackable = 99999;
                 let maxPossibleTargets = targetingOrder.filter(s => s.shouldHack()).length;
 
@@ -549,6 +617,12 @@ export async function main(ns) {
                         else if (await server.isPrepping())
                             cantHackButPrepping.push(server);
                     } else if (await server.isTargeting()) { // Note servers already being targeted from a prior loop
+                        if (moneyFocus) {
+                            const topUpResult = await topUpMoneyFocusPipeline(ns, server);
+                            moneyFocusTopUpRequested += topUpResult.requested;
+                            moneyFocusTopUpScheduled += topUpResult.scheduled;
+                            moneyFocusTopUpTargets += topUpResult.requested > 0 ? 1 : 0;
+                        }
                         targeting.push(server); // TODO: Switch to continuously queing batches in the seconds leading up instead of far in advance with large delays
                     } else if (await server.isPrepping()) { // Note servers already being prepped from a prior loop
                         prepping.push(server);
@@ -585,10 +659,11 @@ export async function main(ns) {
                     if (lowUtilizationIterations >= 5 && targeting.length == maxTargets && maxTargets < maxPossibleTargets) {
                         let network = getNetworkStats();
                         let utilizationPercent = network.totalUsedRam / network.totalMaxRam;
-                        if (utilizationPercent < lowUtilizationThreshold / 2) {
+                        const rampUtilizationThreshold = moneyFocus ? lowUtilizationThreshold : lowUtilizationThreshold / 2;
+                        if (utilizationPercent < rampUtilizationThreshold) {
                             maxTargets++;
                             log(ns, `Increased max targets to ${maxTargets} since utilization (${formatNumber(utilizationPercent * 100, 3)}%) ` +
-                                `is less than ${lowUtilizationThreshold * 50}% after scheduling the first ${maxTargets - 1} targets.`);
+                                `is less than ${formatNumber(rampUtilizationThreshold * 100, 3)}% after scheduling the first ${maxTargets - 1} targets.`);
                         }
                     }
                 }
@@ -641,7 +716,7 @@ export async function main(ns) {
                     if (skipped.length > 0 && maxTargets < maxPossibleTargets) {
                         maxTargets++;
                         actionTaken = `Increased max targets to ${maxTargets}`;
-                    } else if (maxTargets >= maxPossibleTargets && recoveryThreadPadding < 10) {
+                    } else if (!moneyFocus && maxTargets >= maxPossibleTargets && recoveryThreadPadding < 10) {
                         // If we're already targetting every host and we have RAM to spare, increase the recovery padding 
                         // to speed up our recovering from misfires (at the cost of "wasted" ram on every batch)
                         recoveryThreadPadding = Math.min(10, recoveryThreadPadding * 1.5);
@@ -701,7 +776,23 @@ export async function main(ns) {
                             '\nERROR: In --xp-mode, but doing nothing!';
                 // To reduce log spam, only log if some key status changes, or if it's been a minute
                 if (keyUpdates != lastUpdate || (Date.now() - lastUpdateTime) > 60000) {
-                    log(ns, (lastUpdate = keyUpdates) +
+                    let moneyFocusDiagnostics = '';
+                    if (moneyFocus) {
+                        const activeBatchWorkers = allHostNames.reduce((total, hostName) => total +
+                            processList(ns, hostName).filter(process => String(process.args?.[3] || '').startsWith('Batch')).length, 0);
+                        const scriptIncome = ns.getTotalScriptIncome()[0];
+                        const observedAt = Date.now();
+                        const hackingIncome = ns.getMoneySources()?.sinceInstall?.hacking ?? 0;
+                        const observedHackingRate = lastObservedHackingIncome == null || observedAt <= lastObservedHackingIncomeTime ? null :
+                            Math.max(0, hackingIncome - lastObservedHackingIncome) * 1000 / (observedAt - lastObservedHackingIncomeTime);
+                        lastObservedHackingIncome = hackingIncome;
+                        lastObservedHackingIncomeTime = observedAt;
+                        moneyFocusDiagnostics = `\n > Rolling Top-up: ${moneyFocusTopUpScheduled}/${moneyFocusTopUpRequested} batches ` +
+                            `across ${moneyFocusTopUpTargets} targets; Active Batch Workers: ${activeBatchWorkers}; ` +
+                            `Script Income: ${formatMoney(scriptIncome, 3, 1)}/sec; ` +
+                            `Observed Hacking: ${observedHackingRate == null ? 'measuring...' : `${formatMoney(observedHackingRate, 3, 1)}/sec`}`;
+                    }
+                    log(ns, (lastUpdate = keyUpdates) + moneyFocusDiagnostics +
                         '\n > RAM Utilization: ' + formatRam(Math.ceil(network.totalUsedRam)) + ' of ' + formatRam(network.totalMaxRam) + ' (' + (utilizationPercent * 100).toFixed(1) + '%) ' +
                         `for ${lowUtilizationIterations || highUtilizationIterations} its, Max Targets: ${maxTargets}, Loop Took: ${Date.now() - start}ms`);
                     lastUpdateTime = Date.now();
@@ -721,9 +812,9 @@ export async function main(ns) {
     let actualWeakenPotency = () => bitNodeMults.ServerWeakenRate * weakenThreadPotency;
 
     // Get a dictionary from retrieving the same infromation for every server name
-    async function getServersDict(ns, command) {
+    async function getServersDict(ns, command, serverNames = allHostNames) {
         return await getNsDataThroughFile(ns, `Object.fromEntries(ns.args.map(server => [server, ns.${command}(server)]))`,
-            `/Temp/${command}-all.txt`, allHostNames);
+            `/Temp/${command}-all.txt`, serverNames);
     }
 
     let dictInitialServerInfos = (/**@returns{{[serverName: string]: globalThis.Server;}}*/() => undefined)();
@@ -740,12 +831,13 @@ export async function main(ns) {
      * @param {NS} ns */
     async function getStaticServerData(ns) {
         if (verbose) log(ns, `getStaticServerData: ${allHostNames}`);
-        dictServerRequiredHackinglevels = await getServersDict(ns, 'getServerRequiredHackingLevel');
-        dictServerNumPortsRequired = await getServersDict(ns, 'getServerNumPortsRequired');
-        dictServerGrowths = await getServersDict(ns, 'getServerGrowth');
+        const targetServerNames = allHostNames.filter(serverName => !isHacknetHostName(serverName));
+        dictServerRequiredHackinglevels = await getServersDict(ns, 'getServerRequiredHackingLevel', targetServerNames);
+        dictServerNumPortsRequired = await getServersDict(ns, 'getServerNumPortsRequired', targetServerNames);
+        dictServerGrowths = await getServersDict(ns, 'getServerGrowth', targetServerNames);
         // The "GetServer" object result is used with the formulas API (due to type checking that the parameter is a valid "server" instance)
         // TODO: There is now a "ns.formulas.mockServer()" function that we can switch to
-        dictInitialServerInfos = await getServersDict(ns, 'getServer');
+        dictInitialServerInfos = await getServersDict(ns, 'getServer', targetServerNames);
         // Also immediately retrieve the data which is occasionally updated
         await updateCachedServerData(ns);
         await refreshDynamicServerData(ns);
@@ -763,14 +855,18 @@ export async function main(ns) {
     async function refreshDynamicServerData(ns) {
         if (verbose) log(ns, `refreshDynamicServerData: ${allHostNames}`);
         // Min Security / Max Money can be affected by Hashnet purchases, so we should update this occasionally
-        dictServerMinSecurityLevels = await getServersDict(ns, 'getServerMinSecurityLevel');
-        dictServerMaxMoney = await getServersDict(ns, 'getServerMaxMoney');
+        const targetServerNames = allHostNames.filter(serverName => !isHacknetHostName(serverName));
+        dictServerMinSecurityLevels = await getServersDict(ns, 'getServerMinSecurityLevel', targetServerNames);
+        dictServerMaxMoney = await getServersDict(ns, 'getServerMaxMoney', targetServerNames);
         // Get the information about relative profitability. On 8GB fresh starts this can be too large, so fall back.
         if (ns.getServerMaxRam(daemonHost) <= 8) {
             dictServerProfitInfo = null;
             log(ns, "INFO: Skipping analyze-hack.js on 8GB home; using fallback server ordering.");
         } else try {
-            const pid = await exec(ns, getFilePath('analyze-hack.js'), null, null, '--all', '--silent');
+            const analyzeHackArgs = ['--all', '--silent'];
+            if (moneyFocus && !preserveHacknetServers)
+                analyzeHackArgs.push('--include-hacknet-ram');
+            const pid = await exec(ns, getFilePath('analyze-hack.js'), null, null, ...analyzeHackArgs);
             await waitForProcessToComplete_Custom(ns, getHomeProcIsAlive(ns), pid);
             const analyzeHackResult = dictServerProfitInfo = ns.read('/Temp/analyze-hack.txt');
             if (!analyzeHackResult)
@@ -831,7 +927,7 @@ export async function main(ns) {
         canCrack() { return ownedCracks.length >= this.portsRequired; }
         canHack() { return this.requiredHackLevel <= playerHackSkill(); }
         shouldHack() {
-            return this.getMaxMoney() > 0 && this.name !== "home" && !this.name.startsWith('hacknet-server-') && !this.name.startsWith('hacknet-node-') &&
+            return this.getMaxMoney() > 0 && this.name !== "home" && !isHacknetHostName(this.name) &&
                 !this.name.startsWith(purchasedServersName); // Hack, but beats wasting 1.05 GB on ns.cloud.getServerNames()
         }
         // "Prepped" means current security is at the minimum, and current money is at the maximum
@@ -1030,11 +1126,16 @@ export async function main(ns) {
             canBeScheduled: maxScheduled > 0,
             // Given our timing delay, **approximately** how many cycles can we initiate before the first batch's first task fires?
             // TODO: Do a better job of calculating this *outside* of the performance snapshot, and only calculate it once.
-            optimalPacedCycles: Math.min(maxBatches, Math.max(1, Math.floor(((currentTarget.timeToWeaken()) / cycleTimingDelay).toPrecision(14))
-                - 1)), // Fudge factor, this isnt an exact science
+            optimalPacedCycles: getOptimalPacedCycles(currentTarget),
             // Given RAM availability, how many cycles could we schedule across all hosts?
             maxCompleteCycles: Math.max(maxScheduled - 1, 1) // Fudge factor. The executor isn't perfect
         };
+    }
+
+    function getOptimalPacedCycles(currentTarget) {
+        const conservativePacedCycles = Math.max(1, Math.floor(((currentTarget.timeToWeaken()) / cycleTimingDelay).toPrecision(14)) - 1);
+        const moneyFocusPacedCycles = Math.max(moneyFocusMinBatches, Math.ceil(conservativePacedCycles * moneyFocusCycleWindowMultiplier));
+        return Math.min(maxBatches, moneyFocus ? moneyFocusPacedCycles : conservativePacedCycles);
     }
 
     // Produce a summary string containing information about a hack batch for a given target configuration
@@ -1107,37 +1208,44 @@ export async function main(ns) {
 
     // Suggests an adjustment to the percentage to steal based on how much ram would be consumed if attempting the current percentage.
     function analyzeSnapshot(ns, snapshot, currentTarget, networkStats, incrementalHackThreads) {
-        const maxPercentageToSteal = options['max-steal-percentage'];
         const lastP2steal = currentTarget.percentageToSteal;
+        const percentPerHackThread = currentTarget.percentageStolenPerHackThread();
+        const maxHackThreads = Math.max(1, Math.floor((maxStealPercentage / percentPerHackThread).toPrecision(14)));
         // Priority is to use as close to the target ram as possible overshooting.
         const isOvershot = s => !s.canBeScheduled || s.maxCompleteCycles < s.optimalPacedCycles;
         if (verbose && runOnce)
             log(ns, `canBeScheduled: ${snapshot.canBeScheduled},  maxCompleteCycles: ${snapshot.maxCompleteCycles}, optimalPacedCycles: ${snapshot.optimalPacedCycles}`);
         if (isOvershot(snapshot)) {
             return -incrementalHackThreads;
-        } else if (snapshot.maxCompleteCycles > snapshot.optimalPacedCycles && lastP2steal < maxPercentageToSteal) {
+        } else if (snapshot.maxCompleteCycles > snapshot.optimalPacedCycles && lastP2steal < maxStealPercentage) {
+            const hackThreadsToAdd = Math.min(incrementalHackThreads, maxHackThreads - currentTarget.getHackThreadsNeeded());
+            if (hackThreadsToAdd <= 0)
+                return 0.00;
             // Test increasing by the increment, but if it causes us to go over maximum desired utilization, do not suggest it
-            currentTarget.percentageToSteal = (currentTarget.getHackThreadsNeeded() + incrementalHackThreads) * currentTarget.percentageStolenPerHackThread();
+            currentTarget.percentageToSteal = (currentTarget.getHackThreadsNeeded() + hackThreadsToAdd) * percentPerHackThread;
             const comparisonSnapshot = getPerformanceSnapshot(currentTarget, networkStats);
             currentTarget.percentageToSteal = lastP2steal;
-            return isOvershot(comparisonSnapshot) ? 0.00 : incrementalHackThreads;
+            return isOvershot(comparisonSnapshot) ? 0.00 : hackThreadsToAdd;
         }
         return 0.00;
     }
 
     /** @param {NS} ns **/
-    async function performScheduling(ns, currentTarget, snapshot) {
+    async function performScheduling(ns, currentTarget, snapshot, requestedCycles = null, firstBatchStart = null) {
         const start = Date.now();
         const scheduledTasks = [];
-        const maxCycles = Math.min(snapshot.optimalPacedCycles, snapshot.maxCompleteCycles);
         if (!snapshot) return;
+        let maxCycles = requestedCycles == null ? Math.min(snapshot.optimalPacedCycles, snapshot.maxCompleteCycles) :
+            Math.min(requestedCycles, snapshot.maxCompleteCycles);
+        if (moneyFocus && requestedCycles == null)
+            maxCycles = Math.min(maxCycles, moneyFocusInitialBatches);
         if (maxCycles === 0)
             return log(ns, `WARNING: Attempt to schedule ${getTargetSummary(currentTarget)} returned 0 max cycles? ${JSON.stringify(snapshot)}`, false, 'warning');
         if (currentTarget.getHackThreadsNeeded() === 0)
             return log(ns, `WARNING: Attempted to schedule empty cycle ${maxCycles} x ${getTargetSummary(currentTarget)}? ${JSON.stringify(snapshot)}`, false, 'warning');
         let firstEnding = null, lastStart = null, lastBatch = 0, cyclesScheduled = 0;
         while (cyclesScheduled < maxCycles) {
-            const newBatchStart = new Date((cyclesScheduled === 0) ? Date.now() + queueDelay : lastBatch.getTime() + cycleTimingDelay);
+            const newBatchStart = new Date((cyclesScheduled === 0) ? (firstBatchStart ?? Date.now() + queueDelay) : lastBatch.getTime() + cycleTimingDelay);
             lastBatch = new Date(newBatchStart.getTime());
             const batchTiming = getScheduleTiming(newBatchStart, currentTarget);
             if (verbose && runOnce) logSchedule(ns, batchTiming, currentTarget); // Special log for troubleshooting batches
@@ -1148,7 +1256,7 @@ export async function main(ns) {
             if (lastStart === null || lastStart < newBatch.firstFire) {
                 lastStart = new Date(newBatch.lastFire.valueOf());
             }
-            if (cyclesScheduled > 0 && lastStart >= firstEnding) {
+            if (!moneyFocus && cyclesScheduled > 0 && lastStart >= firstEnding) {
                 if (verbose) log(ns, `Had to stop scheduling at ${cyclesScheduled} of ${maxCycles} desired cycles (lastStart: ${lastStart} >= firstEnding: ${firstEnding}) ${JSON.stringify(snapshot)}`);
                 break;
             }
@@ -1164,7 +1272,8 @@ export async function main(ns) {
                 args.push(...getFlagsArgs(schedItem.toolShortName, currentTarget.name));
                 if (options.i && currentTerminalServer?.name == currentTarget.name && schedItem.toolShortName == "hack")
                     schedItem.toolShortName = "manualhack";
-                const result = await arbitraryExecution(ns, getTool(schedItem.toolShortName), schedItem.threadsNeeded, args)
+                const result = await arbitraryExecution(ns, getTool(schedItem.toolShortName), schedItem.threadsNeeded, args,
+                    null, moneyFocus)
                 if (result == false) { // If execution fails, we have probably run out of ram.
                     log(ns, `WARNING: Scheduling failed for ${getTargetSummary(currentTarget)} ${discriminationArg} of ${cyclesScheduled} Took: ${Date.now() - start}ms`, false, 'warning');
                     currentTarget.previousCycle = `INCOMPLETE. Tried: ${cyclesScheduled} x ${getTargetSummary(currentTarget)}`;
@@ -1174,8 +1283,29 @@ export async function main(ns) {
         }
         if (verbose)
             log(ns, `Scheduled ${cyclesScheduled} x ${getTargetSummary(currentTarget)} Took: ${Date.now() - start}ms`);
+        if (moneyFocus && cyclesScheduled > 0)
+            nextMoneyFocusBatchStart[currentTarget.name] = lastBatch.getTime() + cycleTimingDelay;
         currentTarget.previousCycle = `${cyclesScheduled} x ${getTargetSummary(currentTarget)}`
         return true;
+    }
+
+    /** Keep a money-focus target's completion cadence continuous without waiting for its final worker to exit.
+     * @param {NS} ns
+     * @param {Server} currentTarget */
+    async function topUpMoneyFocusPipeline(ns, currentTarget) {
+        const nextBatchStart = nextMoneyFocusBatchStart[currentTarget.name];
+        if (nextBatchStart == null)
+            return { requested: 0, scheduled: 0 };
+        const desiredQueueEnd = Date.now() + queueDelay + moneyFocusMinBatches * cycleTimingDelay;
+        const batchesNeeded = Math.min(maxBatches, Math.max(0, Math.ceil((desiredQueueEnd - nextBatchStart) / cycleTimingDelay)));
+        if (batchesNeeded === 0)
+            return { requested: 0, scheduled: 0 };
+        const snapshot = getPerformanceSnapshot(currentTarget, getNetworkStats());
+        if (!snapshot.canBeScheduled || snapshot.maxCompleteCycles <= 0)
+            return { requested: batchesNeeded, scheduled: 0 };
+        const batchesToSchedule = Math.min(batchesNeeded, snapshot.maxCompleteCycles, moneyFocusMaxTopUpBatchesPerTarget);
+        const succeeded = await performScheduling(ns, currentTarget, snapshot, batchesToSchedule, Math.max(nextBatchStart, Date.now() + queueDelay));
+        return { requested: batchesNeeded, scheduled: succeeded === true ? batchesToSchedule : 0 };
     }
 
     /** Produces a special log for troubleshooting cycle schedules */
@@ -1301,32 +1431,42 @@ export async function main(ns) {
     // If it can't run all the threads at once, it runs as many as it can across the spectrum of daemons available.
     /** @param {NS} ns
      * @param {Tool} tool - An object representing the script being executed **/
-    async function arbitraryExecution(ns, tool, threads, args, preferredServerName = null, useSmallestServerPossible = false, allowThreadSplitting = null) {
+    async function arbitraryExecution(ns, tool, threads, args, preferredServerName = null, balanceAcrossServers = false, allowThreadSplitting = null) {
         // We will be using the list of servers that is sorted by most available ram
         const igRes = tool.ignoreReservedRam; // Whether this tool ignores "reserved ram"
         const rootedServersByFreeRam = getAllServersByFreeRam().filter(server => server.hasRoot() && server.totalRam(igRes) > 1.6);
-        // Sort servers by total ram, and try to fill these before utilizing another server.
-        const preferredServerOrder = getAllServersByMaxRam().filter(server => server.hasRoot() && server.totalRam(igRes) > 1.6);
-        if (useSmallestServerPossible) // If so-configured, fill up small servers before utilizing larger ones (can be laggy)
-            preferredServerOrder.reverse();
+        // Normal scheduling prefers large hosts; money-focus balances jobs by each host's current utilization percentage.
+        let preferredServerOrder = getAllServersByMaxRam().filter(server => server.hasRoot() && server.totalRam(igRes) > 1.6);
+        if (balanceAcrossServers) {
+            const utilizationByServer = new Map(preferredServerOrder.map(server =>
+                [server.name, server.usedRam() / server.totalRam(igRes)]));
+            const freeRamByServer = new Map(preferredServerOrder.map(server =>
+                [server.name, server.ramAvailable(igRes)]));
+            preferredServerOrder.sort((a, b) => {
+                const utilizationDiff = utilizationByServer.get(a.name) - utilizationByServer.get(b.name);
+                return utilizationDiff != 0 ? utilizationDiff : freeRamByServer.get(b.name) - freeRamByServer.get(a.name);
+            });
+        }
 
         // IDEA: "home" is more effective at grow() and weaken() than other nodes (has multiple cores) (TODO: By how much?)
         //       so if this is one of those tools, put it at the front of the list of preferred candidates, otherwise keep home ram free if possible
         //       TODO: This effort is wasted unless we also scale down the number of threads "needed" when running on home. We will overshoot grow/weaken
         const homeIndex = preferredServerOrder.findIndex(i => i.name == "home");
-        if (homeIndex > -1) { // Home server might not be in the server list at all if it has insufficient RAM
+        if (!balanceAcrossServers && homeIndex > -1) { // Home server might not be in the server list at all if it has insufficient RAM
             const home = preferredServerOrder.splice(homeIndex, 1)[0];
             if (tool.shortName == "grow" || tool.shortName == "weak" || preferredServerName == "home")
                 preferredServerOrder.unshift(home); // Send to front
             else
                 preferredServerOrder.push(home); // Otherwise, send it to the back (reserve home for scripts that benefit from cores) and use only if there's no room on any other server.
         }
-        // Push all "hacknet servers" to the end of the preferred list, since they will lose productivity if used
-        const anyHacknetNodes = [];
-        let hnNodeIndex;
-        while (-1 !== (hnNodeIndex = preferredServerOrder.indexOf(s => s.name.startsWith('hacknet-server-') || s.name.startsWith('hacknet-node-'))))
-            anyHacknetNodes.push(...preferredServerOrder.splice(hnNodeIndex, 1));
-        preferredServerOrder.push(...anyHacknetNodes.sort((a, b) => b.totalRam(igRes) != a.totalRam(igRes) ? b.totalRam(igRes) - a.totalRam(igRes) : a.name.localeCompare(b.name)));
+        // Outside balanced money-focus scheduling, preserve Hacknet productivity by using its RAM only as a last resort.
+        if (!balanceAcrossServers) {
+            const anyHacknetNodes = [];
+            let hnNodeIndex;
+            while (-1 !== (hnNodeIndex = preferredServerOrder.findIndex(s => s.name.startsWith('hacknet-server-') || s.name.startsWith('hacknet-node-'))))
+                anyHacknetNodes.push(...preferredServerOrder.splice(hnNodeIndex, 1));
+            preferredServerOrder.push(...anyHacknetNodes.sort((a, b) => b.totalRam(igRes) != a.totalRam(igRes) ? b.totalRam(igRes) - a.totalRam(igRes) : a.name.localeCompare(b.name)));
+        }
 
         // Allow for an overriding "preferred" server to be used in the arguments, and slot it to the front regardless of the above
         if (preferredServerName && preferredServerName != "home" /*home is handled above*/ && preferredServerOrder[0].name != preferredServerName) {
@@ -1336,7 +1476,7 @@ export async function main(ns) {
             else
                 log(ns, `ERROR: Configured preferred server "${preferredServerName}" for ${tool.name} is not a valid server name`, true, 'error');
         }
-        if (verbose) log(ns, `Preferred Server ${preferredServerName ?? "(any)"} for ${threads} threads of ${tool.name} (use small=` + `${useSmallestServerPossible})` +
+        if (verbose) log(ns, `Preferred Server ${preferredServerName ?? "(any)"} for ${threads} threads of ${tool.name} (balanced=` + `${balanceAcrossServers})` +
             ` resulted in preferred order:${preferredServerOrder.map(s => ` ${s.name} (${formatRam(s.ramAvailable(igRes))})`)}`);
 
         // Helper function to compute the most threads a server can run
@@ -1357,8 +1497,7 @@ export async function main(ns) {
             if (maxThreadsHere <= 0)
                 continue; //break; HACK: We don't break here because there are cases when sort order can change (e.g. we've reserved home RAM)
 
-            // If this server can handle all required threads, see if a server that is more preferred also has room.
-            // If so, we prefer to pack that server with more jobs before utilizing another server.
+            // If this server can handle all required threads, see if a more preferred server also has room.
             if (maxThreadsHere == remainingThreads) {
                 for (let j = 0; j < preferredServerOrder.length; j++) {
                     const nextMostPreferredServer = preferredServerOrder[j];
@@ -1743,6 +1882,55 @@ export async function main(ns) {
         return await runCommand(ns, `ns.args.forEach(ns.kill)`, '/Temp/kill-pids.js', processIds);
     }
 
+    /** Ensure remote hosts execute the current worker code instead of stale files from an earlier hack.js version.
+     * @param {NS} ns */
+    async function syncHackToolsToWorkerHosts(ns) {
+        const workerFiles = [...new Set([...hackTools.map(tool => tool.name), getFilePath('helpers.js')])];
+        let syncedHosts = 0;
+        for (const server of getAllServers()) {
+            if (server.name == daemonHost || !server.hasRoot() || server.totalRam() <= 1.6)
+                continue;
+            if (await ns.scp(workerFiles, server.name, daemonHost)) {
+                workerFiles.forEach(file => server._files?.add(file.startsWith('/') ? file.substring(1) : file));
+                syncedHosts++;
+            }
+        }
+        if (syncedHosts > 0)
+            log(ns, `INFO: Synchronized ${workerFiles.length} hack worker file(s) to ${syncedHosts} rooted RAM host(s).`);
+    }
+
+    /** Kill batch workers from a previous hack.js instance before this instance starts scheduling.
+     * @param {NS} ns
+     * @param {string} reason */
+    async function killExistingBatchWorkers(ns, reason) {
+        const batchToolNames = new Set(hackTools.map(tool => tool.name.split('/').pop()));
+        const findStalePids = () => allHostNames.flatMap(hostName => processList(ns, hostName, false)
+            .filter(process => batchToolNames.has(String(process.filename || '').split('/').pop()) &&
+                String(process.args?.[3] || '').startsWith('Batch'))
+            .map(process => process.pid));
+        const killInChunks = async processIds => {
+            const chunkSize = 1000;
+            for (let offset = 0; offset < processIds.length; offset += chunkSize) {
+                const killPid = await killProcessIds(ns, processIds.slice(offset, offset + chunkSize));
+                await waitForProcessToComplete_Custom(ns, getHomeProcIsAlive(ns), killPid);
+            }
+        };
+        const stalePids = findStalePids();
+        if (stalePids.length === 0)
+            return;
+        log(ns, `INFO: Killing ${stalePids.length} stale remote batch worker(s) on ${reason} before scheduling new batches.`);
+        await killInChunks(stalePids);
+        await ns.sleep(100);
+        psCache = {};
+        const survivors = findStalePids();
+        if (survivors.length > 0) {
+            log(ns, `WARN: ${survivors.length} stale batch worker(s) survived the first cleanup pass; retrying.`, false, 'warning');
+            await killInChunks(survivors);
+            await ns.sleep(100);
+            psCache = {};
+        }
+    }
+
     /** @param {Server} server **/
     function addServer(ns, server, verbose) {
         if (verbose) log(ns, `Adding a new server to all lists: ${server}`);
@@ -1775,8 +1963,9 @@ export async function main(ns) {
     async function buildServerList(ns, verbose = false) {
         // Get list of servers (i.e. all servers on first scan, or newly purchased servers on subsequent scans)
         let scanResult = await getNsDataThroughFile(ns, 'scanAllServers(ns)');
-        // Do not consume hacknet server RAM for hack jobs; it reduces hash production.
-        scanResult = scanResult.filter(hostName => !hostName.startsWith('hacknet-server-') && !hostName.startsWith('hacknet-node-'))
+        // Normal mode preserves hash production. Money-focus may explicitly spend this RAM on hacking income.
+        if (!moneyFocus || preserveHacknetServers)
+            scanResult = scanResult.filter(hostName => !isHacknetHostName(hostName))
         // Remove all servers we currently have added that are no longer being returned by the above query
         for (const hostName of allHostNames.filter(hostName => !scanResult.includes(hostName)))
             removeServerByName(ns, hostName);
@@ -1853,6 +2042,9 @@ export async function main(ns) {
         for (const server of _serverListByTargetOrder)
             dictIsTargeting[server.name] = await server.isTargeting();
         return _sortServersAndReturn(_serverListByTargetOrder, function (a, b) {
+            const aShouldHack = a.shouldHack(), bShouldHack = b.shouldHack();
+            if (aShouldHack != bShouldHack) return aShouldHack ? -1 : 1;
+            if (!aShouldHack) return sortServerTieBreaker(a, b);
             if (a.canHack() != b.canHack()) return a.canHack() ? -1 : 1; // Sort all hackable servers first
             // In xp-only mode, make the targeting order consist with the current cached "targetsByExp" order
             if (xpOnly) {

@@ -2,6 +2,7 @@
 export async function main(ns) {
     const options = ns.flags([
         ["worker", "darknet-worker.js"],
+        ["phishing-worker", "darknet-phishing.js"],
         ["migration-worker", "darknet-migration.js"],
         ["stock-worker", "darknet-stock.js"],
         ["storm-worker", "darknet-storm.js"],
@@ -39,6 +40,7 @@ export async function main(ns) {
     }
 
     const worker = String(options.worker);
+    const phishingWorker = String(options["phishing-worker"]);
     const migrationWorker = String(options["migration-worker"]);
     const stockWorker = String(options["stock-worker"]);
     const stormWorker = String(options["storm-worker"]);
@@ -64,12 +66,24 @@ export async function main(ns) {
             }
 
             await ns.scp(worker, darkweb, "home");
+            if (phishingWorker && ns.fileExists(phishingWorker, "home")) await ns.scp(phishingWorker, darkweb, "home");
             if (!options["disable-migration"] && ns.fileExists(migrationWorker, "home")) await ns.scp(migrationWorker, darkweb, "home");
             if (!options["disable-stock-promotion"] && ns.fileExists(stockWorker, "home")) await ns.scp(stockWorker, darkweb, "home");
             if (stormWorker && ns.fileExists(stormWorker, "home")) await ns.scp(stormWorker, darkweb, "home");
             if (stasis && ns.fileExists(stasis, "home")) await ns.scp(stasis, darkweb, "home");
             if (ns.fileExists("/Temp/stock-symbols.txt", "home")) await ns.scp("/Temp/stock-symbols.txt", darkweb, "home");
-            if (isRunning(ns, darkweb, worker)) {
+            const workerArgs = [
+                "--origin", "home",
+                "--dedicated-phishing",
+            ];
+            if (options["verbose-terminal"]) workerArgs.push("--verbose-terminal");
+            const runningWorker = findRunningProcess(ns, darkweb, worker);
+            if (runningWorker && phishingWorker && ns.fileExists(phishingWorker, darkweb) &&
+                !runningWorker.args.includes("--dedicated-phishing")) {
+                ns.kill(runningWorker.pid);
+                terminalLog(ns, options, `INFO: Restarting ${worker} on ${darkweb} to enable dedicated phishing.`);
+                await ns.sleep(100);
+            } else if (runningWorker) {
                 if (!loggedWorkerAlreadyRunning)
                     terminalLog(ns, options, `INFO: ${worker} is already running on ${darkweb}.`);
                 loggedWorkerAlreadyRunning = true;
@@ -78,10 +92,6 @@ export async function main(ns) {
                 await ns.sleep(interval);
                 continue;
             }
-            const workerArgs = [
-                "--origin", "home",
-            ];
-            if (options["verbose-terminal"]) workerArgs.push("--verbose-terminal");
             const pid = ns.exec(worker, darkweb, { threads: 1, preventDuplicates: true }, ...workerArgs);
             if (pid > 0) {
                 loggedWorkerAlreadyRunning = true;
@@ -144,7 +154,11 @@ async function launchHelperIfPossible(ns, options, host, script, args, loggedSta
 }
 
 function isRunning(ns, host, script) {
-    return ns.ps(host).some(process => process.filename === script || process.filename.endsWith(`/${script}`));
+    return findRunningProcess(ns, host, script) != null;
+}
+
+function findRunningProcess(ns, host, script) {
+    return ns.ps(host).find(process => process.filename === script || process.filename.endsWith(`/${script}`));
 }
 
 function formatError(error) {

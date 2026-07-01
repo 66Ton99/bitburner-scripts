@@ -19,6 +19,13 @@ const argsSchema = [
     ['money-focus', false], // Relay to hack.js to prioritize money and skip hack-XP kickstarts.
     ['initial-study-time', 10], // Seconds. Set to 0 to not do any studying at startup. By default, if early in an augmentation, will start with a little study to boost hack XP
     ['initial-hack-xp-time', 10], // Seconds. Set to 0 to not do any hack-xp grinding at startup. By default, if early in an augmentation, will start with a little study to boost hack XP
+    ['money-focus-max-loop-time', 5000], // Relay to hack.js for a larger money-focus scheduling pass budget.
+    ['money-focus-cycle-window-multiplier', 4], // Relay to hack.js for a bounded continuous money-focus batch pipeline.
+    ['money-focus-min-batches', 400], // Relay to hack.js for the best stabilized income/worker-overhead balance.
+    ['money-focus-initial-batches', 400], // Limit the initial per-target scheduling burst.
+    ['money-focus-max-top-up-batches-per-target', 50], // Bound rolling refill work per target and pass.
+    ['preserve-hacknet-servers', false], // Keep Hacknet server RAM free for hash production instead of money-focus batch workers.
+    ['money-focus-cycle-timing-delay', 100], // Relay to hack.js for high-throughput money-focus batch spacing.
 
     ['reserved-ram', 32], // Keep this much home RAM free when scheduling hack/grow/weaken cycles on home.
     ['double-reserve-threshold', 512], // in GB of RAM. Double our home RAM reserve once there is this much home max RAM.
@@ -63,9 +70,12 @@ const argsSchema = [
     ['initial-max-targets', undefined], // Initial number of servers to target / prep (default is 2 + 1 for every 500 TB of RAM on the network)
     ['cycle-timing-delay', 4000], // (ms) Length of a hack cycle. The smaller this is, the more batches (HWGW) we can schedule before the first cycle fires, but the greater the chance of a misfire
     ['queue-delay', 1000], // (ms) Delay before the first script begins, to give time for all scripts to be scheduled
+    ['money-focus-queue-delay', 5000], // Relay extra scheduling headroom for high-density money-focus batches.
     ['recovery-thread-padding', 1], // Multiply the number of grow/weaken threads needed by this amount to automatically recover more quickly from misfires.
     ['max-batches', 40], // Maximum overlapping cycles to schedule in advance. Note that once scheduled, we must wait for all batches to complete before we can schedule mor
+    ['money-focus-max-batches', 1200], // Relay to hack.js for higher money-focus batch density.
     ['max-steal-percentage', 0.75], // Don't steal more than this in case something goes wrong with timing or scheduling, it's hard to recover frome
+    ['money-focus-max-steal-percentage', 0.98], // Relay to hack.js for higher money-focus steal cap.
 
     ['looping-mode', false], // Set to true to attempt to schedule perpetually-looping tasks.
 
@@ -81,10 +91,12 @@ const argsSchema = [
 ];
 
 const hackForwardedOptionNames = new Set([
-    'xp-only', 'money-focus', 'initial-study-time', 'initial-hack-xp-time',
+    'xp-only', 'money-focus', 'initial-study-time', 'initial-hack-xp-time', 'money-focus-max-loop-time',
+    'money-focus-cycle-window-multiplier', 'money-focus-min-batches', 'money-focus-initial-batches',
+    'money-focus-max-top-up-batches-per-target', 'preserve-hacknet-servers', 'money-focus-cycle-timing-delay',
     'reserved-ram', 'double-reserve-threshold',
-    'initial-max-targets', 'cycle-timing-delay', 'queue-delay', 'recovery-thread-padding',
-    'max-batches', 'max-steal-percentage', 'looping-mode',
+    'initial-max-targets', 'cycle-timing-delay', 'queue-delay', 'money-focus-queue-delay', 'recovery-thread-padding',
+    'max-batches', 'money-focus-max-batches', 'max-steal-percentage', 'money-focus-max-steal-percentage', 'looping-mode',
     'i', 'silent-misfires', 'no-tail-windows', 'hack-only', 'verbose', 'run-once',
 ]);
 
@@ -757,7 +769,7 @@ export async function main(ns) {
                 {
                     name: "Tasks/darknet-manager.js",
                     args: () => !openTailWindows ? ['--no-tail-windows'] : [],
-                    shouldRun: () => !isMoneyFocusSpendingLocked() && options['casino-complete'] && !options['disable-darknet'] && reqRam(darknetMinHomeRam),
+                    shouldRun: () => options['casino-complete'] && !options['disable-darknet'] && reqRam(darknetMinHomeRam),
                     cooldownMs: 60 * 1000,
                     ignoreReservedRam: false,
                 },
