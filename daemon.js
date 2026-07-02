@@ -24,6 +24,7 @@ const argsSchema = [
     ['money-focus-min-batches', 400], // Relay to hack.js for the best stabilized income/worker-overhead balance.
     ['money-focus-initial-batches', 400], // Limit the initial per-target scheduling burst.
     ['money-focus-max-top-up-batches-per-target', 50], // Bound rolling refill work per target and pass.
+    ['money-focus-spare-xp-utilization', 0.85], // Fill safe residual RAM with weaken XP after money pipelines are healthy.
     ['preserve-hacknet-servers', false], // Keep Hacknet server RAM free for hash production instead of money-focus batch workers.
     ['money-focus-cycle-timing-delay', 100], // Relay to hack.js for high-throughput money-focus batch spacing.
 
@@ -93,7 +94,7 @@ const argsSchema = [
 const hackForwardedOptionNames = new Set([
     'xp-only', 'money-focus', 'initial-study-time', 'initial-hack-xp-time', 'money-focus-max-loop-time',
     'money-focus-cycle-window-multiplier', 'money-focus-min-batches', 'money-focus-initial-batches',
-    'money-focus-max-top-up-batches-per-target', 'preserve-hacknet-servers', 'money-focus-cycle-timing-delay',
+    'money-focus-max-top-up-batches-per-target', 'money-focus-spare-xp-utilization', 'preserve-hacknet-servers', 'money-focus-cycle-timing-delay',
     'reserved-ram', 'double-reserve-threshold',
     'initial-max-targets', 'cycle-timing-delay', 'queue-delay', 'money-focus-queue-delay', 'recovery-thread-padding',
     'max-batches', 'money-focus-max-batches', 'max-steal-percentage', 'money-focus-max-steal-percentage', 'looping-mode',

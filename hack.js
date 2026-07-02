@@ -22,6 +22,7 @@ const argsSchema = [
     ['money-focus-min-batches', 400], // Rolling lookahead cycles for --money-focus; longer queues did not improve stabilized realized income.
     ['money-focus-initial-batches', 400], // Limit the initial per-target burst; the rolling top-up fills the remaining lookahead gradually.
     ['money-focus-max-top-up-batches-per-target', 50], // Bound each target's refill work per coordinator pass.
+    ['money-focus-spare-xp-utilization', 0.85], // Fill otherwise-idle RAM with harmless weaken XP after all money pipelines are healthy.
     ['preserve-hacknet-servers', false], // Keep Hacknet server RAM unused to preserve hash production, even in --money-focus.
 
     ['reserved-ram', 32], // Keep this much home RAM free when scheduling hack/grow/weaken cycles on home.
@@ -100,6 +101,7 @@ export async function main(ns) {
     let moneyFocusMinBatches = 1;
     let moneyFocusInitialBatches = 1;
     let moneyFocusMaxTopUpBatchesPerTarget = 1;
+    let moneyFocusSpareXpUtilization = 0;
     let maxTargets = 0; // (Set in command line args) Initial value, will grow if there is an abundance of RAM
     let maxPreppingAtMaxTargets = 3; // The max servers we can prep when we're at our current max targets and have spare RAM
     // Allows some home ram to be reserved for ad-hoc terminal script running and when home is explicitly set as the "preferred server" for starting a helper
@@ -185,6 +187,7 @@ export async function main(ns) {
 
     let psCache = (/**@returns{{[serverName: string]: ProcessInfo[];}}*/() => ({}))();
     let nextMoneyFocusBatchStart = (/**@returns{{[serverName: string]: number;}}*/() => ({}))();
+    let nextMoneyFocusSpareXpEnd = 0;
     let lastObservedHackingIncome = null, lastObservedHackingIncomeTime = 0;
     /** PS can get expensive, and we use it a lot so we cache this for the duration of a loop
      * @param {NS} ns
@@ -273,6 +276,7 @@ export async function main(ns) {
         moneyFocusMinBatches = moneyFocus ? Math.max(1, options['money-focus-min-batches']) : 1;
         moneyFocusInitialBatches = moneyFocus ? Math.max(1, Math.min(moneyFocusMinBatches, options['money-focus-initial-batches'])) : 1;
         moneyFocusMaxTopUpBatchesPerTarget = moneyFocus ? Math.max(1, options['money-focus-max-top-up-batches-per-target']) : 1;
+        moneyFocusSpareXpUtilization = moneyFocus ? Math.min(0.9, Math.max(0, options['money-focus-spare-xp-utilization'])) : 0;
         const configuredCycleTimingDelay = options['cycle-timing-delay'];
         const cycleTimingDelayExplicit = ns.args.some(arg => arg === '--cycle-timing-delay');
         cycleTimingDelay = moneyFocus && !cycleTimingDelayExplicit && configuredCycleTimingDelay === 4000 ?
@@ -302,6 +306,9 @@ export async function main(ns) {
         if (moneyFocus)
             log(ns, `INFO: money-focus initial scheduling is capped at ${moneyFocusInitialBatches} batches/target and rolling top-up at ` +
                 `${moneyFocusMaxTopUpBatchesPerTarget} batches/target/pass.`);
+        if (moneyFocus && moneyFocusSpareXpUtilization > 0)
+            log(ns, `INFO: money-focus will fill healthy pipeline headroom to ${formatNumber(moneyFocusSpareXpUtilization * 100)}% RAM with weaken XP ` +
+                `(override with --money-focus-spare-xp-utilization; use 0 to disable).`);
         if (moneyFocus)
             log(ns, `INFO: money-focus rolling pipeline will keep approximately ${formatDuration(moneyFocusMinBatches * cycleTimingDelay)} of batches queued per target.`);
         if (moneyFocus && !preserveHacknetServers)
@@ -748,6 +755,10 @@ export async function main(ns) {
                         targeting.push(server);
                         skipped.splice(skipped.findIndex(s => s.name == server.name), 1);
                     }
+                } else if (moneyFocus && moneyFocusSpareXpUtilization > 0 && !isWorkCapped() &&
+                    targeting.length === maxPossibleTargets && prepping.length === 0 && cantHackButPrepping.length === 0 &&
+                    moneyFocusTopUpScheduled === moneyFocusTopUpRequested) {
+                    await farmMoneyFocusSpareXp(ns, utilizationPercent);
                 } else if (!moneyFocus && !isWorkCapped() && lowUtilizationIterations > 10) {
                     let expectedRunTime = getBestXPFarmTarget().timeToHack();
                     let freeRamToUse = (expectedRunTime < loopInterval) ? // If expected runtime is fast, use as much RAM as we want, it'll all be free by our next loop.
@@ -780,6 +791,9 @@ export async function main(ns) {
                     if (moneyFocus) {
                         const activeBatchWorkers = allHostNames.reduce((total, hostName) => total +
                             processList(ns, hostName).filter(process => String(process.args?.[3] || '').startsWith('Batch')).length, 0);
+                        const activeSpareXpThreads = allHostNames.reduce((total, hostName) => total +
+                            processList(ns, hostName).filter(process => process.args?.[3] === 'weakenForXp')
+                                .reduce((threads, process) => threads + (Number(process.threads) || 0), 0), 0);
                         const scriptIncome = ns.getTotalScriptIncome()[0];
                         const observedAt = Date.now();
                         const hackingIncome = ns.getMoneySources()?.sinceInstall?.hacking ?? 0;
@@ -789,6 +803,7 @@ export async function main(ns) {
                         lastObservedHackingIncomeTime = observedAt;
                         moneyFocusDiagnostics = `\n > Rolling Top-up: ${moneyFocusTopUpScheduled}/${moneyFocusTopUpRequested} batches ` +
                             `across ${moneyFocusTopUpTargets} targets; Active Batch Workers: ${activeBatchWorkers}; ` +
+                            `Spare XP: ${formatNumber(activeSpareXpThreads)} threads; ` +
                             `Script Income: ${formatMoney(scriptIncome, 3, 1)}/sec; ` +
                             `Observed Hacking: ${observedHackingRate == null ? 'measuring...' : `${formatMoney(observedHackingRate, 3, 1)}/sec`}`;
                     }
@@ -1627,6 +1642,32 @@ export async function main(ns) {
     /** @returns {Server} The best server to target for Hack Exp */
     function getBestXPFarmTarget() {
         return getXPFarmTargetsByExp()[0];
+    }
+
+    /** Fill genuinely spare money-focus RAM with weaken-only XP without changing target money or security. */
+    async function farmMoneyFocusSpareXp(ns, currentUtilization) {
+        if (Date.now() < nextMoneyFocusSpareXpEnd - 1000 || currentUtilization >= moneyFocusSpareXpUtilization)
+            return;
+        const target = getBestXPFarmTarget();
+        if (!target || await target.isXpFarming(false))
+            return;
+        const fractionOfFreeRam = Math.min(1, Math.max(0,
+            (moneyFocusSpareXpUtilization - currentUtilization) / Math.max(0.000001, 1 - currentUtilization)));
+        const weakTool = getTool('weak');
+        const threads = Math.floor((weakTool.getMaxThreads(true) * fractionOfFreeRam).toPrecision(14));
+        if (threads <= 0)
+            return;
+        const startTime = Date.now() + queueDelay;
+        const duration = target.timeToWeaken();
+        const success = await arbitraryExecution(ns, weakTool, threads,
+            [target.name, startTime, duration, 'weakenForXp', ...getFlagsArgs('weak', target.name, false, true)],
+            null, true, true);
+        if (success) {
+            nextMoneyFocusSpareXpEnd = startTime + duration;
+            if (verbose)
+                log(ns, `INFO: Scheduled ${formatNumber(threads)} spare weaken-XP threads against ${target.name}; ` +
+                    `target RAM utilization ${formatNumber(moneyFocusSpareXpUtilization * 100)}%, ETA ${formatDuration(queueDelay + duration)}.`);
+        }
     }
 
     let singleServerLimit = 0; // If prior cycles failed to be scheduled, force one additional server into single-server mode until we aqcuire more RAM
