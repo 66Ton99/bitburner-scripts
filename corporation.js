@@ -28,7 +28,7 @@ const upgrades = ['Smart Factories', 'Smart Storage', 'Wilson Analytics', 'Nuopt
 const cities = ['Aevum', 'Chongqing', 'Sector-12', 'New Tokyo', 'Ishima', 'Volhaven'];
 const hqCity = 'Aevum'; // Our production industries will need a headquarters. It doesn't matter which city we use, AFAICT.
 const jobs = ['Operations', 'Engineer', 'Research & Development', 'Management', 'Business']; // Interns are deliberately excluded from production assignments.
-const industryAliases = { RealEstate: 'Real Estate', Computer: 'Computer Hardware', Food: 'Restaurant', Utilities: 'Water Utilities' };
+const industryAliases = { Agriculture: 'Agriculture', RealEstate: 'Real Estate', Computer: 'Computer Hardware', Food: 'Restaurant', Utilities: 'Water Utilities' };
 const employeeWellnessThreshold = 0.9995;
 const commonResearchPlan = [
     'Hi-Tech R&D Laboratory',
