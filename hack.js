@@ -22,7 +22,7 @@ const argsSchema = [
     ['money-focus-min-batches', 400], // Rolling lookahead cycles for --money-focus; longer queues did not improve stabilized realized income.
     ['money-focus-initial-batches', 400], // Limit the initial per-target burst; the rolling top-up fills the remaining lookahead gradually.
     ['money-focus-max-top-up-batches-per-target', 50], // Bound each target's refill work per coordinator pass.
-    ['money-focus-spare-xp-utilization', 0.85], // Fill otherwise-idle RAM with harmless weaken XP after all money pipelines are healthy.
+    ['money-focus-spare-xp-utilization', 0.98], // Fill otherwise-idle RAM with harmless weaken XP after all money pipelines are healthy.
     ['preserve-hacknet-servers', false], // Keep Hacknet server RAM unused to preserve hash production, even in --money-focus.
 
     ['reserved-ram', 32], // Keep this much home RAM free when scheduling hack/grow/weaken cycles on home.
@@ -102,6 +102,8 @@ export async function main(ns) {
     let moneyFocusInitialBatches = 1;
     let moneyFocusMaxTopUpBatchesPerTarget = 1;
     let moneyFocusSpareXpUtilization = 0;
+    let moneyFocusSpareXpEffectiveUtilization = 0;
+    let moneyFocusSpareXpSafeCeiling = 0;
     let maxTargets = 0; // (Set in command line args) Initial value, will grow if there is an abundance of RAM
     let maxPreppingAtMaxTargets = 3; // The max servers we can prep when we're at our current max targets and have spare RAM
     // Allows some home ram to be reserved for ad-hoc terminal script running and when home is explicitly set as the "preferred server" for starting a helper
@@ -188,6 +190,8 @@ export async function main(ns) {
     let psCache = (/**@returns{{[serverName: string]: ProcessInfo[];}}*/() => ({}))();
     let nextMoneyFocusBatchStart = (/**@returns{{[serverName: string]: number;}}*/() => ({}))();
     let nextMoneyFocusSpareXpEnd = 0;
+    let moneyFocusSpareXpWorkersMayExist = true; // Also detect workers left behind by a previous hack.js instance.
+    let moneyFocusSpareXpResumeAfter = 0;
     let lastObservedHackingIncome = null, lastObservedHackingIncomeTime = 0;
     /** PS can get expensive, and we use it a lot so we cache this for the duration of a loop
      * @param {NS} ns
@@ -276,7 +280,9 @@ export async function main(ns) {
         moneyFocusMinBatches = moneyFocus ? Math.max(1, options['money-focus-min-batches']) : 1;
         moneyFocusInitialBatches = moneyFocus ? Math.max(1, Math.min(moneyFocusMinBatches, options['money-focus-initial-batches'])) : 1;
         moneyFocusMaxTopUpBatchesPerTarget = moneyFocus ? Math.max(1, options['money-focus-max-top-up-batches-per-target']) : 1;
-        moneyFocusSpareXpUtilization = moneyFocus ? Math.min(0.9, Math.max(0, options['money-focus-spare-xp-utilization'])) : 0;
+        moneyFocusSpareXpUtilization = moneyFocus ? Math.min(0.99, Math.max(0, options['money-focus-spare-xp-utilization'])) : 0;
+        moneyFocusSpareXpSafeCeiling = moneyFocusSpareXpUtilization;
+        moneyFocusSpareXpEffectiveUtilization = moneyFocusSpareXpSafeCeiling;
         const configuredCycleTimingDelay = options['cycle-timing-delay'];
         const cycleTimingDelayExplicit = ns.args.some(arg => arg === '--cycle-timing-delay');
         cycleTimingDelay = moneyFocus && !cycleTimingDelayExplicit && configuredCycleTimingDelay === 4000 ?
@@ -307,7 +313,10 @@ export async function main(ns) {
             log(ns, `INFO: money-focus initial scheduling is capped at ${moneyFocusInitialBatches} batches/target and rolling top-up at ` +
                 `${moneyFocusMaxTopUpBatchesPerTarget} batches/target/pass.`);
         if (moneyFocus && moneyFocusSpareXpUtilization > 0)
-            log(ns, `INFO: money-focus will fill healthy pipeline headroom to ${formatNumber(moneyFocusSpareXpUtilization * 100)}% RAM with weaken XP ` +
+            log(ns, `INFO: money-focus will fill healthy pipeline headroom to ` +
+                `${formatNumber(moneyFocusSpareXpEffectiveUtilization * 100)}% RAM with weaken XP` +
+                `${moneyFocusSpareXpUtilization > moneyFocusSpareXpEffectiveUtilization ?
+                    ` (requested ${formatNumber(moneyFocusSpareXpUtilization * 100)}%; capped for money-pipeline headroom)` : ''} ` +
                 `(override with --money-focus-spare-xp-utilization; use 0 to disable).`);
         if (moneyFocus)
             log(ns, `INFO: money-focus rolling pipeline will keep approximately ${formatDuration(moneyFocusMinBatches * cycleTimingDelay)} of batches queued per target.`);
@@ -570,16 +579,17 @@ export async function main(ns) {
                 const n = (/**@returns{Server[]}*/() => []); // Trick to initialize new arrays with a strong type
                 const prepping = n(), preppedButNotTargeting = n(), targeting = n(), notRooted = n(), cantHack = n(),
                     cantHackButPrepped = n(), cantHackButPrepping = n(), noMoney = n(), failed = n(), skipped = n();
+                const inefficientMoneyTargets = n();
                 let moneyFocusTopUpRequested = 0, moneyFocusTopUpScheduled = 0, moneyFocusTopUpTargets = 0;
                 let lowestUnhackable = 99999;
-                let maxPossibleTargets = targetingOrder.filter(s => s.shouldHack()).length;
+                let maxPossibleTargets = targetingOrder.filter(s => isViableMoneyTarget(s)).length;
 
                 // Hack: We can get stuck and never improve if we don't try to prep at least one server to improve our future targeting options.
                 // So get the first un-prepped server that is within our hacking level, and move it to the front of the list.
                 let firstUnpreppedServerIndex = -1;
                 for (let i = 0; i < targetingOrder.length; i++) {
                     const s = targetingOrder[i];
-                    if (s.shouldHack() && s.canHack() && !s.isPrepped() && !(await s.isTargeting())) {
+                    if (isViableMoneyTarget(s) && s.canHack() && !s.isPrepped() && !(await s.isTargeting())) {
                         firstUnpreppedServerIndex = i; // Note: Can't use array.findIndex due to await.
                         break;
                     }
@@ -610,9 +620,21 @@ export async function main(ns) {
                     if (!server.hasRoot() && server.canCrack())
                         await doRoot(ns, server);
 
+                    // Spare XP is disposable. As soon as any hackable money target loses its pipeline,
+                    // release that RAM before attempting prep or re-optimizing its batch size.
+                    const viableMoneyTarget = isViableMoneyTarget(server);
+                    const serverIsTargeting = viableMoneyTarget && server.hasRoot() && server.canHack() ?
+                        await server.isTargeting() : false;
+                    if (moneyFocus && viableMoneyTarget && server.hasRoot() && server.canHack() && !serverIsTargeting)
+                        await stopMoneyFocusSpareXp(ns, `${server.name} needs its money pipeline restored`);
+
                     // Check whether we can / should attempt any actions on this server
                     if (!server.shouldHack()) { // Ignore servers we own (bought servers / home / no money)
                         noMoney.push(server);
+                    } else if (!viableMoneyTarget) {
+                        // One hack thread already violates the configured steal cap. Hacking to zero and rebuilding
+                        // is disproportionately RAM-heavy and contributes negligible money on these tiny targets.
+                        inefficientMoneyTargets.push(server);
                     } else if (!server.hasRoot()) { // Can't do anything to servers we have not yet cracked
                         notRooted.push(server);
                     } else if (!server.canHack()) { // Note servers above our Hack skill. We can prep them a little if we have spare RAM at the end.
@@ -623,7 +645,7 @@ export async function main(ns) {
                             cantHackButPrepped.push(server);
                         else if (await server.isPrepping())
                             cantHackButPrepping.push(server);
-                    } else if (await server.isTargeting()) { // Note servers already being targeted from a prior loop
+                    } else if (serverIsTargeting) { // Note servers already being targeted from a prior loop
                         if (moneyFocus) {
                             const topUpResult = await topUpMoneyFocusPipeline(ns, server);
                             moneyFocusTopUpRequested += topUpResult.requested;
@@ -771,6 +793,9 @@ export async function main(ns) {
                 let keyUpdates = `Of ${allHostNames.length} total servers:\n > ${noMoney.length} were ignored (owned or no money)`;
                 if (notRooted.length > 0 || ownedCracks.length < 5)
                     keyUpdates += `, ${notRooted.length} are not rooted (missing ${crackNames.filter(c => !ownedCracks.includes(c)).join(', ')})`;
+                if (inefficientMoneyTargets.length > 0)
+                    keyUpdates += `\n > ${inefficientMoneyTargets.length} money targets skipped because one hack thread exceeds the ` +
+                        `${formatNumber(maxStealPercentage * 100)}% steal cap`;
                 if (cantHack.length > 0)
                     keyUpdates += `\n > ${cantHack.length} cannot be hacked (${cantHackButPrepping.length} prepping, ` +
                         `${cantHackButPrepped.length} prepped, next unlock at Hack ${lowestUnhackable})`;
@@ -803,7 +828,8 @@ export async function main(ns) {
                         lastObservedHackingIncomeTime = observedAt;
                         moneyFocusDiagnostics = `\n > Rolling Top-up: ${moneyFocusTopUpScheduled}/${moneyFocusTopUpRequested} batches ` +
                             `across ${moneyFocusTopUpTargets} targets; Active Batch Workers: ${activeBatchWorkers}; ` +
-                            `Spare XP: ${formatNumber(activeSpareXpThreads)} threads; ` +
+                            `Spare XP: ${formatNumber(activeSpareXpThreads)} threads @ ` +
+                            `${formatNumber(moneyFocusSpareXpEffectiveUtilization * 100)}% RAM target; ` +
                             `Script Income: ${formatMoney(scriptIncome, 3, 1)}/sec; ` +
                             `Observed Hacking: ${observedHackingRate == null ? 'measuring...' : `${formatMoney(observedHackingRate, 3, 1)}/sec`}`;
                     }
@@ -1315,10 +1341,22 @@ export async function main(ns) {
         const batchesNeeded = Math.min(maxBatches, Math.max(0, Math.ceil((desiredQueueEnd - nextBatchStart) / cycleTimingDelay)));
         if (batchesNeeded === 0)
             return { requested: 0, scheduled: 0 };
-        const snapshot = getPerformanceSnapshot(currentTarget, getNetworkStats());
+        if (currentTarget.getHackThreadsNeeded() <= 0) {
+            await stopMoneyFocusSpareXp(ns, `${currentTarget.name} was reduced to an empty money batch`);
+            const percentPerHackThread = currentTarget.percentageStolenPerHackThread();
+            if (percentPerHackThread > 0) {
+                currentTarget.percentageToSteal = percentPerHackThread >= 1 ? 1 : Math.min(maxStealPercentage, percentPerHackThread);
+                optimizePerformanceMetrics(ns, currentTarget);
+            }
+        }
+        let snapshot = getPerformanceSnapshot(currentTarget, getNetworkStats());
+        const desiredThisPass = Math.min(batchesNeeded, moneyFocusMaxTopUpBatchesPerTarget);
+        if ((!snapshot.canBeScheduled || snapshot.maxCompleteCycles < desiredThisPass) &&
+            await stopMoneyFocusSpareXp(ns, `${currentTarget.name} needs money-pipeline top-up RAM`))
+            snapshot = getPerformanceSnapshot(currentTarget, getNetworkStats());
         if (!snapshot.canBeScheduled || snapshot.maxCompleteCycles <= 0)
             return { requested: batchesNeeded, scheduled: 0 };
-        const batchesToSchedule = Math.min(batchesNeeded, snapshot.maxCompleteCycles, moneyFocusMaxTopUpBatchesPerTarget);
+        const batchesToSchedule = Math.min(desiredThisPass, snapshot.maxCompleteCycles);
         const succeeded = await performScheduling(ns, currentTarget, snapshot, batchesToSchedule, Math.max(nextBatchStart, Date.now() + queueDelay));
         return { requested: batchesNeeded, scheduled: succeeded === true ? batchesToSchedule : 0 };
     }
@@ -1644,15 +1682,25 @@ export async function main(ns) {
         return getXPFarmTargetsByExp()[0];
     }
 
+    /** A money batch must contain at least one hack thread without violating the configured steal cap. */
+    function isViableMoneyTarget(server) {
+        return server.shouldHack() && (!moneyFocus || server.percentageStolenPerHackThread() <= maxStealPercentage);
+    }
+
     /** Fill genuinely spare money-focus RAM with weaken-only XP without changing target money or security. */
     async function farmMoneyFocusSpareXp(ns, currentUtilization) {
-        if (Date.now() < nextMoneyFocusSpareXpEnd - 1000 || currentUtilization >= moneyFocusSpareXpUtilization)
+        const now = Date.now();
+        if (now < moneyFocusSpareXpResumeAfter || now < nextMoneyFocusSpareXpEnd - 1000 ||
+            currentUtilization >= moneyFocusSpareXpEffectiveUtilization)
             return;
         const target = getBestXPFarmTarget();
         if (!target || await target.isXpFarming(false))
             return;
+        if (nextMoneyFocusSpareXpEnd > 0 && now >= nextMoneyFocusSpareXpEnd - 1000)
+            moneyFocusSpareXpEffectiveUtilization = Math.min(moneyFocusSpareXpUtilization, moneyFocusSpareXpSafeCeiling,
+                moneyFocusSpareXpEffectiveUtilization + 0.005);
         const fractionOfFreeRam = Math.min(1, Math.max(0,
-            (moneyFocusSpareXpUtilization - currentUtilization) / Math.max(0.000001, 1 - currentUtilization)));
+            (moneyFocusSpareXpEffectiveUtilization - currentUtilization) / Math.max(0.000001, 1 - currentUtilization)));
         const weakTool = getTool('weak');
         const threads = Math.floor((weakTool.getMaxThreads(true) * fractionOfFreeRam).toPrecision(14));
         if (threads <= 0)
@@ -1664,10 +1712,41 @@ export async function main(ns) {
             null, true, true);
         if (success) {
             nextMoneyFocusSpareXpEnd = startTime + duration;
+            moneyFocusSpareXpWorkersMayExist = true;
             if (verbose)
                 log(ns, `INFO: Scheduled ${formatNumber(threads)} spare weaken-XP threads against ${target.name}; ` +
-                    `target RAM utilization ${formatNumber(moneyFocusSpareXpUtilization * 100)}%, ETA ${formatDuration(queueDelay + duration)}.`);
+                    `target RAM utilization ${formatNumber(moneyFocusSpareXpEffectiveUtilization * 100)}% ` +
+                    `(requested ${formatNumber(moneyFocusSpareXpUtilization * 100)}%), ETA ${formatDuration(queueDelay + duration)}.`);
         }
+    }
+
+    /** Stop disposable weaken-XP workers whenever money scheduling needs their RAM. */
+    async function stopMoneyFocusSpareXp(ns, reason) {
+        if (!moneyFocusSpareXpWorkersMayExist)
+            return false;
+        const processIds = allHostNames.flatMap(hostName => processList(ns, hostName, false)
+            .filter(process => process.args?.[3] === 'weakenForXp')
+            .map(process => process.pid));
+        if (processIds.length === 0) {
+            nextMoneyFocusSpareXpEnd = 0;
+            moneyFocusSpareXpWorkersMayExist = false;
+            return false;
+        }
+        const killPid = await killProcessIds(ns, processIds);
+        if (killPid)
+            await waitForProcessToComplete_Custom(ns, getHomeProcIsAlive(ns), killPid);
+        await ns.sleep(20);
+        psCache = {};
+        nextMoneyFocusSpareXpEnd = 0;
+        moneyFocusSpareXpWorkersMayExist = false;
+        const utilizationAfterRelease = getTotalNetworkUtilization();
+        moneyFocusSpareXpSafeCeiling = Math.min(moneyFocusSpareXpSafeCeiling,
+            Math.max(utilizationAfterRelease + 0.02, moneyFocusSpareXpEffectiveUtilization - 0.02));
+        moneyFocusSpareXpEffectiveUtilization = moneyFocusSpareXpSafeCeiling;
+        moneyFocusSpareXpResumeAfter = Date.now() + Math.max(10000, queueDelay * 2);
+        log(ns, `INFO: Released ${processIds.length} spare weaken-XP worker(s): ${reason}. ` +
+            `Backing off the safe XP RAM ceiling to ${formatNumber(moneyFocusSpareXpSafeCeiling * 100)}%.`);
+        return true;
     }
 
     let singleServerLimit = 0; // If prior cycles failed to be scheduled, force one additional server into single-server mode until we aqcuire more RAM
