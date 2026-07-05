@@ -1,390 +1,132 @@
 # AGENTS.md
 
-Project-specific guidance for coding agents working in `bitburner-scripts`.
+Project guidance for coding agents in `bitburner-scripts`.
 
-## Scope
+## Core Rules
 
-- Prefer minimal, targeted patches.
-- Preserve the existing script-oriented architecture and Bitburner conventions.
-- Do not rewrite working subsystems just to “clean them up”.
+- Reply to the user in Ukrainian. Keep responses concise and direct.
+- Prefer minimal, targeted patches; preserve the script-oriented Bitburner architecture and do not rewrite working subsystems for cleanup alone.
+- Verify behavior, state, and root cause from code or runtime evidence before changing anything. Favor pragmatic fixes over theoretical refactors.
+- Use `apply_patch` for file edits. After JS edits, run `node --check` on each edited script.
+- Update this file when a durable runtime incident or user preference creates a reusable rule; remove stale or contradictory guidance.
+- Add compatibility wrappers for Bitburner API changes. For dnet server details, probe `dnet.getServerDetails()` / `dnet.getServer()` before older `dnet.getServerAuthDetails()`.
+- `getConfiguration()` must preserve explicit booleans: `--flag false` stays false.
+- Dev-console logs are for debugging only: emit while DevTools is detected open, default gap threshold `800`, configurable via `window.bbDevConsoleGapThreshold`. `run dev-console.js --status` must show version marker, outer/inner sizes, gaps, threshold, and active state.
+- Browser console helpers write to `window.console` first, then `globalThis.console`. Keep infiltration diagnostics behind explicit flags, keep `infiltrate.js` debug off by default, and never disable infiltration `logError`.
+- Use Bitburner 3.0 APIs: `ns.format.time(...)`, `has4SDataTixApi()`, gym enum values `str`/`def`/`dex`/`agi`. Avoid enumerating full `ns.getServer()` objects because deprecated properties can warn.
 
-## User Preferences
+## Architecture And RAM
 
-- Keep responses concise and direct.
-- Do not make assumptions. Verify behavior, state, and root cause from code or runtime evidence before changing anything.
-- Use `apply_patch` for file edits.
-- Favor pragmatic fixes over theoretical refactors.
-- Do real runtime verification, not just static checks.
-- When Bitburner API breaking changes rename functions or make return properties optional, add a small compatibility wrapper instead of assuming only one runtime version. In particular, probe current dnet server detail APIs such as `dnet.getServerDetails()` / `dnet.getServer()` before falling back to older `dnet.getServerAuthDetails()` while supported.
-- Add useful dev-console logs when debugging UI automation.
-- Browser dev-console logging should emit only while browser DevTools is detected open. Use a conservative default gap threshold, currently 800, so closed-console false positives do not accumulate logs; allow tuning via `window.bbDevConsoleGapThreshold`. `run dev-console.js --status` must show a version marker, outer/inner window sizes, size gaps, detection threshold, and active state so console-detection issues are easy to debug.
-- Browser dev-console helpers should write to `window.console` first and only fall back to `globalThis.console`; Netscript script contexts may not route `globalThis.console` to the visible browser DEV console.
-- Short infiltration status logs may go to the browser dev console while DevTools is detected open; keep detailed infiltration diagnostics behind explicit debug flags.
-- Keep `infiltrate.js` debug logging optional and disabled by default.
-- Do not disable `logError` in infiltration automation; error logging stays on.
-- When a runtime incident reveals a durable project rule or user preference, update `AGENTS.md` in the same change unless the user says not to.
-- Keep these notes current: remove or amend stale guidance when behavior changes, rather than accumulating contradictory rules.
-- `getConfiguration()` should honor explicit boolean values: `--flag false` must remain false instead of being coerced to true merely because the flag is present.
-- In `hack.js`, `--no-tail-windows false` should open exactly one coordinator tail. Do not open tails for individual high-density remote batch workers.
-- When `gangs.js` is money-focused, do not randomly idle the entire gang for training. Crime tasks already provide relevant experience; keep only the mandatory rebuild training for newly recruited or ascended members.
+- Ownership boundaries: `autopilot.js` orchestrates handoffs; `daemon.js` owns RAM-gated managed launches; `hack.js` owns hacking/rooting/port-cracker state; `faction-manager.js` owns augmentation purchase/install policy; `work-for-factions.js` owns faction work/training/infiltration orchestration; `infiltration-runner.js` executes one explicit infiltration run.
+- `autopilot.js` must not own augmentation decisions or directly launch long-running background systems after casino/pre-casino handoffs. It launches/relaunches `daemon.js` with explicit intent.
+- `daemon.js` manages stockmaster, sleeves, corporation, darknet, grafting, gangs, faction work, hash spending, and hacking. It preserves home RAM for temp-helper bursts and passes the same reserve to `hack.js`.
+- `hack.js` stays a dedicated hacking runner. Do not keep stock manipulation, hacknet-server mode, share scheduling, daemon orchestration flags, or broad helper launches there.
+- Leaf scripts should not duplicate daemon RAM policy with local low-free-RAM fallbacks unless there is a concrete runtime reason.
+- Daemon logs stay concise; verbose helper chatter belongs behind `--verbose`. Daemon tail windows are opt-in with `--tail-windows`; broad helper tails stay off. `work-for-factions.js` may keep its work/focus tail, and daemon-launched `bladeburner.js` should show its tail with work-tail placement.
+- Version temp-helper output filenames whenever generated inline commands change, especially in `autopilot.js` and `Tasks/contractor.js`.
+- On fresh 8GB starts, avoid temp helpers for cheap reads. Use direct `ns.getResetInfo`, `getServerMaxRam`, `getServerUsedRam`, `getPlayer`, `getMoneySources`, `scan`, `ps`, `hasRootAccess`, and world-daemon checks when cheaper.
+- `autopilot.js` has low `ramOverride`; avoid direct expensive Singularity purchase APIs after worker orchestration. Use guarded helpers or early spawn handoffs. `spawn-handoff.js` needs about 3.6GB in DEV 3.0.
+- Gate Singularity on actual cheap call availability, not Source-File metadata or optional helper success. Pass `--singularity-confirmed` to children when known; faction work exits quietly if Singularity is unavailable.
+- `autopilot.js` discovers managed children across all servers via direct `ns.ps(server)`, throttles short-lived dispatcher relaunches, and prints a startup version/sync marker. `work-for-factions.js` should print one when diagnosing launch behavior.
+- After casino and before workers, when Singularity is available, buy bootstrap items: home RAM target, TOR, and port crackers. Confirm TOR with `ns.hasTorRouter()`, not `purchaseTor()` return.
 
-## Infiltration Rules
+## Infiltration And Casino
 
-- Infiltration orchestration belongs in `work-for-factions.js` and `infiltration-runner.js`.
-- If changing infiltration behavior, prefer explicit parameters and small isolated helpers/scripts.
-- When debugging repeated infiltration retries, log the concrete failure reason, not just the selected target.
-- Short faction infiltration target logs should include approximate ETA along with remaining reputation, rep/run, and run count.
-- Infiltration ETA should prefer observed successful run durations for the same company/location over static difficulty estimates, because static clearance-level estimates can be substantially wrong.
-- Do not switch infiltration companies merely because a run ended in hospitalization. Treat hospitalization as a retryable execution failure for the same selected target; only travel/timeouts/reward-claim problems should temporarily cool down a target.
-- Treat `go-to-location-failed` as a location/navigation failure, not as hospitalization. Do not switch companies just because the runner failed to click the location page; retry the same selected target after direct Singularity location navigation from `work-for-factions.js`, and keep dev-console status deduplicated.
-- Treat `start-failed`, `infiltrate.js-start-failed`, `direct-go-to-location-failed`, `grafting-active`, `missing-result`, and runner launch failures as sticky retry failures for the selected infiltration company. Do not let normal target re-sorting switch to another company for these reasons while the original target is still reachable.
-- For faction reputation infiltration, never downgrade to a lower `tradeRep` company merely because the best company had a recent travel/start/location failure. Retry or wait for the best reachable/highest-reward target instead; cooldowns may still apply to money-only infiltration fallback.
-- In the normal faction/money automation flow, handle city travel in `work-for-factions.js` before launching `infiltration-runner.js`, then call the runner with travel disabled.
-- `work-for-factions.js` must not pass `--allow-travel` to `infiltration-runner.js` in the normal Singularity flow. If the player is unexpectedly in the wrong city before launch, re-run direct Singularity travel in `work-for-factions.js` and return `direct-travel-failed` if that fails.
-- If `GRAFTING` is active, faction infiltration should pause instead of trying to open company locations or start background gym training. Do not stop grafting for infiltration, except in BN3 where The Red Pill/faction progression has priority and active grafting may be treated as background instead of blocking infiltration.
-- When `GRAFTING` pauses infiltration, do not keep printing changing `target ... travel ...` dev-console lines every loop. Log one concise paused status for the sticky target and wait.
-- After normal `work-for-factions.js` infiltration attempts, check player HP and use `ns.singularity.hospitalize()` if HP is below max. Guard the call with the game's hospital cost formula and skip healing if cash is negative or the estimated cost would exceed available cash.
-- Prefer a local infiltration target that can finish the remaining faction reputation in one run over unnecessary travel to a slightly better remote target.
-- When multiple feasible infiltration targets can finish the remaining faction reputation in one run, choose the fastest/simplest sufficient target instead of the fattest rep/run target. Do not spend a long high-clearance company run to earn only a few thousand missing rep.
-- Use `Departure from ...` and `Arrived from ...` wording for travel logs to avoid duplicate-looking messages.
-- Remove dead infiltration helper code from `work-for-factions.js` when that logic has been moved into `infiltration-runner.js`; do not keep parallel stale implementations.
-- Keep `Shadows of Anarchy` immediately after `Sector-12` in the default faction queue so it is joined early, but never target it directly for faction work or infiltration rewards. It gains reputation passively from successful infiltration done for other targets.
+- Infiltration code belongs only in `work-for-factions.js` and `infiltration-runner.js`; use explicit parameters and remove stale parallel helpers.
+- Retry logs include concrete failure reasons. Short faction target logs include ETA, remaining rep, rep/run, and run count. ETA prefers observed successful durations per location over static difficulty.
+- Hospitalization is retryable for the same target. `go-to-location-failed` is navigation failure, not hospitalization.
+- Sticky failures for the selected company include `start-failed`, `infiltrate.js-start-failed`, `direct-go-to-location-failed`, `grafting-active`, `missing-result`, and runner launch failures. Do not switch companies while the sticky target is reachable.
+- For faction reputation, never downgrade to lower `tradeRep` because the best target had travel/start/location trouble. Cooldowns may apply only to money fallback.
+- Normal Singularity flow handles city travel in `work-for-factions.js`, then launches `infiltration-runner.js` with travel disabled. Do not pass `--allow-travel`; if city is wrong, rerun direct travel and return `direct-travel-failed` on failure.
+- If `GRAFTING` is active, pause faction infiltration instead of opening locations or starting gym training, except BN3 TRP/faction progression may treat grafting as background. Log one concise paused status for the sticky target.
+- After normal infiltration attempts, hospitalize if HP is below max and the estimated cost is affordable.
+- Prefer a local target that can finish remaining faction rep in one run. Among sufficient one-run targets, choose fastest/simplest, not maximum rep/run. Use `Departure from ...` and `Arrived from ...` for travel logs.
+- Keep `Shadows of Anarchy` immediately after `Sector-12` in the default faction queue, but never target it directly for work/rewards. For SoA progression, only `SoA - phyzical WKS harmonizer` is a target augmentation.
+- Before the first casino run, if cash is below travel/seed threshold, `autopilot.js` may launch exactly one direct `Joe's Guns` cash `infiltration-runner.js`. Do not start daemon, faction work, grafting, stockmaster, or other fallbacks first.
+- Pre-casino runner path is 8GB-safe and standalone: no `helpers.js`, no `ns.getPlayer()`, no `ns.singularity.*`, no temp helpers for DOM/UI/infiltrate control. Retry stale/failed results, stop `infiltrate.js`, clear modals, repeatedly dismiss `Decide later`, then `ns.spawn(...)` completion scripts. For Joe's Guns, hand off directly to `casino.js --game roulette`.
+- `casino.js` stays a lightweight dispatcher and `ns.spawn(...)`s the selected game. `casino-roulette.js` also uses `ns.spawn(...)` for completion handoff.
+- Decide casino vs workers immediately from cash, casino history, net worth, and launch constraints; do not wait for an arbitrary income baseline.
+- Casino automation must not intentionally exceed `$10b` from `sinceInstall.casino`; skip once that cap or current cash/net worth makes casino useless. Casino games, including roulette/blackjack, cap per-round bets so a likely win does not cross it.
+- On low-RAM first casino runs, spawn `casino.js --game roulette`, not roulette directly. `autopilot.js` cleans RAM before casino; `casino.js` does not.
+- Casino scripts close faction invite modals before timeout/kickout handling and completion handoff. Completion state survives `ns.spawn(autopilot.js)`. Shared casino helpers must not directly reference `ns.singularity.*`.
 
-## Reputation / Augmentation Rules
+## Augmentations, Reserves, And Stocks
 
-- `NeuroFlux Governor` must not be treated as a normal target augmentation for faction progression calculations.
-- `NeuroFlux Governor` is a low-priority cash sink. Do not let it compete with concrete strategic goals such as BN10 Covenant sleeves/memory, The Red Pill, or other progression blockers.
-- `NeuroFlux Governor` should only be purchased with leftover cash after all concrete desired/priority non-NeuroFlux augmentation goals are included in the current purchase order. It must be appended after those goals and dropped first if the real spendable budget shrinks.
-- When `faction-manager.js --manage-installs` has already decided to install the current batch, append any additional affordable concrete non-NeuroFlux augmentations that fit the remaining budget, then append affordable `NeuroFlux Governor` levels as leftover spend before the install handoff instead of resetting with large unused cash.
-- Install-batch top-up affordability must be computed from the normalized final purchase order, not from a marginal `price * augCountMult ** currentLength` estimate on a stale order. Reordering expensive augmentations earlier can materially change the final batch cost, so candidate checks should compare full recomputed `computeCosts(normalizePurchaseOrderPrereqs([...batch, candidate]))` against the cash+stocks budget.
-- If `work-for-factions.js` is actively grinding or has just completed reputation toward a concrete non-NeuroFlux target augmentation that can still fit the current cash+stocks purchase budget, `faction-manager.js` must delay buying/installing augmentations until a fresh faction-work idle/no-action pass confirms no higher-reputation concrete target remains. Do not buy lower-reputation concrete augmentations or `NeuroFlux Governor` first when the higher-reputation target is budget-plausible, because each purchase multiplies the price of the still-missing target. If the target cannot fit the current budget, allow the current affordable batch/reset instead of waiting only for money.
-- Short active/recent faction reputation targets may also block buying/installing when the target augmentation is only slightly outside the current cash+stocks budget. A small near-budget gap should be allowed to close through normal income rather than buying a lower batch and multiplying the almost-unlocked target's price.
-- `work-for-factions.js` should keep a short history of recent faction reputation targets, not just the latest target. `faction-manager.js` must consult that history before buying/installing so a short, budget-plausible target is not forgotten when the work loop temporarily switches to a longer target after a priority refresh.
-- `work-for-factions.js` priority refreshes should not interrupt a short current faction reputation infiltration target. If the remaining ETA/run count is small, finish that target before returning to the main priority scan.
-- If an active faction reputation target has a long infiltration ETA, installing a small useful batch can be better than grinding the next faction target first. `work-for-factions.js` should publish active infiltration ETA/run-count in `/Temp/work-for-factions-rep-target.txt`, and `faction-manager.js --manage-installs` may bypass the faction-progress purchase guard for an early install when the ETA is long and the current non-NeuroFlux batch is already materially useful.
-- If no next concrete augmentation is budget/reputation reachable and the best visible blocker is an enormous reputation wall, do not wait indefinitely for the normal augmentation threshold. After a long reset, `faction-manager.js --manage-installs` may early-install a small useful non-NeuroFlux batch instead of idling behind impractical reputation targets such as very high Church of the Machine God requirements.
-- Once `faction-manager.js --manage-installs` has chosen an early install because the next concrete target is too slow or impractical, do not delay that install for an extra `NeuroFlux Governor` reputation top-up. Buy currently affordable NF as leftover spend if available, but do not let the next NF level block the early reset.
-- If the install batch has enough remaining budget for another `NeuroFlux Governor` level and only a capped reputation gap blocks it, `faction-manager.js --manage-installs` should delay the install handoff briefly so `work-for-factions.js` can do the final NF rep top-up.
-- If all concrete faction work is exhausted and the next `NeuroFlux Governor` level is blocked only by a capped faction reputation gap, `work-for-factions.js` may do a final rep top-up for that joined faction before idling. Keep this capped, currently around 25k reputation, so NF does not become an unlimited progression target.
-- Do not use faction donations as a general automation shortcut for augmentation reputation. `faction-manager.js` may donate only for `The Red Pill` once that is the active path, because post-pill cash is no longer strategically useful; other reputation gaps should be closed by `work-for-factions.js` via infiltration/work.
-- In BN3 Daedalus/TRP progression, do not let `The Red Pill` donation, purchase, or `--install-for-augs` trigger an early reset while higher-reputation or more expensive desired Daedalus augmentations remain outside the current purchase batch. Keep grinding Daedalus and buy the high-value batch first.
-- In BN3 Daedalus/TRP progression, treat joined Daedalus non-NeuroFlux augmentations as purchase targets even when their stats do not match the default desired-stat filter. The install-count thresholds decide when a reset is allowed; they must not cap the number of augmentations bought in the final Daedalus batch.
-- Outside BN8, augmentation purchase order and budget trimming should protect higher-reputation and more expensive concrete targets before lower-value fillers. BN8 remains cheap-first.
-- `Cranial Signal Processors` generations have hidden runtime dependencies on the previous generation; model that chain in purchase ordering even if the API does not report it.
-- `Embedded Netburner Module Core` upgrades have runtime prerequisite chains; model Core Implant/V2 before V3 and verify the final purchase order before buying.
-- Bladeburner `BLADE-51b Tesla Armor` upgrades have a hidden runtime dependency on base `BLADE-51b Tesla Armor`; model that prereq in purchase ordering even if the API does not report it.
-- `faction-manager.js` display/summary simulations must not permanently mutate global joined/owned augmentation state used by purchase planning.
-- `faction-manager.js` must preflight augmentation prerequisites before the first real purchase in a batch. If the final order is invalid, abort instead of buying a partial prefix.
-- When `work-for-factions.js` is actively grinding faction reputation, Hacknet hashes should prioritize `Generate Coding Contract` before server money/security boosts so contracts can accelerate faction reputation progress.
-- For `Shadows of Anarchy`, only treat `SoA - phyzical WKS harmonizer` as a target augmentation. Ignore the other SoA mini-game augmentations for progression and purchasing.
-- In BN3, immediately after the 4TB RAM bootstrap completes, buy and install `SoA - phyzical WKS harmonizer` before starting CashRoot/Sector-12 faction work. Use a short `faction-manager.js --purchase-mode soa-only` profile; do not duplicate purchase logic in `autopilot.js`.
-- Be careful with anything that feeds:
-  - `mostExpensiveAugByFaction`
-  - `mostExpensiveDesiredAugByFaction`
-  - `mostExpensiveDesiredAugCostByFaction`
-- `autopilot.js` reads augmentation status from `/Temp/affordable-augs.txt`.
-- `faction-manager.js` should leave that file in a valid state even after purchases.
-- `autopilot.js` should not directly launch long-running background automation. After the pre-casino infiltration/casino handoffs, it should launch or relaunch `daemon.js` with explicit mode flags; `daemon.js` owns RAM-gated launches for stockmaster, sleeves, corporation, darknet, grafting, gangs, faction work, hash spending, and hacking.
-- After `daemon.js` takes over, RAM calculations and launch gating belong in `daemon.js`. Leaf scripts should not add local low-free-RAM preflights, cached-data fallbacks, or alternate behavior just to survive helper-script RAM pressure.
-- `daemon.js` must preserve enough free home RAM for managed scripts' temp-helper bursts and pass the same reserve to `hack.js`; `hack.js` enforces the reserve for hacking jobs but should not independently decide orchestration RAM policy.
-- `autopilot.js` must discover long-running child automation across all servers, not just `home`; launchers like `run-corporation.js` may start `corporation.js` remotely and then exit.
-- `autopilot.js` should throttle relaunches of short-lived dispatcher scripts such as `run-corporation.js` and `work-for-factions.js`; if they exit quickly because there is nothing actionable, do not spam relaunches every script-check interval.
-- When `autopilot.js` hands off to `daemon.js`, pass capability/progression intent and let `daemon.js` decide RAM-gated background launches.
-- `autopilot.js` startup must not depend on temp-helper scripts for cheap core reads such as `ns.getResetInfo()` or `ns.getServerMaxRam("home")`; after casino/roulette there may be less than the temp-helper RAM burst free.
-- `autopilot.js` Singularity availability detection must be isolated from optional temp-helper refreshes. A failed owned-augmentation helper should leave augmentation data unknown/cached, not set `singularityAvailable=false`.
-- `autopilot.js` runs with a low `ramOverride`; do not call expensive Singularity purchase APIs such as `purchaseTor`, `purchaseProgram`, `getUpgradeHomeRamCost`, or `upgradeHomeRam` directly from it. Use a guarded temp-helper or spawn handoff so dynamic RAM does not kill autopilot.
-- Version temp-helper output filenames when changing inline helper commands in `autopilot.js`, especially early bootstrap purchase helpers, to avoid noisy immutable-temp-script overwrite warnings in the terminal.
-- Before reporting a TOR purchase, check `ns.hasTorRouter()` rather than relying on `ns.singularity.purchaseTor()` returning `true`; `purchaseTor()` may return success even when TOR was already owned.
-- If early permanent home-RAM bootstrap only partially reaches the target, `autopilot.js` should keep workers stopped only when the next RAM upgrade is immediately affordable. If cash is short, launch workers and keep stock trading active; do not use `reserve.txt` as a long-running cash accumulator for RAM upgrades.
-- When `autopilot.js` uses direct Netscript calls to avoid temp-helper RAM bursts, disable `disableLog` first, then disable standard logs for noisy calls such as `scan`, `getServerMaxRam`, and `getServerUsedRam`; keep useful explicit `INFO`/`WARNING` logs visible.
-- `autopilot.js` instance counting must use direct `ns.ps("home")`, not helper `instanceCount()`, because `instanceCount()` uses a temp-helper and can fail immediately after roulette when RAM is still tight.
-- `autopilot.js` should read `ns.getPlayer()` directly in the main loop. The direct RAM cost is lower and more reliable than a temp-helper burst on 8GB home after roulette.
-- `autopilot.js` running-script discovery must use direct `ns.ps(server)` over the scanned server list. A temp-helper burst for all `ps` results can fail repeatedly after roulette on 8GB home and leave post-casino automation idle.
-- When `singularityAvailable=true`, `autopilot.js` should buy critical permanent bootstrap items directly after casino and before launching workers: home RAM to at least 1TB, TOR, and available port crackers. Gate this on actual Singularity availability, not inferred Source-File metadata, and do it before `stockmaster.js`, `sleeve.js`, `daemon.js`, `work-for-factions.js`, or `host-manager.js` can consume the RAM/cash needed by the bootstrap helper.
-- `autopilot.js` world-daemon availability checks should use direct `ns.scan`, `ns.getServerRequiredHackingLevel`, and `ns.hasRootAccess`; do not route these cheap checks through temp helpers on low-RAM starts.
-- `autopilot.js` should read `ns.getMoneySources()` directly for casino completion checks; using a temp helper can fail immediately after roulette on 8GB home.
-- `autopilot.js` should not call `ns.spawn(...)` directly after it has launched or killed worker scripts, because its low `ramOverride` can be exceeded by cumulative dynamic RAM. `spawn-handoff.js` needs 3.6GB in Bitburner DEV 3.0, so on fresh 8GB starts `autopilot.js` must launch it from an early low-RAM path before startup refreshes or worker orchestration.
-- On 8GB home, `autopilot.js` should skip stock-value helper refreshes and treat cached stock value as zero rather than retrying `/Temp/stock-symbols.txt.js` under low free RAM.
-- Keep `daemon.js` normal-mode logs concise. Full target ordering, toolkit/multiplier phase markers, and repeated helper launch notices belong behind `--verbose`; the per-loop summary and warnings should remain visible.
-- `daemon.js` must not open tail windows by default. Tail windows are opt-in with `--tail-windows`; when not enabled, daemon-managed child scripts that support it should receive `--no-tail-windows`.
-- Before the first casino run in a reset, if cash is below the casino travel/seed threshold, `autopilot.js` may launch exactly one direct `infiltration-runner.js` session at `Joe's Guns` for cash. Do not use `daemon.js`, `work-for-factions.js`, grafting, stockmaster, or any other fallback before casino.
-- In pre-casino waiting mode, `autopilot.js` should stop existing autopilot-managed background scripts, preserve any currently running direct pre-casino `infiltration-runner.js`, and then wait for cash to reach the casino threshold after that runner session.
-- `infiltration-runner.js` should internally retry hospitalization for the direct pre-casino `Joe's Guns` cash session, rather than requiring `autopilot.js` to relaunch the runner.
-- For the direct pre-casino `Joe's Guns` cash session, `autopilot.js` should pass `casino.js --game roulette` as the runner completion handoff. Do not restart `autopilot.js` between the runner success and the first casino launch on 8GB home, because autopilot startup can hit low-RAM helper delays before making the casino decision.
-- `infiltration-runner.js` completion handoff should use `ns.spawn(...)`, not `ns.run(...)`, for `casino.js`. `ns.run(casino.js)` can start the dispatcher while the runner still occupies RAM, causing the dispatcher to fail launching `casino-roulette.js`. If completion args are passed, parse a JSON args string before spreading it into `ns.spawn(...)`.
-- `infiltration-runner.js` should not use temp-helper scripts for browser/UI state, button clicks, or `infiltrate.js` start/stop control. Use direct `document`/`window`, `ns.run`, and `ns.scriptKill` calls to avoid low-RAM temp-helper failures during infiltration.
-- `infiltration-runner.js` must not reference `ns.singularity.*` directly; in BN1/SF4=0 that makes the runner too expensive to launch before casino. Use UI navigation for the direct pre-casino `Joe's Guns` path.
-- Keep the direct pre-casino `infiltration-runner.js` standalone. Do not import `helpers.js` or call `ns.getPlayer()` there; both can make the runner too expensive for an 8GB fresh reset.
-- `infiltration-runner.js` uses `ns.ramOverride(...)` because DOM automation is intentionally expensive in the static RAM analyzer. Keep the override high enough to cover dynamic Netscript calls such as `ns.run`, `ns.scriptKill`, and `ns.rm`.
-- On an 8GB fresh reset, `infiltration-runner.js` and `infiltrate.js` must fit alongside `autopilot.js`; avoid adding dynamic RAM functions such as `ns.scriptKill`/`ns.rm` to the runner unless the override and total RAM budget are updated.
-- `infiltration-runner.js` must stop `infiltrate.js` and clear blocking infiltration/faction-invite UI before spawning any completion script. Spawning `autopilot.js` while `infiltrate.js` still occupies RAM can silently fail on 8GB home.
-- After direct cash infiltration, faction invitations such as `Shadows of Anarchy` can appear slightly after the reward click. `infiltration-runner.js` should wait long enough and repeatedly dismiss `Decide later` before handing off to casino, otherwise the modal can block casino navigation.
-- If `/Temp/autopilot-pre-casino-infiltration-result.txt` contains a stale exception from an old temp-helper-based `infiltration-runner.js`, `autopilot.js` should treat it as retryable and launch the current runner again.
-- In pre-casino waiting mode, direct Joe's Guns cash infiltration failures such as `go-to-location-failed`, `travel-failed`, `start-failed`, `timeout`, and reward-click failures are retryable. Do not let a single failed runner result leave autopilot idle below the casino bootstrap cash threshold.
-- `daemon.js --hack-only` must optimize and simulate hack-only jobs, not full HWGW batches. The optimizer must not reduce a hackable target below one hack thread, otherwise startup bootstrap can spin at 0 threads and spam tuning logs.
-- XP farming worker jobs (`FarmXP`, `weakenForXp`, `growForXp`) should suppress remote misfire toasts by description as well as by explicit `silentMisfires` args, so already-scheduled or stale-arg workers do not spam warnings.
-- In `hack.js --money-focus`, genuinely spare RAM may be filled with weaken-only XP after every money target is active and rolling top-ups are healthy. Honor explicitly requested utilization up to 99%; do not impose a fixed 85% ceiling. Spare-XP workers are disposable and must be stopped as soon as a money target loses its pipeline or lacks top-up RAM, then dynamically back off from the requested target. Never let RAM pressure reduce a money batch to zero hack threads. Do not use unbatched hack/grow XP jobs against active money targets because they disturb target state and realized income.
-- In money-focus, skip targets where the minimum one hack thread already exceeds `max-steal-percentage`. Their hack-to-zero recovery batches consume disproportionate RAM for negligible income and can unnecessarily evict spare-XP workers.
-- Scheduled `Batch ...` weaken workers should not toast when `weaken()` returns zero reduction; the preceding hack or grow may simply have missed, leaving security at minimum. Continue reporting late-start timing warnings.
-- `faction-manager.js --purchase` must respect `reserve.txt`; otherwise background purchase attempts can consume money reserved by higher-level orchestration.
-- When `faction-manager.js` liquidates stocks for an augmentation purchase, write a concrete `reserve.txt` target for the planned purchase and keep stockmaster paused/killed until cash is available. Do not proceed with partial augmentation purchases if liquidation fails to convert enough stock value into cash.
-- General reserve rule: `reserve.txt` should protect cash for a concrete near-term purchase or action, not act as a long-running savings account. If the money is not immediately actionable, prefer keeping stock trading active and liquidating only when net worth can fund the specific purchase.
-- `reserve.txt` is a cash-only reserve. When `autopilot.js` is reserving for a concrete target and stock value is available, write only the cash gap not already covered by liquidatable stocks.
-- Do not keep a default stock/bootstrap reserve in `reserve.txt`. If there is no concrete near-term purchase/action, write `0` and let progression scripts and stock trading use the money normally.
-- Affordability gates for concrete purchases must consider liquidatable stock value unless there is a specific reason not to. If net worth can fund the purchase but cash cannot, liquidate stocks or route to a stock-liquidation handoff instead of reporting the action as unaffordable.
-- `faction-manager.js --manage-installs` status should make stock-backed affordability explicit: show planned batch cost, cash, stocks, existing cash reserve, cash+stocks budget, and the cash still needed after stock coverage. Do not label a stock-backed plan as a plain cash reserve.
-- When `faction-manager.js --manage-installs` is waiting for augmentation thresholds, include the same cash/stocks/budget breakdown and a concise next concrete augmentation blocker. A low ready-batch cost alone is misleading when stocks are available but remaining augmentations are blocked by reputation, prerequisites, invites, or final-order budget.
-- When a concrete augmentation can already fit the current cash+stocks install batch but the install threshold has not fired yet, status should label it as an install-time top-up, not as a budget blocker. `faction-manager.js --manage-installs` should still avoid buying it early while waiting for the threshold.
-- `daemon.js` must not pass `--reserve 0` to `stockmaster.js` in autopilot mode. Omit the flag so stockmaster reads `reserve.txt` dynamically and respects concrete short-term reserves written by managers.
-- `daemon.js` should not launch `spend-hacknet-hashes.js` or emergency hash-spend temp helpers unless Hacknet hash spending is actually available: SF9 active, hacknet not disabled by bitnode multipliers, at least one node/server exists, and hash capacity is above zero.
-- `spend-hacknet-hashes.js` should exit after one clear status if no hacknet nodes/servers exist, rather than waiting in RAM and repeatedly warning that Hacknet is empty.
-- Darknet automation must check target max/free RAM before copying and executing `darknet-worker.js` on discovered darknet hosts. If the target cannot run the worker, keep the authenticated password cached but skip `scp`/`exec` and log the RAM skip at most once per worker process.
-- Darknet `NIL` / `Yesn_t` servers should be solved with authenticate + heartbleed feedback (`yes` / `yesn't` per character position), not with a fixed low candidate cap. Numeric NIL passwords may require position-wise solving beyond `--max-attempts-per-host`.
-- Darknet `Factori-Os` numeric servers should use the authenticate/heartbleed divisibility oracle to factor the password from known source-code prime factors. Do not rely on the static hint; the game can show only `divisible by 1`, which is not enough, and fixed-width brute force can miss the answer under low `--max-attempts-per-host`.
-- Darknet `OpenWebAccessPoint` servers should use the `dnet.authenticate()` failure packet dump to recover candidates (`target:password`, `passcode: ...`, or a length/format-matching token) before trying brute force. This model is packet-sniffer based, not a hint-only numeric puzzle.
-- `ns.dnet.authenticate()` returns only generic success/failure for normal darknet servers. Model-specific failure details are written to darknet logs; solvers for `OpenWebAccessPoint`, `NIL`, `2G_cellular`, `RateMyPix.Auth`, and similar feedback models should read them via `ns.dnet.heartbleed(..., { peek: true })`.
-- Darknet `DeepGreen` should first try explicit password leaks from heartbleed logs (`target:password`, `passcode: ...`, or `--password--`) before attempting a full Mastermind constraint solver. Runtime logs can reveal the password directly.
-- Keep `darknet-worker.js` as the low-RAM core crawler. Expensive optional dnet APIs such as `dnet.induceServerMigration()` and `dnet.promoteStock()` belong in separate helper scripts so their static RAM costs do not prevent the crawler from starting on `darkweb`.
-- Darknet phishing is a valid money-focus income path. Keep the crawler at one thread and run `dnet.phishingAttack()` in a dedicated multi-thread worker using spare authenticated Darknet-host RAM, while reserving a small amount for crawler and optional helpers.
-- `daemon.js` may launch Darknet automation during money-focus because phishing produces direct money and cache rewards; do not classify it as a non-money side activity.
-- `autopilot.js --money-focus` must not add `Tasks/darknet-manager.js` to `--disable-script` or force `--disable-darknet`; preserve only an explicit user `--disable-darknet` choice.
-- Darknet `stormSeed` / “mysterious executable” handling should use a separate `darknet-storm.js` helper that calls `dnet.unleashStormSeed()` on darknet hosts; do not fold this into the low-RAM core crawler.
-- Only launch `darknet-storm.js` on hosts that actually have `STORM_SEED.exe`. `dnet.unleashStormSeed()` logs its own NotFound message before returning, so callers must preflight with `ns.fileExists("STORM_SEED.exe", host)` to avoid terminal spam.
-- Darknet migration and stock promotion helpers must stay throttled. Migration should target at most one online non-stationary neighboring darknet server per interval, and stock promotion should use an explicit `--promote-stock` list or the stock symbol cache rather than hard-coding symbols.
-- Darknet password and topology cache writes from `darknet-worker.js` should be synced back to `home`, because crawler state may be written on `darkweb` or deeper darknet hosts while launchers and diagnostics usually read local text files from `home`.
-- `Tasks/contractor.js` must merge normal `ns.scan()` results with the synchronized Darknet topology/password caches when searching for coding contracts; `ns.scan()` alone cannot discover Darknet servers. Treat cached hostnames as untrusted/stale and isolate lookup failures. If an old malformed Darknet hostname cannot be passed to `ns.ls()`, resolve its IP through the compatible dnet server-details APIs and use the IP for coding-contract access.
-- Version `Tasks/contractor.js` temp-helper output filenames whenever their generated commands change, so immutable temp scripts are not overwritten and do not emit warnings.
-- Do not spread or enumerate full `ns.getServer()` return objects in display scripts. Bitburner 3.0 exposes deprecated properties such as `isStationary` on that object, and object iteration can trigger warnings even when the property is not explicitly referenced.
+- `NeuroFlux Governor` is not a normal target. Buy NF only as leftover spend after concrete non-NF goals are in the final order; drop it first if budget shrinks. NF rep top-ups are capped final cleanup only, around 25k rep, and must not delay useful early resets.
+- Donations are not a general reputation shortcut. Donate only for `The Red Pill` once it is the active path and post-pill cash is no longer strategic.
+- Purchase/top-up affordability must recompute the full normalized final order with prerequisites and price multipliers; never rely on stale marginal estimates.
+- Outside BN8, protect higher-rep or more expensive concrete non-NF targets before lower fillers. Active/recent faction rep targets that are budget-plausible, including small near-budget gaps, delay lower purchases until a fresh faction-work idle/no-action signal.
+- `work-for-factions.js` keeps recent target history and publishes active infiltration ETA/run count in `/Temp/work-for-factions-rep-target.txt`; `faction-manager.js --manage-installs` uses it to decide wait vs early useful install.
+- If no concrete target is practical or ETA is long, `faction-manager.js --manage-installs` may early-install a useful non-NF batch instead of idling behind huge reputation walls.
+- `faction-manager.js` preflights final augmentation prerequisites before buying and aborts invalid orders. Display/summary simulations must not mutate global joined/owned state.
+- Model hidden/runtime prereqs for `Cranial Signal Processors`, `Embedded Netburner Module Core`, and `BLADE-51b Tesla Armor`.
+- `/Temp/affordable-augs.txt` is read by `autopilot.js`; `faction-manager.js` must keep it valid/fresh after purchases and before install decisions.
+- Purchase profiles belong in `faction-manager.js --purchase-mode`; other scripts should call short modes, not duplicate long arg bundles or call `purchaseAugmentation` directly.
+- `work-for-factions.js` never launches `faction-manager.js --purchase`. When `faction-manager.js --manage-installs` hands off to `ascend.js`, pass `--spend-all-before-install` and `--skip-faction-manager-purchase` so augmentation selection stays in `faction-manager.js`. `ascend.js` must not reset without explicit reset/install flags.
+- While faction reputation is being ground, Hacknet hashes prioritize `Generate Coding Contract` before server money/security boosts.
+- `reserve.txt` is cash-only for concrete near-term actions, not long-term savings. If no concrete action is near-term, write `0`.
+- Affordability gates include liquidatable stock value unless there is a specific reason not to. Reserve only the cash gap not covered by stocks; liquidate or hand off when net worth can fund an action but cash cannot.
+- `faction-manager.js --purchase` respects `reserve.txt`; if liquidating stocks for a positive-cost aug order, write the planned reserve, pause/kill stockmaster as appropriate, and abort partial purchases if liquidation fails. Do not liquidate stocks for empty or zero-cost orders.
+- `faction-manager.js --manage-installs` status shows planned cost, cash, stocks, existing reserve, cash+stocks budget, cash still needed, and concise blocker. Label affordable install-time top-ups as top-ups, not blockers.
+- `daemon.js` omits `--reserve 0` for stockmaster in autopilot mode so stockmaster reads `reserve.txt`. If stockmaster sees impossible mixed long/short positions, close both and recover.
 
-## Work / Install Behavior
+## BitNode Routes And Faction Work
 
-- Default automation should avoid company-work grinding unless intentionally enabled.
-- Hacking study for faction invite requirements should use focused studying by default when focus penalties apply. Only force background studying when `--no-focus` is set or focus is no longer beneficial.
-- In BN3 only, after the first non-NeuroFlux augmentation has been installed, prioritize `Sector-12` for `CashRoot Starter Kit` before gang/crime invite rushing. CashRoot may be bought and held awaiting install, but it must not trigger an immediate install by itself; keep following the normal managed install thresholds unless an explicit install target requires otherwise.
-- BN3 CashRoot priority after the first install overrides `--money-focus` side-activity suppression for `work-for-factions.js`; faction work must be allowed so Sector-12 reputation can be earned.
-- BN3 CashRoot priority remains active until `CashRoot Starter Kit` is installed, not merely purchased/awaiting install, so `work-for-factions.js` keeps its priority launch/cooldown behavior while CashRoot is pending.
-- In BN3, keep `Sector-12` pinned for faction work while it still has remaining relevant augmentations, even if `CashRoot Starter Kit` is already purchased and awaiting install. `--prioritize-invites` should not block Sector-12 rep work in that state.
-- In BN3, gang duplicate augmentation filtering must not erase `Sector-12` as a work target. Even if the current gang also offers the remaining Sector-12 augmentations, keep Sector-12 augmentations relevant for the BN3 CashRoot/Sector-12 route.
-- Gang-based duplicate augmentation filtering must not remove uninstalled strategic desired augmentations such as `CashRoot Starter Kit` from their normal faction path.
-- In BN3 after the first non-NeuroFlux install and before `CashRoot Starter Kit` is purchased, default automation and default `faction-manager.js --purchase` must not treat normal desired stats or the early-reset wildcard as permission to buy/install unrelated augmentations such as `Exploits in the BitNodes`; CashRoot gates the next default augmentation reset unless the user passes explicit desired aug/stat flags.
-- `autopilot.js` must not own augmentation purchase or install decisions. It may launch `faction-manager.js --manage-installs` and display the resulting status, but purchase thresholds, countdowns, BN8/TRP preservation, CashRoot gating, and install handoff policy belong in `faction-manager.js`.
-- `autopilot.js` should refresh `faction-manager.js --manage-installs` quietly and at a throttled interval. Do not print a launch line every autopilot loop while install status is stable.
-- `faction-manager.js --manage-installs` should not buy affordable augmentations early and then wait for the install threshold. Hold cash/stock liquidity until the install policy is ready, then buy the selected batch immediately before the install handoff.
-- When `faction-manager.js --manage-installs` hands off to `ascend.js`, use `--spend-all-before-install` so leftover cash and liquidated stocks are spent on permanent upgrades such as home RAM/cores before the reset.
-- In BN3, the first install of the bitnode should install exactly one non-NeuroFlux augmentation. Do not use the normal multi-augmentation threshold or buy a larger batch before that first install.
-- In BN3 first-install mode, if no non-NeuroFlux augmentation is immediately purchasable, `faction-manager.js` may buy and install the maximum affordable `NeuroFlux Governor` levels as a fast first-reset fallback.
-- BN3 first-install mode ends after the first augmentation reset in the bitnode, even if that reset installed only `NeuroFlux Governor`. Detect it from reset timing (`lastAugReset` vs `lastNodeReset`), not from installed non-NeuroFlux count alone.
-- During BN3 first-install mode, `daemon.js` should launch `work-for-factions.js` before hacking/stat helpers and may bypass the normal home RAM reserve for it; the first augmentation is blocked on faction progress, not hacking throughput.
-- During BN3 first-install mode, `work-for-factions.js` must prioritize `Sector-12` even if `--crime-focus --prioritize-invites` is present. Do not train combat stats for Slum Snakes before the first augmentation install.
-- `work-for-factions.js` must not launch `faction-manager.js --purchase` after earning reputation. Faction work earns invites/reputation only; automated player augmentation purchases and install handoffs must go through `faction-manager.js --manage-installs`.
-- When `faction-manager.js --manage-installs` hands off to `ascend.js`, pass an explicit flag to skip `ascend.js`'s own faction-manager purchase passes. `ascend.js` may still perform non-augmentation pre-install spending, but augmentation purchase selection stays in `faction-manager.js`.
-- When `faction-manager.js` invokes `ascend.js`, pass `--skip-faction-manager-purchase`; augmentation purchase selection stays in `faction-manager.js`, including when `CashRoot Starter Kit` is awaiting install.
-- `autopilot.js` should print a clear version/sync marker on startup so Bitburner logs reveal whether the in-game file matches the local code.
-- `work-for-factions.js` should print a clear version/sync marker on startup when diagnosing runtime launch behavior.
-- If Singularity is unavailable in the current runtime, do not launch faction work automation and do not print terminal errors from `work-for-factions.js`; exit quietly because this is an expected game-state limitation. Parent orchestration can pass `--singularity-confirmed` after verifying access.
-- If `autopilot.js` has already verified Singularity availability, pass that fact explicitly to child faction automation rather than making `work-for-factions.js` rediscover it through a second fragile temp-helper path.
-- Avoid arbitrary crime fallback behavior with no concrete goal.
-- In the default daemon/autopilot flow, keep broad helper tail windows disabled. `work-for-factions.js` may keep its own tail window open by default because it owns focus/work actions; other helper tail windows should remain opt-in.
-- When `daemon.js` runs `bladeburner.js`, show its tail window even without global `--tail-windows`, and place it using the same `--work-tail-*` coordinates normally used for `work-for-factions.js`.
-- In BN8, for money-gated faction invites, consider liquidatable stock value before declaring the invite impossible. If cash plus stock value satisfies the requirement, liquidate stocks and retry the invite path. Do not apply this broadly to other BNs without a concrete reason.
-- When money-gated faction invites are blocked, throttle repeated per-faction logs and emit a concise waiting status with cash, stock value, and the closest missing net-worth gap.
-- In BN8, avoid printing repeated scary per-faction `Cannot join ... insufficient money` lines while waiting on money-gated invites; record the gate internally and rely on the concise aggregate waiting status unless action is actually being taken.
-- In BN8, money-gated waiting status should name the strategic Daedalus/TRP target instead of misleadingly reporting intermediate factions such as `The Covenant` as the closest target, and it should be throttled to avoid terminal spam.
-- Do not use crimes as generic combat-stat training when a faction invite needs specific strength/defense/dexterity/agility thresholds. Use crimes only for kills/karma, then train deficient combat stats directly at the gym.
-- Do not farm low-success Homicide just because a faction invite needs kills/karma. Use a practical homicide success threshold and fall back to safer crimes such as Mug until kill farming is no longer mostly wasted time.
-- For faction invite combat-stat requirements, do not start focused gym training when the sequential ETA exceeds 2 hours. Defer the invite and let hacking/money/augmentation automation improve the route instead.
-- For high combat-stat faction invites such as `The Covenant` and `Illuminati`, print the gym ETA in the defer reason before any generic `Cannot join ... insufficient combat stats` log, so it is clear the route is intentionally too early.
-- In BN3 `--crime-focus`, keep `Slum Snakes` available as the practical early crime/gang faction path, even when `--prioritize-invites` is set. Skip longer combat/crime faction reputation grinds such as `Tetrads`, `Speakers for the Dead`, `The Syndicate`, `The Dark Army`, and `The Covenant` unless explicitly requested with `--first` or all-faction mode.
-- In BN13, do not enable daemon's automatic rush-gang `--crime-focus --prioritize-invites` faction mode by default. It can defer all crime-faction invites and prevent normal early faction progression; use the standard faction order unless the user explicitly opts into crime/gang rushing.
-- In BN6/BN7 or when Bladeburner is active, `faction-manager.js` should default to broad `*` augmentation desirability even if `CashRoot Starter Kit` is not owned yet, because combat/Bladeburner progress benefits from general augmentations. Keep CashRoot ownership gating only for generic late/quick-install broadening.
-- Bladeburner augmentation requirements use the `Bladeburners` faction reputation. Game source shows Bladeburner rank gains add to that faction rep only after joining the faction, so do not treat pre-join rank as spendable augmentation reputation; report this distinction clearly when Bladeburner augs are the visible blocker.
-- If Bladeburner faction reputation is the next practical augmentation blocker, `daemon.js` should be allowed to keep `bladeburner.js` running even while Stanek reserves most home RAM. Stanek charging must not starve the Bladeburner rank/faction-rep path.
-- Timed hack `xp-mode` must not take priority when `faction-manager.js --manage-installs` reports Bladeburner faction reputation as the next augmentation blocker. Let `bladeburner.js` run in normal daemon mode so rank gains can unlock the Bladeburner augmentation batch.
-- Outside BN6/BN7, do not launch or keep `bladeburner.js` waiting just to reach the initial 100 combat-stat join requirement. Defer Bladeburner automation until those stats are already met or the player is already in Bladeburner, so early BN9 progression is not blocked by premature combat waiting. If `ns.bladeburner.inBladeburner()` is already true, run `bladeburner.js` even if current combat stats are below the original join threshold.
-- Paid gym training may count liquidatable stock value when cash is short, but only with a larger stock-backed reserve. In BN8 especially, do not liquidate stocks for small training costs unless net worth remains comfortably above the training requirement.
-- BN8 travel for faction/infiltration work may also count liquidatable stock value, but should use the same larger stock-backed reserve as paid training before liquidating.
-- Before gym combat training, estimate per-stat ETA from current exp/multipliers and choose the fastest practical gym/stat. Do not imply gym training can raise all combat stats at once; `gymWorkout` only supports one of `str`, `def`, `dex`, or `agi`.
-- Background gym training may be started in a gym city before travelling to a different infiltration city, because current Bitburner keeps gym training active across city travel. Only do this when the route still has enough cash for gym setup plus the subsequent infiltration travel/buffer; do not spend travel cash on background training and then fail to reach the infiltration target.
-- When preparing an infiltration location after starting background gym training, do not call `stopAction()` for current `CLASS` work. That stops the gym workout and makes the “Prepared background training” log false.
-- Background combat training for a harder infiltration target must be ETA-gated. Do not train toward a high-stat company merely because it has better rep/run; only start that training when continuing current infiltration during training and then switching to the harder target is estimated to beat staying on the current best target.
-- For factions with an `hacking OR combat` invite path such as `Daedalus`, do not start optional combat gym training when the sequential gym ETA is impractical. Defer the combat route and continue toward the hacking invite path instead.
-- If `Daedalus` or another high-hack invite is currently impractical under `--training-stat-per-multi-threshold`, treat it as a deferred invite with throttled logging. Do not repeatedly print the full “insufficient hack” diagnostic or imply the script is waiting for a faction to join magically.
-- Deferred invite requirements should not permanently idle `work-for-factions.js` at the first scope. Continue checking lower-priority faction work and already-joined faction rep options before idling; only wait after all strategies have no actionable work.
-- When `work-for-factions.js` decides Bladeburner should take priority, it should exit instead of sleeping indefinitely, so RAM is freed and daemon can retry faction work later.
-- When `work-for-factions.js` exits without making faction progress, including Bladeburner-yield exits, write a reset-scoped idle/no-progress status so `faction-manager.js --manage-installs` can install the current affordable batch instead of waiting forever for the normal count threshold.
-- Without a gang providing most augmentations, `work-for-factions.js` should yield to Bladeburner only for active BlackOps. Long Bladeburner rank grinds such as Training, Field Analysis, contracts, or operations must not indefinitely block faction work.
-- When `work-for-factions.js` finds nothing actionable after checking all scopes, it should exit instead of sleeping in RAM; `daemon.js` owns retry cadence.
-- When `work-for-factions.js` exits because nothing is actionable, write a short reset-scoped idle status file. `faction-manager.js --manage-installs` may use that fresh signal to install the currently available augmentation batch instead of waiting for the normal count threshold with no faction work left.
-- `work-for-factions.js` late-loop helpers that run outside `loadStartupData()` must not reference startup-only local dictionaries. If they need startup faction/augmentation data, promote the specific value or dictionary to an initialized global cache.
-- Filter mutually exclusive city factions that are already precluded by joined city factions before attempting invite work, so each scope does not spam impossible `Cannot join ... precluding faction` logs.
-- `autopilot.js` may launch corporation automation only when corporations are actually available: current BN3 or SF3.3+. Keep the launcher lightweight; do not import `corporation.js` from `run-corporation.js`.
-- Even when corporations are available, `autopilot.js` should delay corporation automation until later progression. Require substantial home RAM, currently at least 4TB, and enough free RAM somewhere for the real `corporation.js`, not just the lightweight `run-corporation.js` launcher.
-- Outside BN3, `daemon.js` should not launch `run-corporation.js` until cash plus liquidatable stock value can fund the $150b self-funded corporation, unless a corporation already exists. Do this gate before launching the dispatcher so it does not repeatedly print unaffordable startup messages.
-- `corporation.js` should treat temporarily unaffordable production-industry expansion as a waiting state, not a fatal error. Keep managing the existing material division while cash/funding catches up.
-- `corporation.js` must restore low employee energy and morale with tea and parties until AutoBrew/AutoPartyManager are researched; unhealthy offices directly suppress production and must be handled before discretionary growth or funding checks.
-- Before a product division exists, corporation automation may spend only the hashes needed to bootstrap `Hi-Tech R&D Laboratory`, `AutoBrew`, and `AutoPartyManager` in existing divisions. Preserve the remaining hashes so later research purchases benefit the product division too.
-- A public corporation with fewer than the desired divisions must remain eligible for product-division expansion even if its private funding round number is low; going public early must not permanently block the money engine.
-- Default corporation automation should save for `Tobacco` as its first product division and include the first product's budget in the affordability gate. Do not permanently consume the product slot with a cheaper fallback merely because the configured industry is temporarily unaffordable.
-- `corporation.js` startup should clearly log current BN, SF3 level, and whether a corporation already exists. It must not enter the management loop unless `getCorporation()` succeeds; missing corporation/bootstrap states should produce actionable terminal messages instead of uncaught `corporation.getCorporation: Must own a corporation`.
-- If no corporation exists and creating one requires unaffordable self-funding, `corporation.js` should exit after logging the cash requirement instead of waiting in memory with the expensive corporation API loaded.
-- `run-corporation.js` should run a short startup preflight before launching expensive `corporation.js`; outside BN3, if no corporation exists and the player cannot afford the $150b self-funded corporation, exit from the launcher instead of holding corporation API RAM.
-- In BN3, after casino and before launching background workers, the permanent bootstrap home RAM target should be 4TB so corporation automation can start when daemon's RAM gate allows it; do not wait for 8TB by default.
-- In BN3, home RAM upgrades are a strategic money goal. Keep stockmaster active with normal cash settings, do not use a full global cash reserve, liquidate stocks only when net worth can immediately fund the next concrete RAM upgrade, and let `ram-manager.js` buy with `--budget 1 --reserve 0` once cash is available.
-- BN3 should automatically run a RAM bootstrap until home RAM reaches 4TB even when the user-facing `--money-focus` option is false. This default bootstrap may reuse daemon/hack `--money-focus` plumbing internally, but should log as BN3 RAM bootstrap and suppress faction/side spending until the 4TB target is reached.
-- `autopilot.js --money-focus` is an opt-in BN3 money mode, not the default: suppress timed XP mode and non-money side activities such as faction work, Go, gangs, sleeves, and grafting until the money engine is bootstrapped. Keep it active until home RAM reaches the BN3 bootstrap target and corporation automation is running; if corporation automation is explicitly disabled, exit money-focus once the RAM target is reached.
-- When `autopilot.js --money-focus` is active, pass `--money-focus` through `daemon.js` to `hack.js`; `hack.js` should skip startup study/hack-XP kickstarts, ignore `--xp-only`, and disable opportunistic low-utilization XP farming so money targeting takes priority.
-- In `hack.js --money-focus`, do not leave abundant RAM pinned behind the normal conservative defaults. Keep money-focus-specific defaults for batch spacing, max batches, and steal cap, while still honoring explicit `--cycle-timing-delay`, `--max-batches`, and `--max-steal-percentage` overrides.
-- In `hack.js --money-focus`, abundant-RAM scheduling should allow a longer continuous batch pipeline instead of limiting each target to the conservative pre-first-hack scheduling horizon.
-- Refill active money-focus batch pipelines before their queued horizon drains. Waiting for the final remote worker to exit creates a `weakenTime + queueDelay` income gap between otherwise identical batch waves.
-- In `hack.js --money-focus`, keep the continuous batch pipeline bounded by a multiplier over the normal weaken-time scheduling horizon; do not blindly use the full max-batches target for every server, because that can shrink steal per batch and underuse RAM/profit.
-- In `hack.js --money-focus`, tune rolling batch lookahead from measured hacking-income deltas. Runtime evidence showed that shortening the queue from 200 to 50 cycles reduced reported income despite successful top-ups, so do not assume queue depth is revenue-neutral.
-- In `hack.js --money-focus`, report both `ns.getTotalScriptIncome()` and the wall-clock delta of `ns.getMoneySources().sinceInstall.hacking`; use the latter to validate whether spending additional RAM actually increases realized hacking income.
-- For high-throughput money-focus runs, use 100ms cadence only with the enlarged scheduling headroom. The earlier 100ms test used a 1000ms queue delay while scheduling passes took up to 4199ms, so validate the tighter cadence again with the 5000ms headroom before attributing fresh-worker lateness to cadence alone.
-- Give high-density money-focus scheduling at least 5000ms of queue headroom by default. Runtime scheduling passes reached roughly 4199ms, so the normal 1000ms queue delay caused fresh weaken workers to start around 1200ms late even after stale workers were removed.
-- When increasing money-focus rolling depth, cap the initial per-target burst and refill depth per coordinator pass. Ramp a large queue over several passes so target discovery and prep are not blocked by one wave of hundreds of thousands of worker launches.
-- Evaluate money-focus changes only after the realized-income rate has stabilized for several minutes. At 100ms cadence, depth 800 briefly showed $145-148t/sec but settled to $80.0-80.4t/sec, the same as depth 400, while workers doubled to roughly 212k and coordinator time rose as high as 676ms. Keep the default at 400 cycles.
-- `helpers.tail()` must not print raw window geometry or PID arrays into script logs; keep tail diagnostics behind an explicit debug option.
-- Enforce the money-focus steal ceiling using the integer hack-thread count; an optimizer increment must not jump past the configured percentage and accidentally force near-zero-money recovery.
-- In `hack.js --money-focus`, distribute batch jobs across eligible daemon/worker hosts by current RAM-utilization percentage, not equal job count or smallest-host packing. This keeps a very large `home` proportionally loaded while still using smaller daemon and Hacknet hosts.
-- In `hack.js --money-focus`, include Hacknet servers in the balanced worker pool by default when maximizing hacking income; provide `--preserve-hacknet-servers` for runs where protecting hash production is preferred.
-- Treat Hacknet servers as execution hosts only. Do not pass their names to target-only Netscript APIs such as `getServerRequiredHackingLevel`, `getServerNumPortsRequired`, `getServerGrowth`, `getServerMinSecurityLevel`, or `getServerMaxMoney`; Bitburner rejects those calls for Hacknet hosts.
-- Keep `Remote/manualhack-target.js` on the same batch argument positions as the normal hack/grow workers, especially when `hack.js -i` substitutes it into a scheduled batch.
-- In `hack.js --money-focus`, do not use low-utilization ramp-up as a reason to inflate recovery thread padding; spend abundant RAM on profitable batch coverage first.
-- On `hack.js` startup/restart, clear stale remote `Batch ...` hack/grow/weaken workers from previous instances before scheduling new batches, because killing the coordinator does not automatically kill already scheduled remote workers.
-- Before scheduling new batches, synchronize the current remote hack/grow/weaken/manualhack worker files to rooted RAM hosts; file-existence checks alone leave stale worker code in place after updates.
-- Chunk stale batch-worker cleanup and rescan after the first pass; high-density money-focus runs can leave roughly 100k remote PIDs, which should not be sent through one oversized temp-helper invocation.
-- In `--money-focus`, do not spend cash or RAM on non-money progression. Allowed spenders are only those with a concrete money path: hacking infrastructure, home RAM, stock trading, port crackers/TOR, corporation, and explicitly ROI-gated hacknet/hash spending.
-- `stats.js` is display-only and may run during `--money-focus`; do not treat it as a blocked spender.
-- In `--money-focus`, do not include `work-for-factions.js` in daemon-managed helpers at all. Do not kill a user-started instance just because money-focus is active.
-- While BN3 `--money-focus` is still active, `autopilot.js` should not launch `faction-manager.js --manage-installs` just to receive a "not buying/installing" status. Report the concrete money-focus blocker directly, such as waiting for 4TB home RAM or waiting for `corporation.js` to start.
-- In `--money-focus`, money infiltration is allowed, but it must use a dedicated cash-only helper such as `money-infiltration.js`, not `work-for-factions.js`.
-- `money-infiltration.js` should be long-running by default and repeat cash infiltration internally.
-- Daemon-managed launches of `money-infiltration.js` should pass `--run-once`; daemon owns cadence/cooldown when it starts the helper.
-- In BN3 `--money-focus`, `daemon.js` should prioritize corporation automation and bypass the normal 4TB home-RAM gate for `run-corporation.js`, while still requiring corporation availability and enough actual free RAM to launch `corporation.js`.
-- The default BitNode route should complete `SF3.3` before BN8 and before relying on corporation automation outside BN3. Do not leave `SF3.3` behind stock/BN8 progression if corporation bootstrap errors show automation is blocked by missing corporation APIs.
-- Keep `casino.js` as a lightweight dispatcher. Shared casino runtime helpers belong outside it, and autopilot RAM checks should target the selected casino game script, not just the dispatcher.
-- `autopilot.js` should not idle for an arbitrary one-minute income baseline before deciding whether casino is needed. Make the casino/run-workers decision immediately from current cash, casino history, net worth, and concrete launch constraints.
-- `casino.js` must `ns.spawn(...)` the selected casino game script, not `ns.run(...)` it. On 8GB home, `casino.js` plus `casino-roulette.js` can exceed RAM, especially because roulette uses `spawn` for its own completion handoff.
-- `casino.js` should not be responsible for cleaning up RAM before roulette. `autopilot.js` should avoid launching scripts before the first casino run except the single direct `Joe's Guns` `infiltration-runner.js` cash session, then stop conflicting scripts immediately before launching casino.
-- For the first casino run on low-RAM fresh resets, `autopilot.js` should spawn the lightweight `casino.js --game roulette` dispatcher instead of `casino-roulette.js` directly. Live DEV 3.0.0 testing showed direct delayed `ns.spawn` of `casino-roulette.js` can leave no process running even with free RAM, while the dispatcher can launch roulette after autopilot exits.
-- `casino-roulette.js` must use `ns.spawn(...)` for `--on-completion-script` handoff. On 8GB home, `ns.run(...)` cannot restart `autopilot.js` while roulette still occupies RAM after being kicked out.
-- `casino-roulette.js --kill-all-scripts` must not use temp-helper scripts on 8GB home. Directly use `ns.ps`, `ns.kill`, `ns.scan`, and `ns.killall`; skip remote file cleanup if necessary rather than crashing before roulette starts.
-- `casino-roulette.js` hot loops must use cheap direct DOM checks for kicked-out/modals. Avoid multi-retry XPath searches between normal roulette rounds because they visibly stall the next bet.
-- After roulette, faction invitation modals such as the Aevum invite can remain over the UI. Dismiss `Decide later` before the casino completion handoff and on `autopilot.js` startup so post-casino automation is not hidden behind a modal.
-- Do not reference `ns.singularity.*` directly from shared casino helpers; pass optional callbacks from scripts that can afford singularity, otherwise use UI clicks to avoid high no-SF4 RAM costs.
-- Keep grafting automation conservative and isolated in `graft-manager.js`. `autopilot.js` may launch it, but should not choose graft targets inline. In BN8, grafting must preserve the Daedalus cash floor and focus on stock/cash acceleration via hacking speed/grow/chance, not broad augmentation collection or pure hack XP.
-- The current grafting augmentation name is exactly `violet Congruity Implant`, including the lowercase `v`. Keep `graft-manager.js` compatible with the legacy `Congruity Implant` name so either runtime version still prioritizes it and applies the entropy exception.
-- In `graft-manager.js`, `--min-net-worth null` means use the conservative automatic threshold, while explicit `--min-net-worth 0` means disable the net-worth gate. Do not use `Number(value) || default` for this option.
-- In BN3, do not auto-launch `graft-manager.js` from `daemon.js`; grafting is not part of the SF3.3/Red Pill path and must not block faction infiltration.
-- In BN8, frequent installs are desirable because each reset can rerun casino and restart stock growth from a stronger baseline. Prefer buying all currently affordable non-NeuroFlux augmentations as a batch, then installing immediately, instead of waiting for large augmentation thresholds.
-- In BN8, purchase augmentations cheap-first. Do not let the normal value/priority ordering create a huge unaffordable batch; the purchase planner should build the affordable prefix in actual purchase order with augmentation price multipliers included.
-- In BN8, never buy new `NeuroFlux Governor` levels from automation or manual `faction-manager.js --purchase` runs. If NF levels were already purchased before this rule and are awaiting install, do not use that as a reason to buy more.
-- In BN8, already-purchased awaiting augmentations should override Daedalus-invite waiting heuristics. Leaving purchased augmentations uninstalled creates a price penalty and slows the cash-first loop.
-- Do not use global `reserve.txt` to hold cash in BN8; it slows stock/casino-driven progress. Keep only targeted safety checks that prevent going negative on paid actions.
-- In BN8, when waiting on money-gated faction invites or other cash-first blockers, keep stockmaster aggressive. Use a very low cash fraction and buy trigger so idle cash is invested instead of sitting below the default `--fracB` threshold.
-- In BN8, gang income is hard-capped by `GangSoftcap = 0`, so do not spend cash on gang upgrades for money. If a gang is active, run it as a no-budget money-focus background trickle and keep cash prioritized for stocks/casino/Daedalus.
-- In BN8, keep cheap-first frequent installs in the early game. Only switch to Red Pill preservation mode once Daedalus is joined or the installed augmentation and hacking requirements for Daedalus are effectively met; from that point, do not buy or install non-`The Red Pill` augmentations.
-- In BN8 Red Pill preservation mode, `The Red Pill` must be considered purchasable directly from joined factions with sufficient reputation even if generic desired-stat filtering produces an empty purchase list; TRP has no stat multipliers, so do not rely only on stat filters for it.
-- `The Red Pill` is a valid zero-cost purchase. Do not treat a non-empty augmentation purchase order with total cost `0` as empty or unaffordable.
-- In BN8, once Daedalus is joined or `The Red Pill` has been purchased, stop pursuing other money-gated faction invites such as `Illuminati` or `The Covenant`; the remaining path is install TRP, unlock `w0r1d_d43m0n`, and destroy the BN.
-- In BN8, if Daedalus is joined but `/Temp/affordable-augs.txt` does not list `The Red Pill` as affordable or awaiting install, `faction-manager.js --manage-installs` should force a no-NeuroFlux purchase attempt instead of idling on the generic frequent-install status.
-- Throttle the forced BN8 `The Red Pill` purchase attempts. If Daedalus is joined but TRP is still not purchased/affordable, do not attempt a purchase every automation loop.
-- Augmentation purchase profiles belong in `faction-manager.js` via `--purchase-mode`. Other scripts should invoke `faction-manager.js` with a short mode instead of duplicating long `--priority-aug` / `--aug-desired` / `--stat-desired` argument bundles or directly calling `ns.singularity.purchaseAugmentation`.
-- In BN8 after `The Red Pill` is installed, `autopilot.js` must ensure the port crackers needed for `w0r1d_d43m0n` are bought. If most money is in stocks, liquidate enough stock value instead of waiting forever on low cash.
-- In BN8, `faction-manager.js --manage-installs` should keep `/Temp/affordable-augs.txt` fresh before install decisions; stale output can incorrectly fall back to normal augmentation thresholds.
-- In BN8, do not kill the live `stockmaster.js` trader when liquidating unless explicitly requested. Preserving pre-4S tick history is critical; prefer `stockmaster.js --liquidate` with keep-trader behavior, or `--liquidate --kill-trader` only when a full reset is intentional.
-- `faction-manager.js --purchase` must not liquidate stocks unless there is a non-empty augmentation purchase order with positive total cost.
-- If `stockmaster.js` detects an impossible mixed long/short position on the same symbol, close both positions and recover instead of only logging an error and leaving one side open.
-- Do not trigger installs purely because many augmentations are awaiting install if there is no money for additional purchases and more non-NeuroFlux augmentations remain.
-- `autopilot.js` timed `xp-mode` is not useful once hack level is already high; avoid reintroducing aggressive XP-mode relaunching at high hack.
-- `autopilot.js` timed `xp-mode` should not activate at the start of an augmentation reset. The configured interval is the money-focused delay before each XP window, not a request to spend the first window in `--xp-only`.
-- Keep Bitburner 3.0 Darknet orchestration in `Tasks/darknet-manager.js`. `autopilot.js` should only keep the manager running after later progression, currently at least 8TB home RAM, and Darknet scripts should avoid `tprint` in normal automation mode so they do not spam the main terminal.
-- Darknet worker scripts can be copied and relaunched across remote darknet hosts with imperfect args. Parse worker args defensively; do not let a missing value for propagation metadata such as `--origin` crash the worker at startup.
-- `Netburners` should be skipped in the default early-game autopilot flow while hacknet is intentionally deferred.
-- If re-enabling `Netburners`, do it only in a late-game autopilot path that also enables actual hacknet progression; do not merely remove the skip and leave hacknet disabled.
-- Company-work grinding, including the `Silhouette`/CEO path, should stay disabled in the default early-game autopilot flow.
-- If re-enabling company-work in autopilot, do it only in an explicit late-game path; do not leave `--no-company-work` permanently enabled if late-game company factions are expected to progress.
-- After BN10 is complete, if Covenant sleeves or sleeve memory are still incomplete, this becomes the top priority before leaving BN10.
-- In BN10 sleeve-completion mode, do not buy NeuroFlux or install augmentations just because NF is available. Other spenders may use surplus cash, but should not spend the cash gap still needed after accounting for liquidatable stock value.
-- In BN10 sleeve-completion mode, stocks are still valuable and should not be fully disabled. Do not pass the full sleeve cost as `stockmaster.js --reserve`, because that prevents stockmaster from investing. Prefer an aggressive low cash fraction such as `--fracH 0.001`, protect cash from other spenders with `reserve.txt`, and liquidate only when net worth is sufficient for the Covenant purchase but cash is not.
-- Do not stop or skip relaunching `stockmaster.js` just because current cash is enough for the next BN10 Covenant sleeve/memory purchase. Buy the sleeve/memory immediately or let `sleeve.js` buy it, then keep stockmaster trading.
-- If using `reserve.txt` to protect BN10 sleeve money, ensure `sleeve.js` itself can still spend that reserve on Covenant sleeve/memory purchases. The reserve is meant to block other spenders, not the intended purchase.
+- BN3 first-install mode installs exactly one non-NF augmentation; if none is purchasable, it may install affordable NF fallback. It ends after the first augmentation reset (`lastAugReset` vs `lastNodeReset`), even if only NF was installed.
+- During BN3 first-install mode, daemon launches `work-for-factions.js` before hacking/stat helpers and may bypass normal home RAM reserve. `work-for-factions.js` prioritizes `Sector-12` even under crime-focus and does not train for Slum Snakes first.
+- In BN3 after the first non-NF install, prioritize `Sector-12` for `CashRoot Starter Kit` until installed. Keep Sector-12 relevant while CashRoot is awaiting install or gang duplicate filtering sees the same aug elsewhere. Default automation must not buy unrelated augs before CashRoot unless explicit desired flags are passed.
+- In BN3, immediately after 4TB RAM bootstrap, buy/install `SoA - phyzical WKS harmonizer` via `faction-manager.js --purchase-mode soa-only` before CashRoot/Sector-12 work.
+- BN3 Daedalus/TRP: do not let TRP donation, purchase, or `--install-for-augs` cause early reset while higher-rep or more expensive desired Daedalus augs remain outside the batch. Joined Daedalus non-NF augs are targets even if stat filters omit them.
+- BN3 RAM bootstrap after casino targets 4TB, not 8TB. Keep stockmaster active, avoid full global cash reserves, liquidate only when net worth can immediately fund the next RAM upgrade, then let `ram-manager.js --budget 1 --reserve 0` buy.
+- BN3 automatically runs the 4TB RAM bootstrap even without user-facing `--money-focus`. Explicit `autopilot.js --money-focus` suppresses non-money side activities until 4TB and corporation automation are running, or until 4TB if corporation is disabled.
+- BN3 money-focus prioritizes corporation automation and may bypass the normal 4TB gate for `run-corporation.js`, while still requiring corporation availability and free RAM. Do not auto-launch `graft-manager.js` in BN3. Complete `SF3.3` before BN8/corp reliance outside BN3 if corporation APIs are missing.
+- BN8 uses cheap-first frequent installs: buy affordable non-NF augs in actual purchase order, install immediately, avoid large thresholds, and never buy new NF.
+- BN8 avoids global `reserve.txt`; keep stockmaster aggressive, use low cash fractions, preserve the live trader during liquidation unless full reset is intentional, and consider stock value for money-gated invites/travel/training with a larger reserve.
+- BN8 gang income is hard-capped; do not spend cash on gang upgrades for money. Run only as a no-budget background trickle if active.
+- BN8 switches to Red Pill preservation once Daedalus is joined or requirements are effectively met: stop other money-gated invites, buy/install only `The Red Pill`, treat TRP as purchasable despite stat filters and as a valid zero-cost order, throttle forced purchases, and buy needed port crackers after TRP install. Purchased-awaiting augs override Daedalus-invite waits.
+- After BN10 is complete, incomplete Covenant sleeves/memory become top priority before leaving BN10. Do not buy NF or install because NF is available; keep stockmaster trading, protect only the needed cash gap, liquidate when net worth can fund the purchase, and ensure `sleeve.js` can spend the reserve.
+- Default automation avoids company-work grinding and skips `Netburners` early while hacknet is deferred. Re-enable company/Netburners only in explicit late-game paths.
+- Hacking study for invites is focused when focus penalties matter. Crime fallback needs a concrete kills/karma goal; use practical homicide thresholds and safer crimes when needed.
+- For combat-stat invites, train deficient stats directly at gym, estimate per-stat ETA, and defer/log clearly if sequential ETA exceeds about 2 hours. Gym training may continue across travel only when cash covers gym plus travel/buffer; do not `stopAction()` current `CLASS` work after setup.
+- Optional combat training for harder infiltration targets is ETA-gated. For hacking-or-combat invites such as Daedalus, prefer the hacking route when combat ETA is impractical and continue lower-priority work before idling.
+- `work-for-factions.js` exits and writes reset-scoped idle/no-progress status when nothing is actionable or when yielding to Bladeburner, so daemon owns retry cadence and `faction-manager.js` can install available batches.
+- BN3 `--crime-focus` keeps Slum Snakes as the practical early path but skips long crime-faction rep grinds unless explicit. BN13 must not enable automatic rush-gang crime focus by default.
+- Money-focused `gangs.js` must not idle the whole gang for random training; keep only mandatory rebuild training for new/ascended members.
+- BN6/BN7 or active Bladeburner defaults `faction-manager.js` to broad `*` augmentation desirability. Bladeburner rank counts as faction rep only after joining. Let `bladeburner.js` run when Bladeburner rep is the next blocker; outside BN6/BN7 do not wait merely for initial 100 combat stats unless already in Bladeburner.
+- `work-for-factions.js` yields to Bladeburner only for active BlackOps unless a gang supplies most augs. Long rank grinds must not block faction work forever.
+- Keep grafting isolated in `graft-manager.js`. In BN8, preserve Daedalus cash floor and focus on stock/cash acceleration. Support `violet Congruity Implant` and legacy `Congruity Implant`. `--min-net-worth null` means automatic threshold; explicit `0` disables it.
 
-## Bitburner 3.0.0 Notes
+## Money, Hacking, Darknet, Corporation
 
-- `ns.format.time(...)` should be used instead of legacy `ns.ui.time(...)`.
-- Stock API naming changed: prefer `has4SDataTixApi()` instead of `has4SDataTIXAPI()`.
-- `ns.singularity.gymWorkout(...)` now expects `GymType` enum values: `str`, `def`, `dex`, `agi`, not `"Strength"`, `"Defense"`, `"Dexterity"`, `"Agility"`.
-- Some scripts that build temp helper scripts via `getNsDataThroughFile(...)` can hit much higher RAM costs in DEV 3.0.0 than expected on a fresh save.
-- `autopilot.js` owned-augmentation refresh may use a temp helper after `singularityAvailable` is confirmed, but helper failure must not disable Singularity-dependent automation. Gate Singularity on actual cheap call availability, not Source-File metadata.
-- Known helper bursts should be represented in `daemon.js` launch policy rather than duplicated in leaf scripts.
+- `daemon.js --hack-only` optimizes hack-only jobs, never full HWGW batches, and never tunes a hackable target below one hack thread.
+- XP farming suppresses remote misfire toasts by description and args. Scheduled `Batch ...` weaken workers should not toast on zero reduction; keep late-start warnings.
+- In `hack.js --money-focus`, money pipelines win. Spare RAM may run weaken-only XP only after every money target is active and top-ups are healthy; stop/back off immediately if money pipelines lose RAM. Never reduce a money batch to zero hack threads or use unbatched hack/grow XP against active money targets.
+- In money-focus, skip targets where one hack thread exceeds `max-steal-percentage`; enforce steal ceilings with integer hack-thread counts.
+- `autopilot.js --money-focus` allowed spenders are only money-path items: hacking infrastructure, home RAM, stock trading, TOR/port crackers, corporation, cash-only infiltration, Darknet phishing/caches, and ROI-gated hacknet/hash spending. `stats.js` may run. Do not manage `work-for-factions.js`, do not kill a user-started instance, and do not force-disable `Tasks/darknet-manager.js` unless the user explicitly disabled Darknet.
+- Money infiltration uses `money-infiltration.js`, long-running by default; daemon launches it with `--run-once`.
+- Pass `--money-focus` through daemon to `hack.js`; skip startup study/hack-XP kickstarts, ignore `--xp-only`, disable opportunistic low-util XP, and honor explicit overrides.
+- Money-focus batching uses rolling continuous pipelines: refill before horizon drains, bound depth by weaken-time multiplier, default around 400 cycles, at least 5000ms queue headroom, capped initial/refill bursts, and realized-income validation via `getMoneySources().sinceInstall.hacking` plus `getTotalScriptIncome()`.
+- Before scheduling, clear stale remote batch workers in chunks, rescan after first pass, and sync current worker files to rooted RAM hosts.
+- Distribute money-focus batch jobs by host RAM-utilization percentage. Include Hacknet servers as execution hosts by default, with `--preserve-hacknet-servers` opt-out; never pass Hacknet hosts to target-only server APIs. Keep `Remote/manualhack-target.js` arg positions compatible.
+- Launch hash spenders only when SF9/hash spending is available, hacknet is not disabled, at least one node/server exists, and capacity is positive. If none exist, exit after one clear status.
+- Keep Bitburner 3.0 Darknet orchestration in `Tasks/darknet-manager.js`; autopilot should keep it running only after later progression, currently at least 8TB home RAM. Avoid normal-mode Darknet `tprint` spam.
+- `darknet-worker.js` is the low-RAM crawler; expensive migration/stock-promotion APIs stay in helpers. Parse args defensively, check max/free RAM before `scp`/`exec`, cache authenticated passwords even on RAM skip, log skips once, and sync password/topology caches back to `home`.
+- Darknet solvers use authenticate plus heartbleed/log feedback, not small fixed brute-force caps: `NIL`/`Yesn_t` per-position feedback, `Factori-Os` divisibility oracle, `OpenWebAccessPoint` packet dumps via `heartbleed(..., { peek: true })`, and `DeepGreen` leaked passwords first.
+- Darknet phishing is valid money-focus income: keep crawler single-threaded and run `dnet.phishingAttack()` in a dedicated multi-thread worker on spare authenticated Darknet RAM. `darknet-storm.js` handles `STORM_SEED.exe` only on hosts with the file; migration/promotion helpers stay throttled.
+- `Tasks/contractor.js` merges `ns.scan()` with Darknet caches, treats cached hosts as stale/untrusted, resolves malformed names through compatible dnet details APIs, and versions helper outputs.
+- Corporation automation is available only in BN3 or SF3.3+. Keep `run-corporation.js` lightweight; delay launch until about 4TB home RAM and enough free RAM for `corporation.js`. Outside BN3, require cash+stocks for the $150b self-funded corporation unless one exists.
+- `run-corporation.js` preflights cheaply and exits if unaffordable. `corporation.js` startup logs BN, SF3 level, and corporation existence, and enters management only after `getCorporation()` succeeds.
+- Corporation expansion that is temporarily unaffordable is a wait state. Manage existing material divisions, restore office energy/morale with tea/parties until AutoBrew/AutoPartyManager, spend hashes before product division only on `Hi-Tech R&D Laboratory`, `AutoBrew`, and `AutoPartyManager`, and save for `Tobacco` as first product division including first product budget. Public corporations with too few divisions remain eligible for product-division expansion even if private funding rounds are no longer available.
 
-## Live Testing Workflow
+## Validation And Files
 
-- When the user asks to verify behavior, prefer live runtime validation against `../bitburner-src` over theory.
-- Use headless Chromium / Playwright for UI/runtime verification when possible.
-- Start the game dev server from `../bitburner-src` with `npm run start:dev`.
-- Start the sync bridge from this repo with `node local-sync-server.js --source-root /Volumes/SRC/bitburner-scripts --port 12526`.
-- Never kill or reuse an existing `ws://127.0.0.1:12525` Remote API bridge. Treat it as user-owned; start a separate sync bridge on another port such as `12526` for Codex validation.
-- Bitburner's Remote API is file-only. `local-sync-server.js` must not pretend it can run scripts through the Remote API WebSocket. Script-free execution is only available through a separate Chrome DevTools Protocol endpoint, for example `--devtools-port ... --terminal-command ...`.
-- A running `local-sync-server.js` process does not pick up code changes. If behavior on port `12525` must change, the user-owned process has to be restarted intentionally.
-- Reuse the headless helpers in `/tmp/pwbb` if they already exist:
-  - `run_bb_command.mjs`
-  - `run_bb_multi.mjs`
-  - `run_bb_suite.mjs`
-- Run Bitburner headless validations strictly one at a time against a single Remote API port.
-- Do not parallelize headless game sessions against the same Remote API connection.
-- A websocket `409` from the Remote API is usually a test harness conflict, not a script bug.
-- If a headless run says a script does not exist on `home`, first suspect Remote API/session conflicts before changing code.
-- For Node-only helpers and CLI tools, use `node --check` or a direct CLI invocation instead of booting the game.
-
-## Validation Heuristics
-
-- Distinguish real compatibility bugs from normal game-state limitations on a fresh save.
-- Common non-bugs during fresh-save validation:
-  - Missing SF4 / singularity access
-  - Missing SF7 / not being in BN7 for bladeburner automation
-  - Missing BN10 access for sleeves
-  - Missing TIX / 4S API
-  - Not enough travel money
-  - Not enough RAM to run temp helper scripts
-- If a script is blocked only by game state, record that and do not “fix” it as a DEV compatibility issue.
-- If a runtime script depends on UI state, verify it in live headless runtime, not just with `node --check`.
-
-## Validation
-
-- After changing JS files, run `node --check` on each edited script.
-- Do not close runtime-affecting changes on theory alone. Verify them in live headless Bitburner runtime before the final response.
-- For orchestration/runtime changes, always include a separate final live check on a fresh 8GB home save, even if the main regression uses a later-game save.
-- If a behavior depends on runtime UI state, say so explicitly in the final response.
-- Keep verifier-only debug enablement isolated to the verifier path; do not globally enable infiltration debug logs for live gameplay.
-- Infiltration dev-console diagnostics must stay opt-in: use `work-for-factions.js --infiltration-debug`, `infiltration-runner.js --debug`, or `infiltrate.js --debug`; normal automation should launch `infiltrate.js --quiet` without console status spam.
-- If changing `work-for-factions.js`, `autopilot.js`, or other orchestration scripts, prefer at least one live headless run that reaches the touched path.
-
-## Known Fresh-Save Runtime Outcomes
-
-- `casino.js` may fail only because the player lacks the minimum money needed to travel to the casino.
-- Casino automation must not intentionally earn more than $10b from `sinceInstall.casino`. `autopilot.js` should treat the casino bootstrap as complete at that cap, and game scripts such as `casino-roulette.js` / `casino-blackjack.js` should cap per-round bets so a likely win does not cross it.
-- `autopilot.js` early low-RAM casino handoff must respect the same practical skip gates as the normal casino path. Do not launch casino when `sinceInstall.casino` already reached the bounded cap or current cash/net worth is already at least the casino cap, because the bounded casino run is no longer useful.
-- Casino kickout detection must close blocking faction invitation modals such as `Decide later` before treating a missing round result as a real timeout; the game's "Alright cheater get out of here" modal can be hidden behind other UI.
-- Casino completion state must survive `ns.spawn(autopilot.js)` handoffs. Casino scripts should write a current-augmentation completion marker, and `autopilot.js` should read it before launching casino again.
-- `ascend.js` is safe to run without `--reset` / `--install-augmentations`; by default it should not perform a reset.
-- `crime.js`, `stanek.js`, and `stanek.js.create.js` may encounter temp-helper RAM limits on low-RAM saves.
-
-## Files of Interest
-
-- `work-for-factions.js`: faction progression, infiltration orchestration, crime/training flow
-- `infiltration-runner.js`: one-shot infiltration executor with explicit args
-- `faction-manager.js`: augmentation affordability/purchase/status output
-- `autopilot.js`: top-level orchestration and install decisions
-- `daemon.js`: orchestration launcher/helper scheduler. All non-hacking script launches stay here, and it must launch `hack.js` as a separate Netscript process, not import it or duplicate the hacking scheduler.
-- `hack.js`: dedicated hacking/prep/targeting entrypoint. It should run the hacking process by default and must not launch helper/periodic automation.
-- Rooting servers and port-cracker state such as `updatePortCrackers` belong in `hack.js`, not `daemon.js`.
-- `daemon.js` should forward only hacking-relevant flags to `hack.js`. Do not keep daemon orchestration flags in `hack.js` merely to tolerate raw `ns.args` passthrough.
-- Do not keep stock-manipulation mode in `hack.js`. If stock orchestration is reintroduced, keep it outside the dedicated hacking runner and pass only explicit low-level scheduling inputs.
-- Do not keep `use-hacknet-nodes` / `use-hacknet-servers` mode in `hack.js`. The dedicated hacking runner should avoid consuming hacknet server RAM by default.
-- Do not keep `share` / `no-share` / share-fill scheduling in `hack.js`. The dedicated hacking runner should not launch faction-reputation sharing work.
-
-## Original source code of the game
-- `../bitburner-src`: all sources to build/test the scripts and game itself
-- `nix develop`: to run and test the game
+- Do not close runtime-affecting changes on theory alone. Verify them in live runtime against `../bitburner-src` before the final response; use headless Chromium/Playwright for UI/runtime behavior when possible.
+- Start game dev server from `../bitburner-src` with `npm run start:dev`. Start a separate sync bridge from this repo with `node local-sync-server.js --source-root /Volumes/SRC/bitburner-scripts --port 12526`.
+- Never kill or reuse the user-owned `ws://127.0.0.1:12525` Remote API bridge. Use another port such as `12526`.
+- Bitburner Remote API is file-only; `local-sync-server.js` must not pretend it can run scripts through that WebSocket. Script-free execution needs a separate CDP endpoint such as `--devtools-port ... --terminal-command ...`. A running `local-sync-server.js` does not pick up code changes.
+- Reuse `/tmp/pwbb` helpers if present: `run_bb_command.mjs`, `run_bb_multi.mjs`, `run_bb_suite.mjs`.
+- Run headless validations one at a time per Remote API port. A websocket `409` usually means harness conflict; "script does not exist on home" often means Remote API/session conflict before code bug.
+- Distinguish compatibility bugs from fresh-save limits: missing SF4/Singularity, SF7/BN7 Bladeburner, BN10 sleeves, TIX/4S API, travel money, or helper RAM. `casino.js` may fail only because travel money is missing; `crime.js`, `stanek.js`, and `stanek.js.create.js` may hit helper RAM limits.
+- For orchestration/runtime changes, always include a separate final fresh 8GB home live check, even if the main regression uses a later-game save. If behavior depends on UI state, say so and verify in live headless runtime.
+- Keep verifier-only debug isolated. Infiltration diagnostics remain opt-in via `work-for-factions.js --infiltration-debug`, `infiltration-runner.js --debug`, or `infiltrate.js --debug`; normal automation launches `infiltrate.js --quiet`.
+- Files of interest: `work-for-factions.js` (faction/infiltration/training), `infiltration-runner.js` (one-shot executor), `faction-manager.js` (augs/purchase/install/status), `autopilot.js` (top-level handoff), `daemon.js` (managed launcher), `hack.js` (hacking runner), `../bitburner-src` (game source; use `nix develop` as needed).
