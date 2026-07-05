@@ -11,9 +11,10 @@ export async function main(ns) {
     const targets = [
         { file: "stats.js", args: [] },
         { file: "corporation.js", args: [] },
-        { file: "hack.js", args: ["--money-focus"] },
+        { file: "stockmaster.js", args: [] },
         { file: "darknet.js", args: [""] },
         { file: "contractors.js", args: [""] },
+        { file: "hack.js", args: ["--money-focus"] },
     ];
 
     // Helper to check if a script with the exact argument list is already running.
