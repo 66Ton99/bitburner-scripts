@@ -22,7 +22,7 @@ const argsSchema = [
     ['money-focus-min-batches', 400], // Rolling lookahead cycles for --money-focus; longer queues did not improve stabilized realized income.
     ['money-focus-initial-batches', 400], // Limit the initial per-target burst; the rolling top-up fills the remaining lookahead gradually.
     ['money-focus-max-top-up-batches-per-target', 50], // Bound each target's refill work per coordinator pass.
-    ['money-focus-spare-xp-utilization', 0.98], // Fill otherwise-idle RAM with harmless weaken XP after all money pipelines are healthy.
+    ['money-focus-spare-xp-utilization', 0.90], // Fill otherwise-idle RAM with harmless weaken XP after all money pipelines are healthy.
     ['preserve-hacknet-servers', false], // Keep Hacknet server RAM unused to preserve hash production, even in --money-focus.
 
     ['reserved-ram', 32], // Keep this much home RAM free when scheduling hack/grow/weaken cycles on home.
