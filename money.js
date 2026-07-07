@@ -14,7 +14,8 @@ export async function main(ns) {
         { file: "stockmaster.js", args: [] },
         { file: "darknet.js", args: [""] },
         { file: "contractors.js", args: [""] },
-        { file: "hack.js", args: ["--money-focus"] },
+        { file: "gangs.js", args: [""] },
+        { file: "hack.js", args: ["--money-focus", "--preserve-hacknet-servers", "--money-focus-spare-xp-utilization", "0.97"] },
     ];
 
     // Helper to check if a script with the exact argument list is already running.

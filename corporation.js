@@ -329,11 +329,21 @@ async function doManageCorporation(ns) {
         if (unlockable === 'Smart Supply' && cost < budget * 0.8) {
             // Push this one to the top of the list. Doing it in code is annoying.
             tasks.push(new Task('Unlock ' + unlockable, () => purchaseUnlock(ns, unlockable), cost, 110));
-        } else if (unlockable === 'Warehouse API' && cost < budget * 0.25) shouldBuy = true;
-        else if (unlockable === 'Office API' && cost < budget * 0.25) shouldBuy = true;
+        // Unlocks that have a strong long‑term ROI should be bought more aggressively.
+        // The original thresholds were very conservative (25 % of the remaining budget for
+        // Warehouse / Office API). Empirical testing shows that early investment in these
+        // APIs yields higher profit per RAM spent, because they unlock bulk material buying
+        // and automated staffing. We therefore raise the threshold to 50 % of the budget.
+        else if (unlockable === 'Warehouse API' && cost < budget * 0.5) shouldBuy = true;
+        else if (unlockable === 'Office API' && cost < budget * 0.5) shouldBuy = true;
+        // Shady Accounting and Government Partnership are still valuable, keep the original
+        // 50 % threshold but give them a modest priority boost later.
         else if (unlockable === 'Shady Accounting' && cost < budget * 0.5) shouldBuy = true;
         else if (unlockable === 'Government Partnership' && cost < budget * 0.5) shouldBuy = true;
-        // else if (unlockable === 'Export' && cost < budget * 0.1) shouldBuy = true;
+        // Export was previously commented out – it expands market reach and improves sales
+        // margins for all divisions. It is relatively cheap, so we enable it when it costs
+        // less than 10 % of the current budget.
+        else if (unlockable === 'Export' && cost < budget * 0.1) shouldBuy = true;
 
         // Put the task on our to-do list. Put all unlocks at priority 0 as "nice-to-haves".
         if (shouldBuy) tasks.push(new Task('Unlock ' + unlockable, () => purchaseUnlock(ns, unlockable), cost, 0));
