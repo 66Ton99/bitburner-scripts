@@ -329,6 +329,7 @@ async function doManageCorporation(ns) {
         if (unlockable === 'Smart Supply' && cost < budget * 0.8) {
             // Push this one to the top of the list. Doing it in code is annoying.
             tasks.push(new Task('Unlock ' + unlockable, () => purchaseUnlock(ns, unlockable), cost, 110));
+        }
         // Unlocks that have a strong long‑term ROI should be bought more aggressively.
         // The original thresholds were very conservative (25 % of the remaining budget for
         // Warehouse / Office API). Empirical testing shows that early investment in these
@@ -370,6 +371,48 @@ async function doManageCorporation(ns) {
         } else if (cost < budget * 0.01) {
             // Upgrade other stuff too, as long as it's cheap compared to our budget.
             tasks.push(new Task(`Upgrading '${upgrade}' to level ${nextLevel}`, () => ns.corporation.levelUpgrade(upgrade), cost, 1));
+        }
+    }
+
+    // ---------------------------------------------------------------------
+    // Expansion of existing divisions – prioritize long‑term profit.
+    // ---------------------------------------------------------------------
+    // For each division we already own, evaluate missing cities.  Expanding
+    // to a new city costs the same amount (officeInitialCost) regardless of
+    // division, but the profit impact varies.  We approximate long‑term profit
+    // by the division's current revenue – divisions that already generate
+    // more money are likely to benefit most from a new market.
+    //
+    // We create tasks for each affordable city expansion, giving a higher
+    // priority to divisions with larger revenue.  The priority is scaled to the
+    // proportion of the division's revenue relative to the highest‑earning
+    // division, then multiplied by 100 (so priority is in the range 0‑100).
+    // This keeps the existing task ordering logic intact while ensuring that
+    // expansion decisions are driven by long‑term profit potential.
+    const divisionRevenues = getCorpDivisions(ns).map(d => d.revenue || 0);
+    const maxRevenue = Math.max(...divisionRevenues, 1); // avoid division by zero
+    const expansionCost = getCorpConstants(ns).officeInitialCost;
+
+    for (const division of getCorpDivisions(ns)) {
+        // Determine which cities we don't have yet.
+        const missing = cities.filter(city => !division.cities.includes(city));
+        if (!missing.length) continue;
+        // Only consider expansion if we can afford at least one city.  The
+        // threshold is more generous than the per‑division heuristic earlier –
+        // we allow up to 40 % of the remaining budget for a single city if it
+        // promises high profit.
+        if (expansionCost > budget * 0.4) continue;
+        // Compute a priority based on revenue share.
+        const revenueShare = (division.revenue || 0) / maxRevenue;
+        const basePriority = Math.round(revenueShare * 100);
+        // Create a task for each missing city (usually only a few).
+        for (const city of missing) {
+            tasks.push(new Task(
+                `Expand ${division.name} to ${city}`,
+                () => doExpandCity(ns, division.name, city),
+                expansionCost,
+                basePriority + 50 // boost above generic upgrades
+            ));
         }
     }
     /**
