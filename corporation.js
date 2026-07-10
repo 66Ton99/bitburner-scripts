@@ -28,6 +28,7 @@ const upgrades = ['Smart Factories', 'Smart Storage', 'Wilson Analytics', 'Nuopt
 const cities = ['Aevum', 'Chongqing', 'Sector-12', 'New Tokyo', 'Ishima', 'Volhaven'];
 const hqCity = 'Aevum'; // Our production industries will need a headquarters. It doesn't matter which city we use, AFAICT.
 const jobs = ['Operations', 'Engineer', 'Research & Development', 'Management', 'Business']; // Interns are deliberately excluded from production assignments.
+const clearableJobs = ['Intern', ...jobs];
 const industryAliases = { Agriculture: 'Agriculture', RealEstate: 'Real Estate', Computer: 'Computer Hardware', Food: 'Restaurant', Utilities: 'Water Utilities' };
 const employeeWellnessThreshold = 0.9995;
 const commonResearchPlan = [
@@ -1172,7 +1173,7 @@ async function fillOpenPositions(ns, divisionName, cityName) {
         const assignments = getEmployeeAssignments(office.numEmployees, isProductHeadquarters);
 
         // Release current assignments first. In Bitburner 3.x, increases can only consume Unassigned employees.
-        for (const job of jobs)
+        for (const job of clearableJobs)
             await ns.corporation.setJobAssignment(divisionName, cityName, job, 0);
         for (const job of jobs)
             await ns.corporation.setJobAssignment(divisionName, cityName, job, assignments[job]);
