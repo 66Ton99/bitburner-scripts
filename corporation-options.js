@@ -8,6 +8,9 @@ export const argsSchema = [
     ['issue-shares', 0], // If we go public, how many shares should we issue?
     ['can-issue-new-shares', true], // After IPO, issue new shares when growth is capital-starved.
     ['issue-new-shares-min-ownership', 0.51], // Do not dilute CEO ownership below this fraction.
+    ['can-buy-back-shares', false], // After IPO, use player cash to buy back outstanding public shares.
+    ['buyback-shares-target-ownership', 0.51], // Stop buybacks once CEO ownership reaches this fraction.
+    ['buyback-shares-budget-fraction', 0.25], // Spend at most this fraction of current player cash per buyback pass.
     ['can-sell-divisions', false], // Risky: sell only clearly undeveloped weak divisions when the division cap blocks a better industry.
     ['can-spend-hashes', true], // Can we spend hacknet hashes (assuming we have them)?
     ['once', false], // Run once, then quit, instead of going into a loop.

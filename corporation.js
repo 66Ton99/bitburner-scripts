@@ -16,7 +16,7 @@ const _ = globalThis._; // lodash
 /** @typedef {import('./index.js').CorporationInfo} CorporationInfo */
 
 // Global constants
-const version = '2026-07-13-quiet-max-products.1';
+const version = '2026-07-14-share-buybacks.1';
 const initialProductDivisionCount = 2; // One material division to bootstrap, then one product division to scale funding.
 const minimumProductInvestment = 2e9;
 
@@ -701,7 +701,9 @@ async function tryRaiseCapital(ns) {
     } else {
         // We're public, so we can't be raising capital.
         raisingCapital = 0;
-        tryIssueNewSharesForGrowth(ns);
+        const issuedFunds = tryIssueNewSharesForGrowth(ns);
+        if (issuedFunds > 0) myCorporation = ns.corporation.getCorporation();
+        tryBuyBackShares(ns);
     }
 }
 
@@ -736,6 +738,42 @@ function tryIssueNewSharesForGrowth(ns) {
         logOnce(ns, `WARNING: Failed to issue new shares: ${e}`);
         return 0;
     }
+}
+
+function tryBuyBackShares(ns) {
+    if (!options['can-buy-back-shares']) return 0;
+    if (!myCorporation.public) return 0;
+    if (!Number.isFinite(myCorporation.sharePrice) || myCorporation.sharePrice <= 0) return 0;
+    if ((myCorporation.issuedShares || 0) <= 0) return 0;
+
+    const targetOwnership = clamp(Number(options['buyback-shares-target-ownership']), 0, 1);
+    const currentOwnership = myCorporation.numShares / myCorporation.totalShares;
+    if (!Number.isFinite(targetOwnership) || targetOwnership <= 0 || currentOwnership >= targetOwnership) return 0;
+
+    const playerMoney = ns.getPlayer().money;
+    const budgetFraction = clamp(Number(options['buyback-shares-budget-fraction']), 0, 1);
+    const playerBudget = playerMoney * budgetFraction;
+    if (!Number.isFinite(playerBudget) || playerBudget <= 0) return 0;
+
+    const amount = getShareBuybackAmount(myCorporation, targetOwnership, playerBudget);
+    if (amount <= 0) {
+        if (verbose)
+            logOnce(ns, `INFO: Skipping Buyback Shares: ownership ${(currentOwnership * 100).toFixed(1)}%, ` +
+                `target ${(targetOwnership * 100).toFixed(1)}%, player budget ${mf(playerBudget)}.`);
+        return 0;
+    }
+
+    const estimatedCost = estimateShareBuybackCost(myCorporation, amount);
+    try {
+        if (ns.corporation.buyBackShares(amount)) {
+            log(ns, `SUCCESS: Bought back ${nf(amount)} shares for about ${mf(estimatedCost)}. ` +
+                `Ownership ${(currentOwnership * 100).toFixed(1)}% -> ${((myCorporation.numShares + amount) / myCorporation.totalShares * 100).toFixed(1)}%.`, 'success', true);
+            return estimatedCost;
+        }
+    } catch (e) {
+        logOnce(ns, `WARNING: Failed to buy back shares: ${e}`);
+    }
+    return 0;
 }
 
 function estimateDevelopmentFundingNeed(ns) {
@@ -876,12 +914,33 @@ function getNewShareIssueAmount(corporation, fundingGap, minOwnership) {
     return Math.min(maxShares, neededShares);
 }
 
+function getShareBuybackAmount(corporation, targetOwnership, playerBudget) {
+    const neededShares = Math.ceil(Math.max(0, corporation.totalShares * targetOwnership - corporation.numShares));
+    const availableShares = Math.floor(Math.max(0, corporation.issuedShares || 0));
+    const affordableShares = Math.floor(Math.max(0, playerBudget / estimateShareBuybackCostPerShare(corporation)));
+    return Math.min(neededShares, availableShares, affordableShares, 1e14);
+}
+
+function estimateShareBuybackCost(corporation, shares) {
+    return shares * estimateShareBuybackCostPerShare(corporation);
+}
+
+function estimateShareBuybackCostPerShare(corporation) {
+    // The game charges a 10% premium and raises price while buying. Keep a small safety margin.
+    return corporation.sharePrice * 1.15;
+}
+
 function roundSharesDown(shares, lotSize) {
     return Math.floor(Math.max(0, shares) / lotSize) * lotSize;
 }
 
 function roundSharesUp(shares, lotSize) {
     return Math.ceil(Math.max(0, shares) / lotSize) * lotSize;
+}
+
+function clamp(value, min, max) {
+    if (!Number.isFinite(value)) return min;
+    return Math.min(max, Math.max(min, value));
 }
 
 /**
