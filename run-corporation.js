@@ -8,8 +8,9 @@ import { disableLogs, formatMoney, formatRam, scanAllServers } from './helpers.j
  * @param {NS} ns
  */
 export async function main(ns) {
-    const version = '2026-05-18-corp-preflight-net-worth.1';
+    const version = '2026-07-13-no-tail-windows-fix.1';
     ns.print(`run-corporation.js version ${version}`);
+    const options = ns.flags(argsSchema);
     disableLogs(ns, ['getServerMaxRam', 'getServerUsedRam', 'scp', 'exec', 'write', 'read', 'sleep', 'ps']);
 	const scriptName = 'corporation.js';
 	const scriptDependencies = ['helpers.js', 'corporation-options.js'];
@@ -41,7 +42,7 @@ export async function main(ns) {
                     ns.tprint(`ERROR: Failed to launch '${scriptName}' on '${hostname}' despite ${formatRam(freeRam)} free RAM.`);
                     continue;
                 }
-				if (!ns.args.includes("--no-tail-windows"))
+				if (!options['no-tail-windows'])
 					ns.ui.openTail(pid);
 				ns.exit();
 			}

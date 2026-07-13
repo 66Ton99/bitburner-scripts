@@ -16,7 +16,7 @@ const _ = globalThis._; // lodash
 /** @typedef {import('./index.js').CorporationInfo} CorporationInfo */
 
 // Global constants
-const version = '2026-07-13-product-foundation-priority.1';
+const version = '2026-07-13-quiet-max-products.1';
 const initialProductDivisionCount = 2; // One material division to bootstrap, then one product division to scale funding.
 const minimumProductInvestment = 2e9;
 
@@ -169,6 +169,10 @@ function getDivisionIndustryName(division) {
     return industryAliases[industryName] || industryName;
 }
 
+function getProductNamePrefix(division) {
+    return getDivisionIndustryName(division).replace(/[^A-Za-z0-9]/g, '');
+}
+
 function getIndustry(division) {
     const industryName = getDivisionIndustryName(division);
     const industry = industries.find((industry) => industry.name === industryName);
@@ -216,8 +220,18 @@ function getProduct(ns, divisionName, productName, city = hqCity) {
     return ns.corporation.getProduct(divisionName, city, productName);
 }
 
+function tryGetProduct(ns, divisionName, productName, city = hqCity) {
+    try {
+        return getProduct(ns, divisionName, productName, city);
+    } catch (err) {
+        logOnce(ns, `WARNING: Skipping unreadable product '${divisionName}/${productName}' in ${city}: ${err}`);
+        return null;
+    }
+}
+
 function getProductCityStats(ns, divisionName, productName, city) {
-    const product = getProduct(ns, divisionName, productName, city);
+    const product = tryGetProduct(ns, divisionName, productName, city);
+    if (!product) return { product: null, qty: 0, produced: 0, sold: 0 };
     return {
         product,
         qty: product.stored,
@@ -239,6 +253,8 @@ export async function main(ns) {
     log(ns, `corporation.js version ${version}`);
     options = ns.flags(argsSchema);
     verbose = options.verbose;
+    if (!options['no-tail-windows'])
+        ns.ui.openTail(ns.pid);
     dictSourceFiles = await getActiveSourceFiles(ns);
     currentNode = ns.getResetInfo().currentNode;
     const sf3Level = dictSourceFiles[3] || 0;
@@ -643,7 +659,9 @@ async function tryRaiseCapital(ns) {
                 }
                 if (offer.round >= 4 && industry.makesProducts) {
                     // Wait for the last product to finish researching
-                    let completeProducts = division.products.map((prodName) => getProduct(ns, division.name, prodName, getDivisionProductCity(division))).filter((prod) => prod.developmentProgress >= 100);
+                    let completeProducts = division.products
+                        .map((prodName) => tryGetProduct(ns, division.name, prodName, getDivisionProductCity(division)))
+                        .filter((prod) => prod && prod.developmentProgress >= 100);
                     if (completeProducts.length < maxProducts) {
                         let prefix = '    *';
                         if (!willAccept) prefix = '     ';
@@ -1095,20 +1113,28 @@ async function doManageDivision(ns, division, budget) {
     // If this is a production industry, see if we should be researching a new product.
     if (industry.makesProducts) {
         const maxProducts = getMaxProducts(ns, division.name);
-        let products = division.products.map((p) => getProduct(ns, division.name, p, getDivisionProductCity(division)));
-        const developmentBacklog = products.length === 0
-            ? getFirstProductDevelopmentBacklog(ns, division)
-            : getCorporationDevelopmentBacklog(ns);
+        if (division.products.length === 0) {
+            const foundationSpent = await bootstrapFirstProductFoundation(ns, division, budget);
+            if (foundationSpent > 0) {
+                spent += foundationSpent;
+                budget -= foundationSpent;
+                myCorporation = ns.corporation.getCorporation();
+                division = ns.corporation.getDivision(division.name);
+            }
+        }
+        let products = division.products
+            .map((p) => tryGetProduct(ns, division.name, p, getDivisionProductCity(division)))
+            .filter(Boolean);
+        const developmentBacklog = getProductCreationBacklog(ns, division);
         if (developmentBacklog.length > 0) {
-            if (verbose)
-                log(ns, `Skipping product creation for ${division.name}; development backlog: ${developmentBacklog.slice(0, 4).join('; ')}.`);
+            logOnce(ns, `INFO: Skipping product creation for ${division.name}; development backlog: ${developmentBacklog.slice(0, 4).join('; ')}.`);
         } else {
             let progress = products.map((p) => p.developmentProgress).filter((cmp) => cmp < 100)[0];
             if (progress == undefined) progress = 100;
             if (verbose) log(ns, `Projects: ${products.length}/${maxProducts}. Current project: ${nf(progress)}% complete.`);
             if (progress === 100) {
                 // No product being researched. Consider creating a new one.
-                if (products.length < maxProducts) {
+                if (division.products.length < maxProducts) {
                     // We're not full, so go ahead.
                     const productSpend = createNewProduct(ns, division, budget);
                     spent += productSpend;
@@ -1271,6 +1297,31 @@ async function doManageDivision(ns, division, budget) {
     return spent;
 }
 
+async function bootstrapFirstProductFoundation(ns, division, budget) {
+    const productCity = getDivisionProductCity(division);
+    let spent = 0;
+    if (!division.cities.includes(productCity)) return 0;
+
+    if (!ns.corporation.hasWarehouse(division.name, productCity)) {
+        const cost = getCorpConstants(ns).warehouseInitialCost;
+        if (cost < myCorporation.funds) {
+            spent += await runTasks(ns, [
+                new Task(`Buy product warehouse ${division.name}/${productCity}`, () => ns.corporation.purchaseWarehouse(division.name, productCity), cost, 100),
+            ], Math.max(budget, cost), false);
+        } else {
+            logOnce(ns, `INFO: Skipping product creation for ${division.name}; product warehouse ${productCity} needs ${mf(cost)}, funds ${mf(myCorporation.funds)}.`);
+        }
+    }
+
+    let office = ns.corporation.getOffice(division.name, productCity);
+    if (office.size > office.numEmployees) {
+        const hired = await fillOpenPositions(ns, division.name, productCity);
+        if (hired > 0)
+            log(ns, `Hired ${hired} product employee(s) for ${division.name}/${productCity}.`);
+    }
+    return spent;
+}
+
 function getMissingWarehouseCities(ns, division) {
     return division.cities.filter((city) => {
         try {
@@ -1378,6 +1429,10 @@ function getCorporationDevelopmentBacklog(ns) {
 }
 
 function getFirstProductDevelopmentBacklog(ns, division) {
+    return getProductCreationBacklog(ns, division);
+}
+
+function getProductCreationBacklog(ns, division) {
     if (!hasUnlock(ns, 'Office API') || !hasUnlock(ns, 'Warehouse API')) return [];
     const productCity = getDivisionProductCity(division);
     const backlog = [];
@@ -1425,7 +1480,14 @@ function getReservedWarehouseSpace(ns, industry, division, city) {
     }
 
     if (industry.makesProducts) {
-        const activeProductSlots = Math.max(division.products.length, division.products.some((productName) => getProduct(ns, division.name, productName, getDivisionProductCity(division)).developmentProgress < 100) ? 1 : 0);
+        const readableProducts = division.products
+            .map((productName) => tryGetProduct(ns, division.name, productName, getDivisionProductCity(division)))
+            .filter(Boolean);
+        const hasUnreadableProducts = readableProducts.length < division.products.length;
+        const activeProductSlots = Math.max(
+            division.products.length,
+            readableProducts.some((product) => product.developmentProgress < 100) || hasUnreadableProducts ? 1 : 0,
+        );
         warehouseSpaceRequiredForCycle += activeProductSlots * maxProd * rawMaterialSize;
     }
 
@@ -1487,16 +1549,23 @@ function createNewProduct(ns, division, availableBudget = Infinity) {
             wantToSpend = productBudgetCap;
         }
     }
-    let productname = `${getDivisionIndustryName(division)}-${Math.log10(wantToSpend).toFixed(2)}`;
+    let productname = `${getProductNamePrefix(division)}-${Math.log10(wantToSpend).toFixed(2)}`;
     try {
         ns.corporation.makeProduct(division.name, getDivisionProductCity(division), productname, wantToSpend / 2, wantToSpend / 2);
         log(ns, `Creating new product '${productname}' for ${mf(wantToSpend)}.`, 'info', true);
         spent += wantToSpend;
         extraReserve = 0;
     } catch (e) {
+        const errorMessage = String(e);
+        if (errorMessage.includes('already at the max products')) {
+            extraReserve = 0;
+            if (verbose) log(ns, `Skipping product creation for ${division.name}: product slots are full.`);
+            return spent;
+        }
         // Product reserves are soft; huge reserves can freeze office and warehouse catch-up.
         const reserveCap = Math.max(minimumProductInvestment, myCorporation.funds * 0.25);
         extraReserve = Math.min(wantToSpend, reserveCap);
+        log(ns, `WARNING: Failed to create product for ${division.name}: ${e}`);
         log(ns, `Reserving budget of ${mf(extraReserve)} for next product.`);
     }
     return spent;
@@ -1676,7 +1745,8 @@ async function doPriceDiscovery(ns) {
                 if (verbose) log(ns, `Skipping price discovery for ${division.name}/${productName}: product city '${productCity}' has no warehouse yet.`);
                 continue;
             }
-            const product = getProduct(ns, division.name, productName, productCity);
+            const product = tryGetProduct(ns, division.name, productName, productCity);
+            if (!product) continue;
             if (product.developmentProgress < 100) continue;
             let sPrice = `${product.desiredSellPrice}`;
             // sPrice ought to be of the form 'MP * 123.45'. If not, we should use the price of the last product we calculated.
@@ -1780,7 +1850,8 @@ function logProductRevenueStatus(ns, division, warehouseCities) {
             logOnce(ns, `INFO: ${division.name}/${productName} has no revenue: product city '${productCity}' has no warehouse.`);
             continue;
         }
-        const product = getProduct(ns, division.name, productName, productCity);
+        const product = tryGetProduct(ns, division.name, productName, productCity);
+        if (!product) continue;
         if (product.developmentProgress < 100) {
             const progressBucket = Math.floor(product.developmentProgress / 5) * 5;
             logOnce(ns, `INFO: ${division.name}/${productName} has no revenue yet: product development is about ${progressBucket}% complete.`);
