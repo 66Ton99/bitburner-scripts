@@ -31,6 +31,9 @@ const jobs = ['Operations', 'Engineer', 'Research & Development', 'Management', 
 const clearableJobs = ['Intern', ...jobs];
 const industryAliases = { Agriculture: 'Agriculture', RealEstate: 'Real Estate', Computer: 'Computer Hardware', Food: 'Restaurant', Utilities: 'Water Utilities' };
 const employeeWellnessThreshold = 0.9995;
+const revenueGrowthSoftcap = 1e21;
+const lateGameCatchUpOfficeSize = 180;
+const lateGameOfficeSizeLimit = 1000;
 const commonResearchPlan = [
     'Hi-Tech R&D Laboratory',
     'AutoBrew',
@@ -125,6 +128,7 @@ let verbose;
 let raisingCapital = 0; // Used to flag that we are trying to raise private funding
 let extraReserve = 0; // Used when we're saving to fund a new product.
 let fillSpaceQueue = []; // Flag these offices as needing workers assigned to roles.
+let lateGameGrowthLimited = false;
 
 function getCorpDivisions(ns) {
     return myCorporation.divisions.map((division) => (typeof division === 'string' ? ns.corporation.getDivision(division) : division));
@@ -197,7 +201,7 @@ export function autocomplete(data, _) {
 /** @param {NS} ns **/
 export async function main(ns) {
     // Pull in any information we only need at startup.
-    const version = '2026-06-29-profit-growth.1';
+    const version = '2026-07-13-development-backlog.1';
     ns.print(`corporation.js version ${version}`);
     options = ns.flags(argsSchema);
     verbose = options.verbose;
@@ -293,6 +297,11 @@ async function doManageCorporation(ns) {
         bootstrapEmployeeAutomationWithHashes(ns);
     myCorporation = ns.corporation.getCorporation();
 
+    if (extraReserve > 0 && corporationHasDevelopmentBacklog(ns)) {
+        log(ns, `Clearing product reserve ${mf(extraReserve)} while existing divisions still need city, warehouse, or office catch-up.`);
+        extraReserve = 0;
+    }
+
     // Morale and energy directly multiply employee productivity. Restore them before discretionary spending,
     // otherwise an unhealthy corporation can stay unprofitable and never qualify for its next funding round.
     const wellnessBudget = Math.max(0, myCorporation.funds - options['reserve-amount'] - extraReserve);
@@ -304,11 +313,15 @@ async function doManageCorporation(ns) {
 
     myCorporation = ns.corporation.getCorporation();
     let budget = myCorporation.funds - options['reserve-amount'] - extraReserve;
-    // If we're making more than $1 sextillion / sec, we need to stop. The game gets slow if we start employing too many people.
-    if (myCorporation.revenue > 1e21) budget = 0;
+    // Past this point the game can slow down if we keep growing every office forever.
+    // Keep a real budget so existing divisions can still catch up in every city, but
+    // gate unbounded office growth inside doManageDivision().
+    lateGameGrowthLimited = myCorporation.revenue > revenueGrowthSoftcap;
     budget = Math.max(0, budget);
     if (verbose) log(ns, ``);
     if (verbose) log(ns, `Working with a corporate budget of ${mf(budget)}`);
+    if (verbose && lateGameGrowthLimited)
+        log(ns, `Late-game growth limit active: catching up underdeveloped city offices without unbounded office growth.`);
 
     // Let's figure out all of the things we'd like to do, before we commit to anything.
     let tasks = [];
@@ -797,6 +810,16 @@ async function doManageDivision(ns, division, budget) {
     division = ns.corporation.getDivision(division.name);
     let hasMarketTA2 = ns.corporation.hasResearched(division.name, 'Market-TA.II');
 
+    // Warehouses are foundational for both material and product divisions. Buy
+    // missing warehouses before products or ads can consume the whole budget.
+    const warehouseBootstrapSpent = await buyMissingDivisionWarehouses(ns, division, budget);
+    if (warehouseBootstrapSpent > 0) {
+        spent += warehouseBootstrapSpent;
+        budget -= warehouseBootstrapSpent;
+        myCorporation = ns.corporation.getCorporation();
+        division = ns.corporation.getDivision(division.name);
+    }
+
     // Division wide tasks
     // Can we buy advertising? This is how we go exponential in our production industry.
     let adCount = ns.corporation.getHireAdVertCount(division.name);
@@ -823,51 +846,64 @@ async function doManageDivision(ns, division, budget) {
 
     // If this is a production industry, see if we should be researching a new product.
     if (industry.makesProducts) {
-        const maxProducts = getMaxProducts(ns, division.name);
-        let products = division.products.map((p) => getProduct(ns, division.name, p, getDivisionProductCity(division)));
-        let progress = products.map((p) => p.developmentProgress).filter((cmp) => cmp < 100)[0];
-        if (progress == undefined) progress = 100;
-        if (verbose) log(ns, `Projects: ${products.length}/${maxProducts}. Current project: ${nf(progress)}% complete.`);
-        if (progress === 100) {
-            // No product being researched. Consider creating a new one.
-            if (products.length < maxProducts) {
-                // We're not full, so go ahead.
-                const productSpend = createNewProduct(ns, division);
-                spent += productSpend;
-                budget -= productSpend;
-            } // Discontinue an existing product for a new one if we're not raising capital.
-            else {
-                // log(ns, `Considering creating a new product. rC: ${raisingCapital} eR: ${mf(extraReserve)}`);
-                if (raisingCapital === 0) {
-                    if (extraReserve > 0 && myCorporation.funds > extraReserve) {
-                        // We have enough money saved up. Time to ditch the product with the lowest budget.
-                        products.sort((a, b) => budgetFromProductName(a.name) - budgetFromProductName(b.name));
-                        let lowBudgetProduct = products[0];
-                        ns.corporation.discontinueProduct(division.name, lowBudgetProduct.name);
-                        myCorporation = ns.corporation.getCorporation();
-                    }
-                    // Try to create the Product. If it fails, it will set a reserve for us.
+        const developmentBacklog = getCorporationDevelopmentBacklog(ns);
+        if (developmentBacklog.length > 0) {
+            if (verbose)
+                log(ns, `Skipping product creation for ${division.name}; development backlog: ${developmentBacklog.slice(0, 4).join('; ')}.`);
+        } else {
+            const maxProducts = getMaxProducts(ns, division.name);
+            let products = division.products.map((p) => getProduct(ns, division.name, p, getDivisionProductCity(division)));
+            let progress = products.map((p) => p.developmentProgress).filter((cmp) => cmp < 100)[0];
+            if (progress == undefined) progress = 100;
+            if (verbose) log(ns, `Projects: ${products.length}/${maxProducts}. Current project: ${nf(progress)}% complete.`);
+            if (progress === 100) {
+                // No product being researched. Consider creating a new one.
+                if (products.length < maxProducts) {
+                    // We're not full, so go ahead.
                     const productSpend = createNewProduct(ns, division);
                     spent += productSpend;
                     budget -= productSpend;
+                } // Discontinue an existing product for a new one if we're not raising capital.
+                else {
+                    // log(ns, `Considering creating a new product. rC: ${raisingCapital} eR: ${mf(extraReserve)}`);
+                    if (raisingCapital === 0) {
+                        if (extraReserve > 0 && myCorporation.funds > extraReserve) {
+                            // We have enough money saved up. Time to ditch the product with the lowest budget.
+                            products.sort((a, b) => budgetFromProductName(a.name) - budgetFromProductName(b.name));
+                            let lowBudgetProduct = products[0];
+                            ns.corporation.discontinueProduct(division.name, lowBudgetProduct.name);
+                            myCorporation = ns.corporation.getCorporation();
+                        }
+                        // Try to create the Product. If it fails, it will set a reserve for us.
+                        const productSpend = createNewProduct(ns, division);
+                        spent += productSpend;
+                        budget -= productSpend;
+                    }
                 }
             }
         }
     }
 
     // Per city tasks.
+    const catchUpOfficeSize = getDivisionCatchUpOfficeSize(ns, division);
     for (const city of division.cities) {
         // Can we expand any of our offices for more employees?
         let officeSize = ns.corporation.getOffice(division.name, city).size;
         let seats = 15; // Grow by officeSize when small, then by 15
         seats = Math.min(seats, officeSize);
-        let cost = ns.corporation.getOfficeSizeUpgradeCost(division.name, city, seats);
-        if (industry.makesProducts && city === hqCity && cost < budget * 0.9) {
-            tasks.push(new Task(`Buy space for ${seats} more employees of ${division.name}/${city}`, () => upgradeOfficeSize(ns, division.name, city, seats), cost, 70));
-        } else if (industry.makesProducts && city !== hqCity && cost < budget * 0.1) {
-            tasks.push(new Task(`Buy space for ${seats} more employees of ${division.name}/${city}`, () => upgradeOfficeSize(ns, division.name, city, seats), cost, 70));
-        } else if (!industry.makesProducts && cost < budget * 0.4) {
-            tasks.push(new Task(`Buy space for ${seats} more employees of ${division.name}/${city}`, () => upgradeOfficeSize(ns, division.name, city, seats), cost, 70));
+        if (lateGameGrowthLimited) seats = Math.min(seats, catchUpOfficeSize - officeSize);
+        let cost;
+        if (seats <= 0) {
+            // This city is already caught up enough for late-game maintenance.
+        } else {
+            cost = ns.corporation.getOfficeSizeUpgradeCost(division.name, city, seats);
+            if (industry.makesProducts && city === hqCity && cost < budget * 0.9) {
+                tasks.push(new Task(`Buy space for ${seats} more employees of ${division.name}/${city}`, () => upgradeOfficeSize(ns, division.name, city, seats), cost, 70));
+            } else if (industry.makesProducts && city !== hqCity && cost < budget * 0.1) {
+                tasks.push(new Task(`Buy space for ${seats} more employees of ${division.name}/${city}`, () => upgradeOfficeSize(ns, division.name, city, seats), cost, 70));
+            } else if (!industry.makesProducts && cost < budget * 0.4) {
+                tasks.push(new Task(`Buy space for ${seats} more employees of ${division.name}/${city}`, () => upgradeOfficeSize(ns, division.name, city, seats), cost, 70));
+            }
         }
 
         // Can we expand our warehouse space?
@@ -984,6 +1020,63 @@ async function doManageDivision(ns, division, budget) {
     return spent;
 }
 
+function getMissingWarehouseCities(ns, division) {
+    return division.cities.filter((city) => {
+        try {
+            return !ns.corporation.hasWarehouse(division.name, city);
+        } catch {
+            return false;
+        }
+    });
+}
+
+async function buyMissingDivisionWarehouses(ns, division, budget) {
+    const missingWarehouseCities = getMissingWarehouseCities(ns, division);
+    if (missingWarehouseCities.length === 0) return 0;
+
+    const cost = getCorpConstants(ns).warehouseInitialCost;
+    const tasks = missingWarehouseCities.map((city) =>
+        new Task(`Buy warehouse ${division.name}/${city}`, () => ns.corporation.purchaseWarehouse(division.name, city), cost, 95));
+    return await runTasks(ns, tasks, budget);
+}
+
+function getDivisionCatchUpOfficeSize(ns, division) {
+    const officeSizes = division.cities.map((city) => ns.corporation.getOffice(division.name, city).size);
+    return Math.min(
+        lateGameOfficeSizeLimit,
+        Math.max(lateGameCatchUpOfficeSize, ...officeSizes),
+    );
+}
+
+function getOfficeCatchUpCities(ns, division) {
+    const catchUpOfficeSize = getDivisionCatchUpOfficeSize(ns, division);
+    return division.cities.filter((city) => ns.corporation.getOffice(division.name, city).size < catchUpOfficeSize);
+}
+
+function getCorporationDevelopmentBacklog(ns) {
+    if (!hasUnlock(ns, 'Office API') || !hasUnlock(ns, 'Warehouse API')) return [];
+
+    const backlog = [];
+    for (const division of getCorpDivisions(ns)) {
+        const missingCities = cities.filter((city) => !division.cities.includes(city));
+        if (missingCities.length > 0)
+            backlog.push(`${division.name} missing city ${missingCities[0]}`);
+
+        const missingWarehouseCities = getMissingWarehouseCities(ns, division);
+        if (missingWarehouseCities.length > 0)
+            backlog.push(`${division.name} missing warehouse ${missingWarehouseCities[0]}`);
+
+        const officeCatchUpCities = getOfficeCatchUpCities(ns, division);
+        if (officeCatchUpCities.length > 0)
+            backlog.push(`${division.name} office catch-up ${officeCatchUpCities[0]}`);
+    }
+    return backlog;
+}
+
+function corporationHasDevelopmentBacklog(ns) {
+    return getCorporationDevelopmentBacklog(ns).length > 0;
+}
+
 /**
  * How much space do we need to leave fee in this warehouse for a full cycle of production?
  * @param {NS} ns
@@ -1051,17 +1144,19 @@ function getMaximumProduction(ns, division, city) {
 function createNewProduct(ns, division) {
     let wantToSpend = minimumProductInvestment;
     let spent = 0;
-    let spentOnProducts = [];
-    try {
-        spentOnProducts = division.products
-            .map((p) => budgetFromProductName(p))
-            .sort((a, b) => a - b)
-            .reverse();
-    } catch (error) {}
-    if (spentOnProducts.length > 0) {
-        // If our products weren't named correctly default to assuming they were 2b, 4b, 8b...
-        wantToSpend = wantToSpend * Math.pow(2, spentOnProducts.length - 1);
-        wantToSpend = Math.max(spentOnProducts[0] * 2, wantToSpend, myCorporation.revenue * 100);
+    const spentOnProducts = division.products
+        .map((p) => budgetFromProductName(p))
+        .filter((budget) => Number.isFinite(budget) && budget > 0)
+        .sort((a, b) => b - a);
+    if (division.products.length > 0) {
+        const fallbackSpend = minimumProductInvestment * Math.pow(2, division.products.length - 1);
+        const previousSpend = spentOnProducts.length > 0 ? spentOnProducts[0] * 2 : 0;
+        const revenueSpend = Number.isFinite(myCorporation.revenue) && myCorporation.revenue > 0 ? myCorporation.revenue * 100 : 0;
+        wantToSpend = Math.max(previousSpend, fallbackSpend, revenueSpend, minimumProductInvestment);
+    }
+    if (!Number.isFinite(wantToSpend) || wantToSpend <= 0) {
+        log(ns, `WARNING: Product budget for ${division.name} was invalid; falling back to ${mf(minimumProductInvestment)}.`);
+        wantToSpend = minimumProductInvestment;
     }
     let productname = `${getDivisionIndustryName(division)}-${Math.log10(wantToSpend).toFixed(2)}`;
     try {
@@ -1499,7 +1594,7 @@ function budgetFromProductName(projectName) {
     let sExp = projectName.split('-')[1];
     let exp = Number.parseFloat(sExp);
     let budget = Math.pow(10, exp);
-    return budget;
+    return Number.isFinite(budget) ? budget : 0;
 }
 
 function getOfficeProductivity(office, forProduct = false) {
