@@ -7,9 +7,9 @@ Project guidance for coding agents in `bitburner-scripts`.
 - Reply to the user in Ukrainian. Keep responses concise and direct.
 - Prefer minimal, targeted patches; preserve the script-oriented Bitburner architecture and do not rewrite working subsystems for cleanup alone.
 - Verify behavior, state, and root cause from code or runtime evidence before changing anything. Favor pragmatic fixes over theoretical refactors.
-- Use `apply_patch` for file edits. After JS edits, run `node --check` on each edited script.
-- Update this file when a durable runtime incident or user preference creates a reusable rule; remove stale or contradictory guidance.
-- Add compatibility wrappers for Bitburner API changes. For dnet server details, probe `dnet.getServerDetails()` / `dnet.getServer()` before older `dnet.getServerAuthDetails()`.
+    - Use `apply_patch` for file edits. After JS edits, run `node --check` on each edited script.
+    - Update this file when a durable runtime incident or user preference creates a reusable rule; remove stale or contradictory guidance.
+    - Add compatibility wrappers for Bitburner API changes. For dnet server details, probe `dnet.getServerDetails()` / `dnet.getServer()` before older `dnet.getServerAuthDetails()`.
 - `getConfiguration()` must preserve explicit booleans: `--flag false` stays false.
 - Dev-console logs are for debugging only: emit while DevTools is detected open, default gap threshold `800`, configurable via `window.bbDevConsoleGapThreshold`. `run dev-console.js --status` must show version marker, outer/inner sizes, gaps, threshold, and active state.
 - Browser console helpers write to `window.console` first, then `globalThis.console`. Keep infiltration diagnostics behind explicit flags, keep `infiltrate.js` debug off by default, and never disable infiltration `logError`.
@@ -129,4 +129,16 @@ Project guidance for coding agents in `bitburner-scripts`.
 - Distinguish compatibility bugs from fresh-save limits: missing SF4/Singularity, SF7/BN7 Bladeburner, BN10 sleeves, TIX/4S API, travel money, or helper RAM. `casino.js` may fail only because travel money is missing; `crime.js`, `stanek.js`, and `stanek.js.create.js` may hit helper RAM limits.
 - For orchestration/runtime changes, always include a separate final fresh 8GB home live check, even if the main regression uses a later-game save. If behavior depends on UI state, say so and verify in live headless runtime.
 - Keep verifier-only debug isolated. Infiltration diagnostics remain opt-in via `work-for-factions.js --infiltration-debug`, `infiltration-runner.js --debug`, or `infiltrate.js --debug`; normal automation launches `infiltrate.js --quiet`.
-- Files of interest: `work-for-factions.js` (faction/infiltration/training), `infiltration-runner.js` (one-shot executor), `faction-manager.js` (augs/purchase/install/status), `autopilot.js` (top-level handoff), `daemon.js` (managed launcher), `hack.js` (hacking runner), `../bitburner-src` (game source; use `nix develop` as needed).
+    - Files of interest: `work-for-factions.js` (faction/infiltration/training), `infiltration-runner.js` (one-shot executor), `faction-manager.js` (augs/purchase/install/status), `autopilot.js` (top-level handoff), `daemon.js` (managed launcher), `hack.js` (hacking runner), `../bitburner-src` (game source; use `nix develop` as needed).
+
+## Test Execution
+
+The tests for `darknet-worker` are now located in a separate file `tests/darknet-worker.tests.js`.
+
+To run them, use the following command from the project root:
+
+```bash
+node -e "console.log(require('./darknet-worker.js').runSelfTest())"
+```
+
+The command will output an object in the format `{ total, passed, failures }`. If the `failures` array is empty, all tests passed successfully.
