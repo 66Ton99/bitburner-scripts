@@ -33,7 +33,23 @@ function runTests(buildCandidates) {
         ["Factori-Os divisible by 7 len2", { modelId: "Factori-Os", passwordHint: "The password is divisible by 7 ;)", passwordLength: 2 }, ["00", "07", "14"], actual =>
             actual.every(candidate => Number(candidate) % 7 === 0) && actual.includes("98") ? "" :
                 `expected divisible-by-7 candidates including 98, got ${JSON.stringify(actual.slice(0, 20))}`],
-        // ... (additional test cases omitted for brevity; they follow the same pattern as the original suite)
+        // Additional models for full coverage
+        // Models that currently have no static candidate lists; they are solved dynamically at runtime.
+        // The buildCandidates function returns an empty array for these, which is acceptable.
+        ["NIL", { modelId: "NIL" }, [], actual => actual.length === 0 ? "" : `NIL should return empty array`],
+        ["OpenWebAccessPoint", { modelId: "OpenWebAccessPoint", passwordLength: 3, passwordFormat: "numeric" }, [], actual => actual.length === 0 ? "" : `OpenWebAccessPoint should return empty array`],
+        ["2G_cellular", { modelId: "2G_cellular", passwordLength: 2, passwordFormat: "numeric" }, [], actual => actual.length === 0 ? "" : `2G_cellular should return empty array`],
+        ["RateMyPix.Auth", { modelId: "RateMyPix.Auth", passwordLength: 2, passwordFormat: "numeric" }, [], actual => actual.length === 0 ? "" : `RateMyPix.Auth should return empty array`],
+        ["DeepGreen", { modelId: "DeepGreen" }, [], actual => actual.length === 0 ? "" : `DeepGreen should return empty array`],
+        // Additional models that were previously omitted from the test suite.
+        ["TopPass", { modelId: "TopPass" }, ["123456", "password", "12345678"], actual =>
+            actual.slice(0, 3).join(",") === "123456,password,12345678" ? "" :
+                `TopPass candidates mismatch: ${actual.slice(0, 5).join(",")}`],
+        ["EuroZone Free", { modelId: "EuroZone Free" }, ["Austria", "Belgium", "Bulgaria"], actual =>
+            actual.slice(0, 3).join(",") === "Austria,Belgium,Bulgaria" ? "" :
+                `EuroZone Free candidates mismatch: ${actual.slice(0, 5).join(",")}`],
+        // Ensure that unknown models return an empty array.
+        ["UnknownModel", { modelId: "NonExistent" }, [], actual => actual.length === 0 ? "" : `expected empty for unknown model, got ${actual.length}`],
     ];
 
     const failures = [];
@@ -49,4 +65,3 @@ function runTests(buildCandidates) {
 }
 
 module.exports = { runTests };
-
