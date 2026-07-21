@@ -17,7 +17,7 @@ export const argsSchema = [
     ['interval', 10000], // Fixed delay in ms between management loops. 10000ms matches the normal corporation market cycle; 0 waits for START tick.
     ['mock', false], // Run the task assignment queue, but don't actually spend any money.
     ['price-discovery-only', false], // Don't do any auto-buying, just try to keep the sale price balanced as high as possible. (Emulating TA2 as best we can)
-    ['first', 'Refinery'], // First bootstrap division. Refinery is cheap and feeds later hardware/real-estate growth with Metal.
+    ['first', 'Agriculture'], // First bootstrap division. Refinery is cheap and feeds later hardware/real-estate growth with Metal.
     ['second', 'Tobacco'], // Product division to save for after round 3. Tobacco converts research into high-value products efficiently.
     ['no-tail-windows', false], // Suppress tail windows when launched by daemon.js default no-tail orchestration.
 ];

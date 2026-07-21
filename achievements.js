@@ -1,5 +1,9 @@
+import {instanceCount} from "./helpers";
+
 /** @param {NS} ns **/
 export async function main(ns) {
+    if (await instanceCount(ns) > 1) return; // Prevent multiple instances of this script from being started, even with different args.
+    
     eval("ns.bypass(document)"); // bypass
     ns.exploit(); // undocumented
     if (ns.rainbow("noodles")) {} // rainbow

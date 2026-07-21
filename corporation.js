@@ -16,7 +16,7 @@ const _ = globalThis._; // lodash
 /** @typedef {import('./index.js').CorporationInfo} CorporationInfo */
 
 // Global constants
-const version = '2026-07-14-share-buybacks.1';
+const version = '2026-07-16-funding-warehouse-guard.1';
 const initialProductDivisionCount = 2; // One material division to bootstrap, then one product division to scale funding.
 const minimumProductInvestment = 2e9;
 
@@ -635,6 +635,13 @@ async function tryRaiseCapital(ns) {
             for (const division of getCorpDivisions(ns)) {
                 let industry = getIndustry(division);
                 for (const city of division.cities) {
+                    if (!ns.corporation.hasWarehouse(division.name, city)) {
+                        let prefix = '    *';
+                        if (!willAccept) prefix = '     ';
+                        logOnce(ns, `${prefix}  Round ${offer.round} financing waiting on ${division.name}/${city} warehouse.`);
+                        willAccept = false;
+                        continue;
+                    }
                     let warehouse = ns.corporation.getWarehouse(division.name, city);
                     let warehouseSpaceRequiredForCycle = getReservedWarehouseSpace(ns, industry, division, city);
                     let warehouseSpaceAvailable = warehouse.size - warehouseSpaceRequiredForCycle - warehouse.sizeUsed;
